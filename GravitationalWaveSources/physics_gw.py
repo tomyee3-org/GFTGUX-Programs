@@ -21,11 +21,19 @@ M_sun = 1.988_92e30    # kg
 MPC_M = 3.085_677_581_49e22
 
 MAX_INSPIRAL_STEPS = 5_000_000
+MIN_INSPIRAL_STEPS = 50
+MAX_RINGDOWN_POINTS = 500_000
 
 
 def _require_finite(name, value):
+    """Return value as float after giving a consistent user-facing error."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite number; got {value!r}.") from exc
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite; got {value!r}.")
+    return value
 
 
 def chirp_mass(m1_kg, m2_kg):
@@ -111,12 +119,13 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     signal of a binary-neutron-star system.
     """
     # Validate scalar inputs before unit conversion.
-    for name, value in (
-        ("m1_msun", m1_msun), ("m2_msun", m2_msun), ("d_mpc", d_mpc),
-        ("dt", dt), ("f_start", f_start), ("n_ringdown_tau", n_ringdown_tau),
-        ("ringdown_pts", ringdown_pts),
-    ):
-        _require_finite(name, float(value))
+    m1_msun = _require_finite("m1_msun", m1_msun)
+    m2_msun = _require_finite("m2_msun", m2_msun)
+    d_mpc = _require_finite("d_mpc", d_mpc)
+    dt = _require_finite("dt", dt)
+    f_start = _require_finite("f_start", f_start)
+    n_ringdown_tau = _require_finite("n_ringdown_tau", n_ringdown_tau)
+    ringdown_pts = _require_finite("ringdown_pts", ringdown_pts)
 
     if m1_msun <= 0 or m2_msun <= 0:
         raise ValueError("Component masses must both be greater than zero.")
@@ -132,6 +141,11 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         raise ValueError("n_ringdown_tau must be a positive integer.")
     if int(ringdown_pts) != ringdown_pts or ringdown_pts < 2:
         raise ValueError("ringdown_pts must be an integer of at least 2.")
+    if ringdown_pts > MAX_RINGDOWN_POINTS:
+        raise ValueError(
+            f"ringdown_pts must not exceed {MAX_RINGDOWN_POINTS:,}; "
+            "reduce --rd_pts."
+        )
 
     n_ringdown_tau = int(n_ringdown_tau)
     ringdown_pts = int(ringdown_pts)
@@ -151,6 +165,24 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
 
     T_est = inspiral_time(f_start, f_isco_hz, Mc)
     estimated_steps = math.ceil(T_est / dt)
+
+    # A sampled waveform cannot represent the highest inspiral frequency if
+    # the timestep violates the Nyquist criterion at the ISCO cutoff.  This is
+    # only a necessary resolution condition; students should still check
+    # convergence with smaller timesteps when late-time phase matters.
+    nyquist_dt = 1.0 / (2.0 * f_isco_hz)
+    if dt >= nyquist_dt:
+        raise ValueError(
+            f"dt={dt:g} s is too large to sample the waveform at the ISCO "
+            f"frequency ({f_isco_hz:.3g} Hz); use dt < {nyquist_dt:.3g} s "
+            "and verify convergence with smaller timesteps."
+        )
+
+    if estimated_steps < MIN_INSPIRAL_STEPS:
+        raise ValueError(
+            f"dt is too large to resolve this inspiral (only about "
+            f"{estimated_steps} steps); reduce --dt."
+        )
     if estimated_steps > MAX_INSPIRAL_STEPS:
         raise ValueError(
             f"The requested run would require about {estimated_steps:,} inspiral "
@@ -180,9 +212,15 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
 
         f_next, phase_next = _rk4_frequency_phase_step(f, phase, dt, Mc)
         if not (np.isfinite(f_next) and np.isfinite(phase_next)):
-            raise RuntimeError("Numerical integration produced a non-finite state.")
+            raise RuntimeError(
+                "Numerical integration produced a non-finite state; "
+                "try a smaller --dt."
+            )
         if f_next <= f:
-            raise RuntimeError("Numerical integration failed to increase GW frequency.")
+            raise RuntimeError(
+                "Numerical integration failed to increase GW frequency; "
+                "try a smaller --dt."
+            )
 
         if f_next >= f_isco_hz:
             # Interpolate the final partial step to end exactly at the ISCO cutoff.

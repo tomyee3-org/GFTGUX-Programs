@@ -9,19 +9,35 @@ import physics_gw as phys
 import plot_gw as viz
 
 
+def _finite_number(name, value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite number.") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite.")
+    return value
+
+
 def _validate_plot_inputs(t_before, t_after, lw, dpi):
-    for name, value in (("lw", lw), ("dpi", dpi)):
-        if not math.isfinite(float(value)):
-            raise ValueError(f"{name} must be finite.")
+    lw = _finite_number("lw", lw)
+    dpi = _finite_number("dpi", dpi)
     if lw <= 0:
         raise ValueError("lw must be greater than zero.")
     if int(dpi) != dpi or dpi <= 0:
         raise ValueError("dpi must be a positive integer.")
 
+    normalized_zoom = []
     for name, value in (("t_before", t_before), ("t_after", t_after)):
-        if value is not None:
-            if not math.isfinite(float(value)) or value < 0:
+        if value is None:
+            normalized_zoom.append(None)
+        else:
+            value = _finite_number(name, value)
+            if value < 0:
                 raise ValueError(f"{name} must be None or a finite non-negative number.")
+            normalized_zoom.append(value)
+
+    return normalized_zoom[0], normalized_zoom[1], lw, int(dpi)
 
 
 def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
@@ -32,7 +48,9 @@ def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
         n_ringdown_tau=6, ringdown_pts=4000,
         dpi=150):
     """Run the full calculation, print diagnostics, and render the figure."""
-    _validate_plot_inputs(t_before, t_after, lw, dpi)
+    t_before, t_after, lw, dpi = _validate_plot_inputs(
+        t_before, t_after, lw, dpi
+    )
 
     print("[driver_gw] Integrating inspiral ...")
     result = phys.integrate_inspiral(
@@ -53,7 +71,7 @@ def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
         t_before=t_before,
         t_after=t_after,
         lw=lw,
-        dpi=int(dpi),
+        dpi=dpi,
     )
     return result
 

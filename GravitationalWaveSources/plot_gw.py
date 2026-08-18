@@ -85,7 +85,7 @@ def plot_inspiral(result, outdir=None,
     ax1.plot(t[valid_A], -A[valid_A], color=C_ENV, lw=0.9, ls="--")
     ax1.axvline(t_isco, **cutoff_kw)
     ax1.set_xlim(x_lo, x_hi)
-    ax1.set_ylabel("Strain scale $h(t)$")
+    ax1.set_ylabel("Strain scale $h(t)$ (dimensionless)")
     ax1.set_title("Illustrative gravitational-wave strain")
     ax1.legend(fontsize=7.5, loc="upper left", framealpha=0.75)
     ax1.text(0.99, 0.97, ann_text, transform=ax1.transAxes,
@@ -97,7 +97,7 @@ def plot_inspiral(result, outdir=None,
     ax2.plot(t[valid_A], A[valid_A], color=C_ENV, lw=0.9, label="Inspiral amplitude scale $A(t)$")
     ax2.axvline(t_isco, **cutoff_kw)
     ax2.set_xlim(x_lo, x_hi)
-    ax2.set_ylabel("Amplitude $A(t)$")
+    ax2.set_ylabel("Amplitude $A(t)$ (dimensionless)")
     ax2.set_title("Leading-order inspiral amplitude scale")
     ax2.legend(fontsize=7.5, loc="upper left", framealpha=0.75)
     _sci_y(ax2)

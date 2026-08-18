@@ -42,7 +42,7 @@ def parse_args():
 
     g = p.add_argument_group("Integration parameters")
     g.add_argument("--dt", type=float, default=2e-4, metavar="SEC",
-                   help="RK4 timestep [s] (default 2e-4)")
+                   help="RK4 timestep [s] (default 2e-4; must resolve the ISCO waveform)")
     g.add_argument("--f_start", type=float, default=20.0, metavar="HZ",
                    help="Starting GW frequency [Hz] (default 20)")
     g.add_argument("--ringdown", action="store_true",
@@ -50,7 +50,7 @@ def parse_args():
     g.add_argument("--n_tau", type=int, default=6, metavar="N",
                    help="ringdown duration in QNM decay times (default 6)")
     g.add_argument("--rd_pts", type=int, default=4000, metavar="N",
-                   help="ringdown sample points (default 4000)")
+                   help="ringdown sample points, 2..500000 (default 4000)")
 
     g = p.add_argument_group("Zoom parameters (time relative to ISCO cutoff)")
     g.add_argument("--t_before", type=float, default=None, metavar="SEC",
