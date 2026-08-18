@@ -4,6 +4,8 @@ plot_photon.py — PhotonOrbit
 Matplotlib visualization of photon trajectories around a Schwarzschild black hole.
 """
 
+import math
+
 import matplotlib.pyplot as plt
 
 
@@ -11,6 +13,37 @@ def plot_photon_orbit(x_values, y_values, b, info):
     """Plot a photon trajectory, event horizon, photon sphere, and diagnostics."""
     if not x_values or len(x_values) != len(y_values):
         raise ValueError("x_values and y_values must be nonempty arrays of equal length.")
+    if not all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        for values in (x_values, y_values)
+        for value in values
+    ):
+        raise ValueError("x_values and y_values must contain only finite real numbers.")
+    if not isinstance(b, (int, float)) or isinstance(b, bool) or not math.isfinite(b):
+        raise ValueError("b must be a finite real number.")
+    if not isinstance(info, dict):
+        raise ValueError("info must be a diagnostics dictionary.")
+
+    required_info = {"r_s", "r_photon", "status", "closest_approach", "delta_phi"}
+    missing = required_info.difference(info)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"info is missing required diagnostic field(s): {names}.")
+
+    for key in ("r_s", "r_photon", "closest_approach", "delta_phi"):
+        value = info[key]
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"info['{key}'] must be a finite real number.")
+    if info["r_s"] <= 0.0 or info["r_photon"] <= 0.0:
+        raise ValueError("r_s and r_photon must be greater than zero.")
+    if not isinstance(info["status"], str):
+        raise ValueError("info['status'] must be a string.")
 
     r_s = info["r_s"]
     r_photon = info["r_photon"]
@@ -20,12 +53,12 @@ def plot_photon_orbit(x_values, y_values, b, info):
     ax.plot(x_values, y_values, label="Photon trajectory")
 
     horizon = plt.Circle((0.0, 0.0), r_s, alpha=0.3, label="Event horizon")
-    ax.add_artist(horizon)
+    ax.add_patch(horizon)
     sphere = plt.Circle(
         (0.0, 0.0), r_photon, alpha=0.6,
         fill=False, linestyle="--", label="Photon sphere",
     )
-    ax.add_artist(sphere)
+    ax.add_patch(sphere)
 
     ax.set_xlabel("x (same length units as GM/c^2)")
     ax.set_ylabel("y (same length units as GM/c^2)")

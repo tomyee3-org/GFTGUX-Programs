@@ -128,41 +128,69 @@ def integrate_photon_orbit(GM_over_c2, r0, b, lambda_max, d_lambda):
     lambda_value = 0.0
     escape_radius = 2.0 * r0
 
-    x_values = []
-    y_values = []
+    x_values = [r * math.cos(phi)]
+    y_values = [r * math.sin(phi)]
     min_r = r0
     status = "lambda_max"
     turned_outward = False
 
-    for _ in range(n_steps + 1):
-        x_values.append(r * math.cos(phi))
-        y_values.append(r * math.sin(phi))
-        min_r = min(min_r, r)
-
-        if r <= r_s:
-            status = "captured"
-            break
-        if turned_outward and r >= escape_radius:
-            status = "escaped"
-            break
+    for _ in range(n_steps):
         if lambda_value >= lambda_max:
             break
 
         remaining = lambda_max - lambda_value
         h = min(d_lambda, remaining)
+        previous_r = r
         previous_v = v_r
+        previous_phi = phi
+        previous_lambda = lambda_value
+
         try:
-            r, v_r, phi = rk4_step(r, v_r, phi, L, GM_over_c2, h)
+            new_r, new_v, new_phi = rk4_step(
+                r, v_r, phi, L, GM_over_c2, h
+            )
         except ValueError as exc:
             raise RuntimeError(
                 "Integration stepped to a nonphysical radius. Reduce d_lambda."
             ) from exc
+
+        if not all(math.isfinite(value) for value in (new_r, new_v, new_phi)):
+            raise RuntimeError("Integration produced a non-finite value; reduce d_lambda.")
+
+        # Stop at the horizon rather than storing a point inside it. Linear
+        # interpolation within the final RK4 step locates the termination
+        # surface without leaving a misleading sub-horizon trajectory sample.
+        if new_r <= r_s:
+            if new_r < previous_r:
+                fraction = (previous_r - r_s) / (previous_r - new_r)
+                fraction = min(1.0, max(0.0, fraction))
+            else:
+                fraction = 1.0
+
+            r = r_s
+            v_r = previous_v + fraction * (new_v - previous_v)
+            phi = previous_phi + fraction * (new_phi - previous_phi)
+            lambda_value = previous_lambda + fraction * h
+
+            x_values.append(r * math.cos(phi))
+            y_values.append(r * math.sin(phi))
+            min_r = min(min_r, r)
+            status = "captured"
+            break
+
+        r, v_r, phi = new_r, new_v, new_phi
         lambda_value += h
 
         if previous_v < 0.0 <= v_r:
             turned_outward = True
-        if not all(math.isfinite(value) for value in (r, v_r, phi)):
-            raise RuntimeError("Integration produced a non-finite value; reduce d_lambda.")
+
+        x_values.append(r * math.cos(phi))
+        y_values.append(r * math.sin(phi))
+        min_r = min(min_r, r)
+
+        if turned_outward and r >= escape_radius:
+            status = "escaped"
+            break
 
     info = {
         "status": status,
