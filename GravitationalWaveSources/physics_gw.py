@@ -3,190 +3,254 @@ physics_gw.py
 =============
 Core physics engine for the GravitationalWaveSources program.
 
-Computes the leading-order Peters/quadrupole inspiral for a quasi-circular
-binary, then appends a Schwarzschild quasi-normal-mode (QNM) ringdown after
-the ISCO crossing.
+Computes the leading-order quadrupole inspiral of a quasi-circular compact
+binary up to the Schwarzschild ISCO frequency.  An optional, explicitly
+illustrative Schwarzschild quasi-normal-mode (QNM) ringdown can be appended.
 
-SI units throughout; results returned in SI.
+SI units are used internally; user-facing masses and distances are in solar
+masses and megaparsecs.
 """
 
+import math
 import numpy as np
 
-# ── Physical constants ────────────────────────────────────────────────────────
-G   = 6.674_30e-11   # m³ kg⁻¹ s⁻²
-c   = 2.997_924_58e8 # m s⁻¹
-M_sun = 1.988_92e30  # kg
+# Physical constants
+G = 6.674_30e-11       # m^3 kg^-1 s^-2
+c = 2.997_924_58e8     # m s^-1
+M_sun = 1.988_92e30    # kg
+MPC_M = 3.085_677_581_49e22
+
+MAX_INSPIRAL_STEPS = 5_000_000
 
 
-# ── Helper: chirp mass ────────────────────────────────────────────────────────
+def _require_finite(name, value):
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite; got {value!r}.")
+
+
 def chirp_mass(m1_kg, m2_kg):
-    """Return chirp mass in kg."""
+    """Return chirp mass in kg for two positive component masses."""
     return (m1_kg * m2_kg) ** 0.6 / (m1_kg + m2_kg) ** 0.2
 
 
-# ── Inspiral ODE (df/dt) ──────────────────────────────────────────────────────
-def dfdt(f, Mc_kg):
-    """
-    Time derivative of GW frequency under Peters quadrupole formula.
-    f   : GW frequency [Hz]
-    Mc  : chirp mass   [kg]
-    """
-    Mc_geom = G * Mc_kg / c**3          # chirp mass in seconds
-    return (96.0 / 5.0) * np.pi**(8.0/3.0) * Mc_geom**(5.0/3.0) * f**(11.0/3.0)
+def dfdt(f_hz, Mc_kg):
+    """Leading-order quadrupole derivative df/dt for GW frequency f."""
+    Mc_geom = G * Mc_kg / c**3
+    return ((96.0 / 5.0) * np.pi**(8.0 / 3.0)
+            * Mc_geom**(5.0 / 3.0) * f_hz**(11.0 / 3.0))
 
 
-# ── Strain amplitude ──────────────────────────────────────────────────────────
 def strain_amplitude(f_hz, Mc_kg, d_m):
     """
-    Leading-order dimensionless strain amplitude (sky-and-polarisation averaged).
-    f   : GW frequency [Hz]
-    Mc  : chirp mass   [kg]
-    d   : luminosity distance [m]
+    Newtonian quadrupole strain-amplitude scale.
+
+    This is the commonly used face-on amplitude scale
+
+        A = 4 (G Mc)^(5/3) (pi f)^(2/3) / (c^4 d),
+
+    not a sky-and-polarisation-averaged detector response.
     """
-    Mc_geom = G * Mc_kg / c**3          # [s]
-    return (4.0 * G * Mc_kg / (c**2 * d_m)) * (np.pi * G * Mc_kg * f_hz / c**3) ** (2.0/3.0)
+    return ((4.0 * G * Mc_kg / (c**2 * d_m))
+            * (np.pi * G * Mc_kg * f_hz / c**3) ** (2.0 / 3.0))
 
 
-# ── ISCO frequency ────────────────────────────────────────────────────────────
 def f_isco(M_total_kg):
-    """GW frequency at the Schwarzschild ISCO (6 GM/c²)."""
+    """GW frequency at the Schwarzschild ISCO, r = 6 GM/c^2."""
     return c**3 / (6.0**1.5 * np.pi * G * M_total_kg)
 
 
-# ── QNM parameters (Schwarzschild, dominant l=m=2 mode) ─────────────────────
 def qnm_params(M_final_kg):
     """
-    Return (f_qnm [Hz], tau_qnm [s]) for the dominant Schwarzschild QNM.
-
-    Dimensionless frequencies from Leaver (1985) / Berti et al. (2009):
-        omega_r  = 0.3737  (real part, in units of c³/GM_f)
-        omega_i  = 0.0890  (imaginary part)
-
-    f_qnm  = omega_r * c³ / (2π G M_f)
-    tau    = 1 / (omega_i * c³ / (G M_f))   [= G M_f / (omega_i c³)]
+    Return (f_qnm [Hz], tau_qnm [s]) for the fundamental l=2
+    Schwarzschild gravitational QNM, using M omega = 0.3737 - 0.0890 i.
     """
-    scale = G * M_final_kg / c**3          # [s]  -- GM_f/c³
-    f_qnm  = 0.3737 / (2.0 * np.pi * scale)
-    tau    = scale / 0.0890
-    return f_qnm, tau
+    scale = G * M_final_kg / c**3
+    return 0.3737 / (2.0 * np.pi * scale), scale / 0.0890
 
 
-# ── Main integration routine ──────────────────────────────────────────────────
+def inspiral_time(f_start_hz, f_end_hz, Mc_kg):
+    """Analytic leading-order time required to chirp from f_start to f_end."""
+    Mc_geom = G * Mc_kg / c**3
+    coeff = 5.0 / (256.0 * np.pi**(8.0 / 3.0) * Mc_geom**(5.0 / 3.0))
+    return coeff * (f_start_hz**(-8.0 / 3.0) - f_end_hz**(-8.0 / 3.0))
+
+
+def _rk4_frequency_phase_step(f, phase, dt, Mc):
+    """One coupled RK4 step for frequency and GW phase."""
+    k1_f = dfdt(f, Mc)
+    k1_p = 2.0 * np.pi * f
+
+    f2 = f + 0.5 * dt * k1_f
+    k2_f = dfdt(f2, Mc)
+    k2_p = 2.0 * np.pi * f2
+
+    f3 = f + 0.5 * dt * k2_f
+    k3_f = dfdt(f3, Mc)
+    k3_p = 2.0 * np.pi * f3
+
+    f4 = f + dt * k3_f
+    k4_f = dfdt(f4, Mc)
+    k4_p = 2.0 * np.pi * f4
+
+    f_next = f + (dt / 6.0) * (k1_f + 2*k2_f + 2*k3_f + k4_f)
+    phase_next = phase + (dt / 6.0) * (k1_p + 2*k2_p + 2*k3_p + k4_p)
+    return f_next, phase_next
+
+
 def integrate_inspiral(m1_msun, m2_msun, d_mpc,
-                       dt=1e-4, f_start=10.0,
+                       dt=2e-4, f_start=20.0,
+                       include_ringdown=False,
                        n_ringdown_tau=6, ringdown_pts=4000):
     """
-    Integrate the quasi-circular inspiral from f_start Hz up to f_ISCO,
-    then append a QNM ringdown.
+    Integrate a leading-order quasi-circular inspiral to the Schwarzschild
+    ISCO cutoff. Optionally append a deliberately simplified Schwarzschild
+    QNM ringdown.
 
-    Parameters
-    ----------
-    m1_msun, m2_msun : component masses [solar masses]
-    d_mpc            : luminosity distance [Mpc]
-    dt               : time step for inspiral integration [s]
-    f_start          : initial GW frequency [Hz]
-    n_ringdown_tau   : ringdown duration in units of tau_qnm
-    ringdown_pts     : number of sample points in the ringdown segment
-
-    Returns
-    -------
-    dict with keys:
-        t        : time array [s], t=0 at start, merger at t_merger
-        h        : dimensionless strain h(t)
-        A        : strain envelope A(t)  (inspiral portion only; NaN in ringdown)
-        f        : instantaneous GW frequency [Hz] (inspiral only; NaN in ringdown)
-        t_merger : time of ISCO crossing [s]
-        f_isco_hz: ISCO frequency [Hz]
-        Mc_msun  : chirp mass [solar masses]
-        summary  : dict of scalar diagnostics
+    The ringdown is a pedagogical extension, not a physical merger model.
+    In particular it should not be interpreted as the generic post-merger
+    signal of a binary-neutron-star system.
     """
+    # Validate scalar inputs before unit conversion.
+    for name, value in (
+        ("m1_msun", m1_msun), ("m2_msun", m2_msun), ("d_mpc", d_mpc),
+        ("dt", dt), ("f_start", f_start), ("n_ringdown_tau", n_ringdown_tau),
+        ("ringdown_pts", ringdown_pts),
+    ):
+        _require_finite(name, float(value))
+
+    if m1_msun <= 0 or m2_msun <= 0:
+        raise ValueError("Component masses must both be greater than zero.")
+    if d_mpc <= 0:
+        raise ValueError("Luminosity distance d_mpc must be greater than zero.")
+    if dt <= 0:
+        raise ValueError("Integration timestep dt must be greater than zero.")
+    if f_start <= 0:
+        raise ValueError("Starting GW frequency f_start must be greater than zero.")
+    if not isinstance(include_ringdown, (bool, np.bool_)):
+        raise ValueError("include_ringdown must be True or False.")
+    if int(n_ringdown_tau) != n_ringdown_tau or n_ringdown_tau <= 0:
+        raise ValueError("n_ringdown_tau must be a positive integer.")
+    if int(ringdown_pts) != ringdown_pts or ringdown_pts < 2:
+        raise ValueError("ringdown_pts must be an integer of at least 2.")
+
+    n_ringdown_tau = int(n_ringdown_tau)
+    ringdown_pts = int(ringdown_pts)
+
     m1 = m1_msun * M_sun
     m2 = m2_msun * M_sun
     M_total = m1 + m2
     Mc = chirp_mass(m1, m2)
-    d  = d_mpc * 3.085_677_581_49e22   # Mpc → m
-
+    d = d_mpc * MPC_M
     f_isco_hz = f_isco(M_total)
 
-    # ── RK4 integration of df/dt ─────────────────────────────────────────────
-    t_list, f_list, A_list, h_list = [], [], [], []
+    if f_start >= f_isco_hz:
+        raise ValueError(
+            f"f_start={f_start:g} Hz must be below the Schwarzschild ISCO "
+            f"frequency ({f_isco_hz:.3g} Hz) for these masses."
+        )
+
+    T_est = inspiral_time(f_start, f_isco_hz, Mc)
+    estimated_steps = math.ceil(T_est / dt)
+    if estimated_steps > MAX_INSPIRAL_STEPS:
+        raise ValueError(
+            f"The requested run would require about {estimated_steps:,} inspiral "
+            f"steps, exceeding the safety limit of {MAX_INSPIRAL_STEPS:,}. "
+            "Increase dt or f_start."
+        )
+
+    t_list = []
+    f_list = []
+    A_list = []
+    h_list = []
+
     t = 0.0
     f = float(f_start)
-    phase = 0.0                         # accumulated GW phase [rad]
+    phase = 0.0
 
-    while f < f_isco_hz:
+    # Store the initial point and then advance with coupled RK4.
+    while True:
         A = strain_amplitude(f, Mc, d)
-        h = A * np.cos(phase)
         t_list.append(t)
         f_list.append(f)
         A_list.append(A)
-        h_list.append(h)
+        h_list.append(A * np.cos(phase))
 
-        # RK4 on f
-        k1 = dfdt(f, Mc)
-        k2 = dfdt(f + 0.5*dt*k1,   Mc)
-        k3 = dfdt(f + 0.5*dt*k2,   Mc)
-        k4 = dfdt(f +     dt*k3,   Mc)
-        df = (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+        if f >= f_isco_hz:
+            break
 
-        phase += 2.0 * np.pi * f * dt
-        f  += df
-        t  += dt
+        f_next, phase_next = _rk4_frequency_phase_step(f, phase, dt, Mc)
+        if not (np.isfinite(f_next) and np.isfinite(phase_next)):
+            raise RuntimeError("Numerical integration produced a non-finite state.")
+        if f_next <= f:
+            raise RuntimeError("Numerical integration failed to increase GW frequency.")
 
-    # Record merger time
-    t_merger = t
+        if f_next >= f_isco_hz:
+            # Interpolate the final partial step to end exactly at the ISCO cutoff.
+            frac = (f_isco_hz - f) / (f_next - f)
+            t += frac * dt
+            phase += frac * (phase_next - phase)
+            f = f_isco_hz
+        else:
+            t += dt
+            f = f_next
+            phase = phase_next
 
-    # Peak strain at merger (used to normalise ringdown)
+        if len(t_list) > MAX_INSPIRAL_STEPS:
+            raise RuntimeError("Inspiral exceeded the internal step safety limit.")
+
+    t_isco = t
+    phase_isco = phase
     A_peak = strain_amplitude(f_isco_hz, Mc, d)
 
-    # ── QNM Ringdown ─────────────────────────────────────────────────────────
-    # Approximate final mass: ~95 % of total (radiated ~5 % in GW)
-    M_final = 0.95 * M_total
-    f_qnm, tau_qnm = qnm_params(M_final)
+    t_arr = np.asarray(t_list, dtype=float)
+    h_arr = np.asarray(h_list, dtype=float)
+    A_arr = np.asarray(A_list, dtype=float)
+    f_arr = np.asarray(f_list, dtype=float)
 
-    t_rd_end = n_ringdown_tau * tau_qnm
-    t_rd = np.linspace(0.0, t_rd_end, ringdown_pts)
-    h_rd = A_peak * np.cos(2.0 * np.pi * f_qnm * t_rd) * np.exp(-t_rd / tau_qnm)
+    # Optional illustrative Schwarzschild ringdown.
+    f_qnm = np.nan
+    tau_qnm = np.nan
+    M_final = np.nan
+    if include_ringdown:
+        # Deliberate toy assumption: 5% of total mass radiated and zero remnant spin.
+        M_final = 0.95 * M_total
+        f_qnm, tau_qnm = qnm_params(M_final)
+        t_rd = np.linspace(0.0, n_ringdown_tau * tau_qnm, ringdown_pts)
+        h_rd = (A_peak * np.cos(phase_isco + 2.0 * np.pi * f_qnm * t_rd)
+                * np.exp(-t_rd / tau_qnm))
 
-    # NaN sentinels for envelope / frequency during ringdown
-    A_rd = np.full_like(t_rd, np.nan)
-    f_rd = np.full_like(t_rd, np.nan)
+        # Skip t_rd[0] because the inspiral array already contains the ISCO point.
+        t_arr = np.concatenate([t_arr, t_isco + t_rd[1:]])
+        h_arr = np.concatenate([h_arr, h_rd[1:]])
+        A_arr = np.concatenate([A_arr, np.full(ringdown_pts - 1, np.nan)])
+        f_arr = np.concatenate([f_arr, np.full(ringdown_pts - 1, np.nan)])
 
-    # ── Concatenate ──────────────────────────────────────────────────────────
-    t_arr = np.concatenate([np.array(t_list), t_merger + t_rd])
-    h_arr = np.concatenate([np.array(h_list), h_rd])
-    A_arr = np.concatenate([np.array(A_list), A_rd])
-    f_arr = np.concatenate([np.array(f_list), f_rd])
-
-    # ── Time-to-merger (re-zero so merger is at t=0) ─────────────────────────
-    # Leave t as absolute (t=0 at start of observation) so the user can
-    # see the full inspiral duration; t_merger marks the boundary.
-
-    # ── Scalar diagnostics ───────────────────────────────────────────────────
-    T_band = t_merger                   # inspiral duration in band [s]
     summary = dict(
-        m1_msun    = m1_msun,
-        m2_msun    = m2_msun,
-        Mc_msun    = Mc / M_sun,
-        M_total_msun = M_total / M_sun,
-        d_mpc      = d_mpc,
-        f_start_hz = f_start,
-        f_isco_hz  = f_isco_hz,
-        f_qnm_hz   = f_qnm,
-        tau_qnm_ms = tau_qnm * 1e3,
-        t_merger_s = t_merger,
-        T_band_s   = T_band,
-        A_peak     = A_peak,
-        M_final_msun = M_final / M_sun,
+        m1_msun=m1_msun,
+        m2_msun=m2_msun,
+        Mc_msun=Mc / M_sun,
+        M_total_msun=M_total / M_sun,
+        d_mpc=d_mpc,
+        f_start_hz=f_start,
+        f_isco_hz=f_isco_hz,
+        t_isco_s=t_isco,
+        T_band_s=t_isco,
+        A_isco=A_peak,
+        include_ringdown=bool(include_ringdown),
+        M_final_msun=(M_final / M_sun if include_ringdown else np.nan),
+        f_qnm_hz=f_qnm,
+        tau_qnm_ms=(tau_qnm * 1e3 if include_ringdown else np.nan),
+        estimated_newtonian_time_s=T_est,
+        inspiral_steps=len(t_list),
     )
 
     return dict(
-        t        = t_arr,
-        h        = h_arr,
-        A        = A_arr,
-        f        = f_arr,
-        t_merger = t_merger,
-        f_isco_hz= f_isco_hz,
-        Mc_msun  = Mc / M_sun,
-        summary  = summary,
+        t=t_arr,
+        h=h_arr,
+        A=A_arr,
+        f=f_arr,
+        t_isco=t_isco,
+        f_isco_hz=f_isco_hz,
+        Mc_msun=Mc / M_sun,
+        summary=summary,
     )
