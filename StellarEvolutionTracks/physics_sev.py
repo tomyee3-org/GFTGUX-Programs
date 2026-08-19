@@ -1,0 +1,1411 @@
+"""
+physics_sev.py
+==============
+Core physics engine for the StellarEvolutionTracks program.
+
+Four calculations share this module:
+
+  tracks   Evolution of a single star.  The main sequence is obtained by
+           integrating a nuclear-burning ODE coupled to homology relations
+           for L and R.  The post-main-sequence portion integrates a
+           shell-burning core-growth ODE closed by the core-mass-luminosity
+           relation and an empirical Hayashi-line fit.
+
+  hr       The same track calculation repeated over a grid of masses, with
+           an optional set of isochrones constructed from the tracks.
+
+  wdcool   White-dwarf structure from the exact Chandrasekhar degenerate
+           electron equation of state (integrated as ODEs in radius),
+           followed by a Mestel cooling ODE for the core temperature.
+
+  nsmr     Neutron-star mass-radius relation from the Tolman-Oppenheimer-
+           Volkoff equations with a choice of equation of state.
+
+SI units are used internally.  User-facing quantities are in solar masses,
+solar radii, solar luminosities, kelvin, kilometres and years.
+
+Every model in this module is a deliberately simple teaching model.  The
+help file (StellarEvolutionTracks.html) states explicitly which results are
+integrated from stated differential equations and which are prescriptions
+or empirical fits.
+"""
+
+import math
+import numpy as np
+
+# ----------------------------------------------------------------------
+# Physical constants (SI, CODATA / IAU nominal values)
+# ----------------------------------------------------------------------
+G       = 6.674_30e-11          # m^3 kg^-1 s^-2
+c       = 2.997_924_58e8        # m s^-1
+h_pl    = 6.626_070_15e-34      # J s
+k_B     = 1.380_649e-23         # J K^-1
+sigma_SB = 5.670_374_419e-8     # W m^-2 K^-4
+a_rad   = 4.0 * sigma_SB / c    # J m^-3 K^-4
+m_u     = 1.660_539_066_60e-27  # kg   (atomic mass constant)
+m_e     = 9.109_383_701_5e-31   # kg
+m_n     = 1.674_927_498_04e-27  # kg
+
+M_sun   = 1.988_92e30           # kg
+R_sun   = 6.957e8               # m      (IAU nominal solar radius)
+L_sun   = 3.828e26              # W      (IAU nominal solar luminosity)
+TEFF_SUN = 5772.0               # K      (IAU nominal solar effective temp.)
+
+YEAR    = 3.155_693_0e7         # s      (Julian year 365.25 d)
+GYR     = 1.0e9 * YEAR
+
+EPS_NUC = 0.007 * c**2          # J kg^-1 released turning H into He
+
+# Safety limits
+MAX_TRACK_STEPS   = 2_000_000
+MIN_TRACK_STEPS   = 50
+MAX_STRUCT_STEPS  = 400_000
+MAX_GRID_POINTS   = 20_000
+MAX_MASSES        = 40
+
+
+# ======================================================================
+# Small validation helpers
+# ======================================================================
+def _require_finite(name, value):
+    """Return value as float after giving a consistent user-facing error."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a finite number; got {value!r}.") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be finite; got {value!r}.")
+    return value
+
+
+def _require_positive(name, value):
+    value = _require_finite(name, value)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be greater than zero; got {value:g}.")
+    return value
+
+
+def _require_int(name, value, lo=None, hi=None):
+    value = _require_finite(name, value)
+    if int(value) != value:
+        raise ValueError(f"{name} must be an integer; got {value:g}.")
+    value = int(value)
+    if lo is not None and value < lo:
+        raise ValueError(f"{name} must be at least {lo}; got {value}.")
+    if hi is not None and value > hi:
+        raise ValueError(f"{name} must not exceed {hi:,}; got {value:,}.")
+    return value
+
+
+# ======================================================================
+# Composition
+# ======================================================================
+def check_composition(X, Z):
+    """Validate a (X, Z) pair and return (X, Y, Z) with Y = 1 - X - Z."""
+    X = _require_finite("X", X)
+    Z = _require_finite("Z", Z)
+    if not (0.0 <= X <= 1.0):
+        raise ValueError(f"Hydrogen mass fraction X must lie in [0, 1]; got {X:g}.")
+    if not (0.0 <= Z <= 1.0):
+        raise ValueError(f"Metal mass fraction Z must lie in [0, 1]; got {Z:g}.")
+    Y = 1.0 - X - Z
+    if Y < -1e-12:
+        raise ValueError(
+            f"X + Z = {X + Z:g} exceeds 1; the helium fraction Y would be negative."
+        )
+    return X, max(Y, 0.0), Z
+
+
+def mean_molecular_weight(X, Z):
+    """
+    Mean molecular weight of a fully ionised ideal gas,
+
+        1/mu = 2X + (3/4)Y + (1/2)Z,        Y = 1 - X - Z.
+
+    Solar composition X = 0.70, Z = 0.02 gives mu = 0.6152.
+    """
+    X, Y, Z = check_composition(X, Z)
+    inv = 2.0 * X + 0.75 * Y + 0.5 * Z
+    if inv <= 0.0:
+        raise ValueError("Composition gives a non-positive particle number density.")
+    return 1.0 / inv
+
+
+def mean_molecular_weight_per_electron(X):
+    """mu_e = 2/(1 + X) for fully ionised matter with metals of A = 2Z."""
+    X = _require_finite("X", X)
+    if not (0.0 <= X <= 1.0):
+        raise ValueError(f"X must lie in [0, 1]; got {X:g}.")
+    return 2.0 / (1.0 + X)
+
+
+# ======================================================================
+# Homology relations for a radiative, ideal-gas main-sequence star
+# ======================================================================
+def homology_exponents(nu, kappa_a, kappa_b):
+    """
+    Return the homology exponents for a radiative star in which
+
+        kappa = kappa_0 rho^a T^b      (opacity law)
+        eps   = eps_0   rho   T^nu     (energy generation)
+
+    Standard homology (hydrostatic equilibrium, ideal gas, radiative
+    diffusion, nuclear energy balance) then gives
+
+        R  ~  mu^p M^q,
+        L  ~  mu^(4-b) M^(3-a-b) R^(b+3a),
+
+    with
+
+        D = nu + 3 + b + 3a,
+        p = (nu - 4 + b)/D,
+        q = (nu - 1 + a + b)/D.
+
+    Substituting R gives the pure (mu, M) exponents also returned here.
+
+    Returns a dict with keys p_R_mu, q_R_M, e_L_mu, e_L_M.
+    """
+    nu = _require_finite("nu", nu)
+    kappa_a = _require_finite("kappa_a", kappa_a)
+    kappa_b = _require_finite("kappa_b", kappa_b)
+
+    D = nu + 3.0 + kappa_b + 3.0 * kappa_a
+    if abs(D) < 1e-8:
+        raise ValueError(
+            "The chosen opacity and energy-generation exponents make the "
+            "homology denominator nu + 3 + b + 3a vanish; no homologous "
+            "solution exists for this combination."
+        )
+    p = (nu - 4.0 + kappa_b) / D
+    q = (nu - 1.0 + kappa_a + kappa_b) / D
+
+    r_exp = kappa_b + 3.0 * kappa_a
+    e_L_mu = (4.0 - kappa_b) + r_exp * p
+    e_L_M = (3.0 - kappa_a - kappa_b) + r_exp * q
+    return dict(p_R_mu=p, q_R_M=q, e_L_mu=e_L_mu, e_L_M=e_L_M, D=D)
+
+
+# Opacity laws selectable by the student.
+OPACITY_LAWS = {
+    # name          (a,    b)
+    "thomson": (0.0, 0.0),      # electron scattering, kappa = const
+    "kramers": (1.0, -3.5),     # bound-free / free-free
+}
+
+# Energy-generation temperature exponents.
+BURNING_NU = {
+    "pp": 4.0,
+    "cno": 16.0,
+}
+
+
+def default_burning(m_msun):
+    """pp chain below 1.2 solar masses, CNO cycle above."""
+    return "pp" if m_msun < 1.2 else "cno"
+
+
+def default_core_fraction(m_msun):
+    """
+    Fraction q_c of the stellar mass that acts as a well-mixed hydrogen
+    reservoir on the main sequence.
+
+    Low-mass stars have small radiative cores; stars above about
+    1.2 solar masses have convective cores that grow with mass.  The
+    values below are calibrated so that a 1 solar-mass track has a
+    main-sequence lifetime near 10 Gyr.
+    """
+    if m_msun <= 1.2:
+        return 0.15
+    return min(0.15 * (m_msun / 1.2) ** 0.22, 0.32)
+
+
+# ======================================================================
+# Zero-age main sequence anchor
+# ======================================================================
+def zams_luminosity(m_msun):
+    """
+    Empirical zero-age main-sequence luminosity in solar units.
+
+    A piecewise power law anchored so that the ZAMS Sun has
+    L = 0.72 L_sun.  This is a fit, not a homology result; comparing it
+    with the homology prediction is one of the exercises.
+    """
+    m = _require_positive("mass", m_msun)
+    if m < 0.43:
+        return 0.72 * 0.43 ** 4.0 * (m / 0.43) ** 2.3
+    if m < 2.0:
+        return 0.72 * m ** 4.0
+    return 0.72 * 2.0 ** 4.0 * (m / 2.0) ** 3.5
+
+
+def zams_radius(m_msun):
+    """
+    Empirical zero-age main-sequence radius in solar units, anchored so
+    that the ZAMS Sun has R = 0.89 R_sun.
+    """
+    m = _require_positive("mass", m_msun)
+    if m < 1.0:
+        return 0.89 * m ** 0.80
+    return 0.89 * m ** 0.57
+
+
+def effective_temperature(L_lsun, R_rsun):
+    """Effective temperature in K from L and R in solar units."""
+    L = L_lsun * L_sun
+    R = R_rsun * R_sun
+    return (L / (4.0 * np.pi * R**2 * sigma_SB)) ** 0.25
+
+
+def zams_curve(m_lo=0.15, m_hi=60.0, n=200):
+    """Return (M, logTeff, logL) arrays tracing the ZAMS."""
+    m = np.geomspace(m_lo, m_hi, n)
+    L = np.array([zams_luminosity(v) for v in m])
+    R = np.array([zams_radius(v) for v in m])
+    T = np.array([effective_temperature(a, b) for a, b in zip(L, R)])
+    return m, np.log10(T), np.log10(L)
+
+
+# ======================================================================
+# Post-main-sequence prescriptions
+# ======================================================================
+def core_mass_luminosity(mc_msun):
+    """
+    Paczynski-type core-mass-luminosity relation for a hydrogen shell
+    burning around a degenerate helium core,
+
+        L/L_sun = 2.3e5 (M_c/M_sun)^6 .
+
+    Valid roughly for 0.17 < M_c/M_sun < 0.5.  Used here, deliberately,
+    over a slightly wider range as a smooth closure for the shell-burning
+    phase; the help file discusses the consequences.
+    """
+    return 2.3e5 * mc_msun ** 6.0
+
+
+def hayashi_teff(m_msun, L_lsun):
+    """
+    Empirical fit to the Hayashi (fully convective) line,
+
+        T_eff = 6560 K (L/L_sun)^-0.092 (M/M_sun)^0.10 .
+
+    This reproduces T_eff ~ 4300 K at L = 100 L_sun and ~3200 K at the
+    tip of the red-giant branch for a 1 solar-mass star.  It is a fit to
+    detailed models, not a solution of the structure equations.
+    """
+    return 6560.0 * L_lsun ** (-0.092) * m_msun ** 0.10
+
+
+# Above this mass the helium core is not degenerate and the star crosses
+# the Hertzsprung gap on a thermal timescale instead of climbing a
+# degenerate red-giant branch.
+M_DEGENERATE_CORE = 2.0
+
+# Core mass at the helium flash for a degenerate helium core.
+MC_HELIUM_FLASH = 0.47
+
+
+def helium_flash_core_mass():
+    """
+    Helium-core mass at the helium flash.
+
+    A low-mass star builds an electron-degenerate helium core, which is
+    nearly isothermal and therefore ignites at a mass that hardly depends
+    on the mass of the star: about 0.47 solar masses.  This is why the tip
+    of the red-giant branch is such a good standard candle.
+    """
+    return MC_HELIUM_FLASH
+
+
+def kelvin_helmholtz_time(m_msun, r_rsun, l_lsun):
+    """Thermal (Kelvin-Helmholtz) timescale t_KH = G M^2 / (R L), in seconds."""
+    return (G * (m_msun * M_sun) ** 2
+            / (r_rsun * R_sun * l_lsun * L_sun))
+
+
+def predicted_remnant(m_msun):
+    """
+    Predicted end state, using the Kalirai et al. (2008) initial-final
+    mass relation for white dwarfs.  Returns (kind, mass_msun, note).
+    """
+    if m_msun < 0.5:
+        return ("helium white dwarf",
+                0.109 * m_msun + 0.394,
+                "main-sequence lifetime exceeds the age of the Universe")
+    if m_msun < 8.0:
+        mf = 0.109 * m_msun + 0.394
+        kind = "carbon-oxygen white dwarf" if m_msun < 6.5 else "oxygen-neon white dwarf"
+        return (kind, mf, "initial-final mass relation of Kalirai et al. (2008)")
+    if m_msun < 20.0:
+        return ("neutron star", 1.4,
+                "core-collapse supernova; remnant mass is EOS dependent")
+    return ("black hole", 0.2 * m_msun,
+            "very rough; strongly dependent on mass loss and metallicity")
+
+
+# ======================================================================
+# Main-sequence + post-main-sequence track
+# ======================================================================
+def _mu_effective(mu_core, mu_env, w):
+    """
+    One-parameter closure for the luminosity-weighted mean molecular
+    weight of a star with a helium-enriched core inside an unchanged
+    envelope:
+
+        mu_eff = mu_env^(1-w) mu_core^w .
+
+    w = 0 ignores the core, w = 1 treats the whole star as core material.
+    The default w = 0.36 is calibrated together with q_c so that a
+    1 solar-mass track passes through L = 1 L_sun at an age of 4.57 Gyr
+    and reaches L = 2.2 L_sun at the terminal-age main sequence, matching
+    standard solar models.
+    """
+    return mu_env ** (1.0 - w) * mu_core ** w
+
+
+def _radius_response(s_burn, expansion):
+    """
+    Empirical main-sequence radius law,
+
+        R(t) = R_ZAMS * [ 1 + (f_exp - 1) s^(3/2) ],
+        s = 1 - X_c/X_0  (fraction of the central hydrogen consumed).
+
+    Homology for a chemically homogeneous star predicts R ~ mu^p with
+    p = (nu - 4 + b)/D, which for the pp chain with electron scattering is
+    exactly zero: homology predicts no expansion at all.  Detailed models
+    show that a solar-type star grows by about 70 per cent in radius across
+    the main sequence, because the growing molecular-weight gradient is not
+    homologous.  The default f_exp = 1.7 reproduces that growth; the
+    --homology switch discards this law and uses the homology exponent
+    instead, so the two can be compared directly.
+    """
+    return 1.0 + (expansion - 1.0) * max(s_burn, 0.0) ** 1.5
+
+
+def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
+                    qc=None, burning=None, opacity="thomson",
+                    core_weight=0.36, expansion=1.70,
+                    core_efficiency=0.75,
+                    n_ms=3000, n_post=3000,
+                    t_max_gyr=15.0, x_end=1.0e-3,
+                    include_postms=True, homology_zams=False):
+    """
+    Integrate one stellar evolution track.
+
+    Main sequence (integrated ODE)
+    ------------------------------
+        dX_c/dt = -L(t) / (EPS_NUC * q_c * M)
+
+    with L obtained at each step from the homology scaling
+
+        L(t) = L_ZAMS * (mu_eff(t)/mu_eff(0))^e_L_mu,
+        R(t) = R_ZAMS * (mu_eff(t)/mu_eff(0))^p_R_mu.
+
+    Post main sequence (integrated ODE + prescriptions)
+    ---------------------------------------------------
+        dM_c/dt = L(t) / (EPS_NUC * X_env)
+
+    with L a smooth blend of the terminal-age main-sequence luminosity and
+    the core-mass-luminosity relation, and T_eff blended from the TAMS
+    value onto the empirical Hayashi line.
+
+    Returns a dict of arrays plus a summary dict.
+    """
+    # ---------------- validation ----------------
+    m_msun = _require_positive("mass", m_msun)
+    if m_msun < 0.08:
+        raise ValueError(
+            f"mass = {m_msun:g} Msun is below the hydrogen-burning limit "
+            "(about 0.08 Msun); this program models hydrogen-burning stars."
+        )
+    if m_msun > 120.0:
+        raise ValueError(
+            f"mass = {m_msun:g} Msun exceeds the 120 Msun limit of this "
+            "simple model, where radiation pressure and mass loss dominate."
+        )
+    X, Y, Z = check_composition(X, Z)
+    if X <= 0.0:
+        raise ValueError("A hydrogen-burning track needs X > 0.")
+
+    core_weight = _require_finite("core_weight", core_weight)
+    if not (0.0 <= core_weight <= 1.0):
+        raise ValueError(f"core_weight must lie in [0, 1]; got {core_weight:g}.")
+    core_efficiency = _require_finite("core_efficiency", core_efficiency)
+    if not (0.0 < core_efficiency <= 1.0):
+        raise ValueError(
+            f"core_efficiency must lie in (0, 1]; got {core_efficiency:g}."
+        )
+    expansion = _require_positive("expansion", expansion)
+    if expansion > 10.0:
+        raise ValueError(
+            f"expansion = {expansion:g} is unphysically large for the main "
+            "sequence; values between 1 and 3 are sensible."
+        )
+
+    n_ms = _require_int("n_ms", n_ms, lo=MIN_TRACK_STEPS, hi=MAX_TRACK_STEPS)
+    n_post = _require_int("n_post", n_post, lo=MIN_TRACK_STEPS, hi=MAX_TRACK_STEPS)
+    t_max_gyr = _require_positive("t_max_gyr", t_max_gyr)
+    x_end = _require_finite("x_end", x_end)
+    if not (0.0 <= x_end < X):
+        raise ValueError(
+            f"x_end must satisfy 0 <= x_end < X; got x_end = {x_end:g}, X = {X:g}."
+        )
+
+    if qc is None:
+        qc = default_core_fraction(m_msun)
+    qc = _require_finite("qc", qc)
+    if not (0.0 < qc <= 1.0):
+        raise ValueError(f"qc must lie in (0, 1]; got {qc:g}.")
+
+    if burning is None:
+        burning = default_burning(m_msun)
+    if burning not in BURNING_NU:
+        raise ValueError(
+            f"burning must be one of {sorted(BURNING_NU)}; got {burning!r}."
+        )
+    if opacity not in OPACITY_LAWS:
+        raise ValueError(
+            f"opacity must be one of {sorted(OPACITY_LAWS)}; got {opacity!r}."
+        )
+
+    nu = BURNING_NU[burning]
+    ka, kb = OPACITY_LAWS[opacity]
+    exps = homology_exponents(nu, ka, kb)
+    e_L_mu = exps["e_L_mu"]
+    p_R_mu = exps["p_R_mu"]
+
+    # ---------------- ZAMS anchor ----------------
+    mu_env = mean_molecular_weight(X, Z)
+    if homology_zams:
+        # Pure homology, normalised on the ZAMS Sun of the same composition.
+        L0 = 0.72 * m_msun ** exps["e_L_M"]
+        R0 = 0.89 * m_msun ** exps["q_R_M"]
+    else:
+        L0 = zams_luminosity(m_msun)
+        R0 = zams_radius(m_msun)
+
+    M_kg = m_msun * M_sun
+    reservoir_kg = qc * M_kg          # well-mixed hydrogen reservoir
+
+    mu0 = _mu_effective(mu_env, mu_env, core_weight)   # = mu_env
+
+    def L_of_Xc(Xc):
+        """Return (L, R, mu_eff) in solar units at central abundance Xc."""
+        mu_core = mean_molecular_weight(Xc, Z)
+        mu_eff = _mu_effective(mu_core, mu_env, core_weight)
+        L_l = L0 * (mu_eff / mu0) ** e_L_mu
+        if homology_zams:
+            R_r = R0 * (mu_eff / mu0) ** p_R_mu
+        else:
+            R_r = R0 * _radius_response(1.0 - Xc / X, expansion)
+        return L_l, R_r, mu_eff
+
+    # Estimated main-sequence lifetime; used only to pick the timestep.
+    t_ms_est = EPS_NUC * (X - x_end) * reservoir_kg / (L0 * L_sun)
+    dt = t_ms_est / n_ms
+
+    t_list, Xc_list, L_list, R_list, T_list, mu_list, mc_list = [], [], [], [], [], [], []
+    phase_list = []
+
+    t = 0.0
+    Xc = X
+    steps = 0
+    truncated = False
+
+    while True:
+        L_l, R_r, mu_eff = L_of_Xc(Xc)
+        t_list.append(t)
+        Xc_list.append(Xc)
+        L_list.append(L_l)
+        R_list.append(R_r)
+        T_list.append(effective_temperature(L_l, R_r))
+        mu_list.append(mu_eff)
+        mc_list.append(core_efficiency * qc * m_msun * (1.0 - Xc / X))
+        phase_list.append(0)                      # 0 = main sequence
+
+        if Xc <= x_end:
+            break
+        if t > t_max_gyr * GYR:
+            truncated = True
+            break
+        steps += 1
+        if steps > MAX_TRACK_STEPS:
+            raise RuntimeError(
+                "Main-sequence integration exceeded the internal step limit; "
+                "reduce --n_ms or raise --x_end."
+            )
+
+        # RK4 on dXc/dt = -L(Xc)/(EPS_NUC * reservoir)
+        def deriv(xc):
+            xc = min(max(xc, 0.0), 1.0)
+            return -L_of_Xc(xc)[0] * L_sun / (EPS_NUC * reservoir_kg)
+
+        k1 = deriv(Xc)
+        k2 = deriv(Xc + 0.5 * dt * k1)
+        k3 = deriv(Xc + 0.5 * dt * k2)
+        k4 = deriv(Xc + dt * k3)
+        Xc_next = Xc + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        if not math.isfinite(Xc_next):
+            raise RuntimeError(
+                "The main-sequence integration produced a non-finite state; "
+                "try a larger --n_ms."
+            )
+        if Xc_next >= Xc:
+            raise RuntimeError(
+                "The main-sequence integration failed to consume hydrogen; "
+                "check the composition and core fraction."
+            )
+
+        if Xc_next <= x_end:
+            # Interpolate the final partial step so the track ends exactly
+            # at the requested central hydrogen abundance.
+            frac = (Xc - x_end) / (Xc - Xc_next)
+            t += frac * dt
+            Xc = x_end
+        else:
+            t += dt
+            Xc = Xc_next
+
+    t_ms = t
+    L_tams = L_list[-1]
+    T_tams = T_list[-1]
+    R_tams = R_list[-1]
+    mc_tams = core_efficiency * qc * m_msun
+
+    reached_tams = not truncated
+    phase_end = "main sequence (truncated at t_max)" if truncated else "TAMS"
+
+    # ---------------- post-main-sequence ----------------
+    #
+    # Two regimes, separated at M_DEGENERATE_CORE = 2 Msun:
+    #
+    #   M <= 2 : the helium core is electron degenerate.  The core grows by
+    #            hydrogen shell burning, dM_c/dt = L/(EPS_NUC X_env), and the
+    #            luminosity follows the core-mass-luminosity relation.  The
+    #            star climbs the red-giant branch until the helium flash at
+    #            M_c = 0.47 Msun.
+    #
+    #   M >  2 : the helium core is not degenerate.  The star crosses the
+    #            Hertzsprung gap at nearly constant luminosity on the
+    #            Kelvin-Helmholtz timescale t_KH = G M^2/(R L) and ignites
+    #            helium when it reaches the Hayashi line.
+    #
+    post_ok = include_postms and reached_tams
+    t_he = float("nan")
+    L_tip = float("nan")
+    mc_ign = float("nan")
+    t_cross = float("nan")
+    regime = "none"
+
+    if post_ok and m_msun <= M_DEGENERATE_CORE:
+        regime = "degenerate red-giant branch"
+        # The helium core cannot swallow the whole star: at most about 70
+        # per cent of the mass can end up in the core before the hydrogen
+        # envelope is gone.
+        mc_cap = 0.70 * m_msun
+        mc_ign = helium_flash_core_mass()
+        flashes = mc_ign <= mc_cap
+        if not flashes:
+            mc_ign = mc_cap
+        if mc_ign <= mc_tams:
+            # A rare corner: the burned core already exceeds the flash mass.
+            post_ok = False
+        else:
+            X_env = X
+            mc_hayashi = min(mc_tams + 0.40 * (mc_ign - mc_tams), mc_ign)
+
+            def L_post(mc):
+                """Smooth blend of the TAMS luminosity and the CMLR."""
+                l_shell = core_mass_luminosity(mc)
+                k = 4.0
+                return (L_tams ** k + l_shell ** k) ** (1.0 / k)
+
+            def teff_post(mc, L_l):
+                t_h = hayashi_teff(m_msun, L_l)
+                if mc_hayashi <= mc_tams:
+                    return t_h
+                u = (mc - mc_tams) / (mc_hayashi - mc_tams)
+                u = min(max(u, 0.0), 1.0)
+                u = u * u * (3.0 - 2.0 * u)        # smoothstep in core mass
+                return 10.0 ** ((1.0 - u) * math.log10(T_tams)
+                                + u * math.log10(t_h))
+
+            dmc = (mc_ign - mc_tams) / n_post
+            mc = mc_tams
+            pstep = 0
+            while True:
+                L_l = L_post(mc)
+                T_e = teff_post(mc, L_l)
+                R_r = math.sqrt(L_l * L_sun
+                                / (4.0 * np.pi * sigma_SB * T_e**4)) / R_sun
+                if pstep > 0:                      # TAMS point already stored
+                    t_list.append(t)
+                    Xc_list.append(0.0)
+                    L_list.append(L_l)
+                    R_list.append(R_r)
+                    T_list.append(T_e)
+                    mu_list.append(mu_list[-1])
+                    mc_list.append(mc)
+                    phase_list.append(1 if mc < mc_hayashi else 2)
+
+                if mc >= mc_ign or t > t_max_gyr * GYR:
+                    break
+                pstep += 1
+                if pstep > MAX_TRACK_STEPS:
+                    raise RuntimeError(
+                        "Post-main-sequence integration exceeded the step limit."
+                    )
+
+                # RK4 on dt/dM_c = EPS_NUC X_env M_sun / L
+                def dtdmc(mc_val):
+                    return EPS_NUC * X_env * M_sun / (L_post(mc_val) * L_sun)
+
+                j1 = dtdmc(mc)
+                j2 = dtdmc(mc + 0.5 * dmc)
+                j3 = dtdmc(mc + 0.5 * dmc)
+                j4 = dtdmc(mc + dmc)
+                t += (dmc / 6.0) * (j1 + 2 * j2 + 2 * j3 + j4)
+                mc += dmc
+
+            t_he = t
+            L_tip = L_list[-1]
+            phase_end = ("helium flash at the tip of the red-giant branch"
+                         if flashes else
+                         "hydrogen envelope exhausted before the helium core "
+                         "reached the flash mass (helium white dwarf)")
+
+    elif post_ok:
+        regime = "Hertzsprung-gap crossing"
+        mc_ign = mc_tams
+        t_cross = kelvin_helmholtz_time(m_msun, R_tams, L_tams)
+        T_hay = hayashi_teff(m_msun, L_tams)
+        if T_hay >= T_tams:
+            # Already at or beyond the Hayashi line; nothing to cross.
+            post_ok = False
+        else:
+            log_T0, log_T1 = math.log10(T_tams), math.log10(T_hay)
+            for i in range(1, n_post + 1):
+                u = i / n_post
+                t_i = t_ms + u * t_cross
+                L_l = L_tams
+                T_e = 10.0 ** ((1.0 - u) * log_T0 + u * log_T1)
+                R_r = math.sqrt(L_l * L_sun
+                                / (4.0 * np.pi * sigma_SB * T_e**4)) / R_sun
+                t_list.append(t_i)
+                Xc_list.append(0.0)
+                L_list.append(L_l)
+                R_list.append(R_r)
+                T_list.append(T_e)
+                mu_list.append(mu_list[-1])
+                mc_list.append(mc_tams)
+                phase_list.append(1)
+            t = t_ms + t_cross
+            t_he = t
+            L_tip = L_list[-1]
+            phase_end = "helium ignition at the base of the giant branch"
+
+    t_arr = np.asarray(t_list, dtype=float)
+    L_arr = np.asarray(L_list, dtype=float)
+    R_arr = np.asarray(R_list, dtype=float)
+    T_arr = np.asarray(T_list, dtype=float)
+    Xc_arr = np.asarray(Xc_list, dtype=float)
+    mu_arr = np.asarray(mu_list, dtype=float)
+    mc_arr = np.asarray(mc_list, dtype=float)
+    ph_arr = np.asarray(phase_list, dtype=int)
+
+    kind, mrem, note = predicted_remnant(m_msun)
+
+    summary = dict(
+        m_msun=m_msun, X=X, Y=Y, Z=Z, qc=qc, expansion=expansion,
+        homology_zams=bool(homology_zams),
+        burning=burning, nu=nu, opacity=opacity,
+        kappa_a=ka, kappa_b=kb,
+        core_weight=core_weight,
+        e_L_mu=e_L_mu, p_R_mu=p_R_mu,
+        e_L_M=exps["e_L_M"], q_R_M=exps["q_R_M"],
+        mu_env=mu_env,
+        L_zams=L_arr[0], R_zams=R_arr[0], T_zams=T_arr[0],
+        L_tams=L_tams, T_tams=T_tams,
+        t_ms_gyr=t_ms / GYR,
+        t_ms_est_gyr=t_ms_est / GYR,
+        truncated=truncated,
+        t_max_gyr=t_max_gyr,
+        post_ms=post_ok,
+        core_efficiency=core_efficiency,
+        post_regime=(regime if post_ok else "none"),
+        t_cross_gyr=(t_cross / GYR if post_ok and math.isfinite(t_cross)
+                     else float("nan")),
+        mc_tams=mc_tams, mc_ign=(mc_ign if post_ok else float("nan")),
+        t_he_gyr=(t_he / GYR if post_ok else float("nan")),
+        t_post_gyr=((t_he - t_ms) / GYR if post_ok else float("nan")),
+        L_tip=L_tip,
+        t_total_gyr=t_arr[-1] / GYR,
+        phase_end=phase_end,
+        remnant_kind=kind, remnant_msun=mrem, remnant_note=note,
+        n_points=t_arr.size,
+    )
+
+    return dict(
+        kind="track",
+        t=t_arr, L=L_arr, R=R_arr, Teff=T_arr,
+        Xc=Xc_arr, mu=mu_arr, Mcore=mc_arr, phase=ph_arr,
+        summary=summary,
+    )
+
+
+# ======================================================================
+# HR-diagram grid and isochrones
+# ======================================================================
+def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
+    """
+    Run integrate_track for each mass and, optionally, build isochrones by
+    interpolating every track to a set of ages.
+    """
+    masses = [ _require_positive("mass", m) for m in masses ]
+    if not masses:
+        raise ValueError("At least one mass is required for the HR grid.")
+    if len(masses) > MAX_MASSES:
+        raise ValueError(
+            f"At most {MAX_MASSES} masses may be requested; got {len(masses)}."
+        )
+    if len(set(masses)) != len(masses):
+        raise ValueError("The mass list contains duplicates.")
+
+    tracks = []
+    for m in sorted(masses):
+        tracks.append(integrate_track(m_msun=m, **track_kwargs))
+
+    isochrones = []
+    if isochrone_gyr:
+        for age in isochrone_gyr:
+            age = _require_positive("isochrone age", age)
+            pts = []
+            for tr in tracks:
+                t_gyr = tr["t"] / GYR
+                if t_gyr[0] <= age <= t_gyr[-1]:
+                    logT = np.interp(age, t_gyr, np.log10(tr["Teff"]))
+                    logL = np.interp(age, t_gyr, np.log10(tr["L"]))
+                    pts.append((tr["summary"]["m_msun"], logT, logL))
+            if len(pts) >= 2:
+                isochrones.append(dict(age_gyr=age, points=pts))
+
+    m_z, logT_z, logL_z = zams_curve()
+
+    summary = dict(
+        n_tracks=len(tracks),
+        masses=[tr["summary"]["m_msun"] for tr in tracks],
+        lifetimes_gyr=[tr["summary"]["t_ms_gyr"] for tr in tracks],
+        totals_gyr=[tr["summary"]["t_total_gyr"] for tr in tracks],
+        n_isochrones=len(isochrones),
+        isochrone_ages=[iso["age_gyr"] for iso in isochrones],
+        X=tracks[0]["summary"]["X"], Z=tracks[0]["summary"]["Z"],
+        core_weight=tracks[0]["summary"]["core_weight"],
+    )
+    return dict(kind="hr", tracks=tracks, isochrones=isochrones,
+                zams=(m_z, logT_z, logL_z), summary=summary)
+
+
+# ======================================================================
+# Degenerate equations of state
+# ======================================================================
+class FermiGasEOS:
+    """
+    Ideal completely degenerate Fermi gas, exact special-relativistic form.
+
+    With x = p_F/(m c) the relativity parameter and A = pi m^4 c^5/(3 h^3):
+
+        P   = A [ x(2x^2 - 3) sqrt(1+x^2) + 3 asinh(x) ]
+        eps = A [ 3x(2x^2 + 1) sqrt(1+x^2) - 3 asinh(x) ]   (energy density,
+                                                             rest mass included)
+        n   = (8 pi / 3) (m c / h)^3 x^3
+        dP/dx = A * 8 x^4 / sqrt(1 + x^2)
+
+    For a white dwarf the pressure comes from electrons (m = m_e) while the
+    mass density comes from the nucleons, rho = mu_e m_u n_e.  For a neutron
+    star both come from the neutrons (m = m_n, mu_e -> 1, m_u -> m_n).
+    """
+
+    def __init__(self, particle_mass, mass_per_particle):
+        self.m = particle_mass
+        self.mass_per_particle = mass_per_particle
+        self.A = np.pi * particle_mass**4 * c**5 / (3.0 * h_pl**3)
+        self.n0 = (8.0 * np.pi / 3.0) * (particle_mass * c / h_pl) ** 3
+
+    def pressure(self, x):
+        x = np.asarray(x, dtype=float)
+        s = np.sqrt(1.0 + x * x)
+        return self.A * (x * (2.0 * x * x - 3.0) * s + 3.0 * np.arcsinh(x))
+
+    def dP_dx(self, x):
+        x = np.asarray(x, dtype=float)
+        return self.A * 8.0 * x**4 / np.sqrt(1.0 + x * x)
+
+    def number_density(self, x):
+        return self.n0 * np.asarray(x, dtype=float) ** 3
+
+    def rest_mass_density(self, x):
+        return self.mass_per_particle * self.number_density(x)
+
+    def energy_density(self, x):
+        """Total energy density including rest mass, in J/m^3."""
+        x = np.asarray(x, dtype=float)
+        s = np.sqrt(1.0 + x * x)
+        return self.A * (3.0 * x * (2.0 * x * x + 1.0) * s - 3.0 * np.arcsinh(x))
+
+    def mass_energy_density(self, x):
+        """eps/c^2, the density that sources gravity in the TOV equations."""
+        return self.energy_density(x) / c**2
+
+    def sound_speed_ratio(self, x):
+        """
+        Adiabatic sound speed as a fraction of c.
+
+        For the ideal Fermi gas dP/dx = 8A x^4/sqrt(1+x^2) and
+        d(eps)/dx = 24 A x^2 sqrt(1+x^2), so
+
+            (c_s/c)^2 = x^2 / (3 (1 + x^2)),
+
+        which rises monotonically to 1/sqrt(3): an ideal Fermi gas is
+        always causal.
+        """
+        x = np.asarray(x, dtype=float)
+        return np.sqrt(x * x / (3.0 * (1.0 + x * x)))
+
+    def x_from_density(self, rho):
+        """Invert rho -> x for the rest-mass density."""
+        rho = _require_positive("central density", rho)
+        return (rho / (self.mass_per_particle * self.n0)) ** (1.0 / 3.0)
+
+
+# Nuclear saturation density, about 0.16 baryons per cubic femtometre.
+RHO_NUCLEAR = 2.7e17          # kg m^-3
+
+
+class PolytropeEOS:
+    """
+    Stiff polytrope  P = K rho^Gamma  with rest-mass density rho as the
+    integration variable and total energy density
+
+        eps/c^2 = rho + P/((Gamma - 1) c^2).
+
+    Rather than asking for K in SI units, the constant is set by a
+    dimensionless stiffness
+
+        p_nuc = P(rho_nuc) / (rho_nuc c^2),
+
+    the pressure at nuclear saturation density expressed as a fraction of
+    the rest-mass energy density there.  Larger p_nuc means a stiffer
+    equation of state, a larger radius and a larger maximum mass.  The
+    default p_nuc = 0.04 with Gamma = 2.5 gives a maximum mass of about
+    2.2 solar masses at a radius near 11.6 km, comparable with the
+    heaviest precisely measured neutron stars, and stays causal.
+    """
+
+    def __init__(self, p_nuc=0.04, gamma=2.5, K=None):
+        self.gamma = _require_finite("gamma", gamma)
+        if not (1.0 < self.gamma <= 5.0):
+            raise ValueError(
+                f"gamma must lie in (1, 5]; got {self.gamma:g}."
+            )
+        if K is not None:
+            self.K = _require_positive("K", K)
+            self.p_nuc = self.K * RHO_NUCLEAR ** self.gamma / (RHO_NUCLEAR * c**2)
+        else:
+            self.p_nuc = _require_positive("p_nuc", p_nuc)
+            if self.p_nuc > 1.0:
+                raise ValueError(
+                    f"p_nuc = {self.p_nuc:g} exceeds 1: the pressure at nuclear "
+                    "density would exceed its rest-mass energy density, which "
+                    "no causal equation of state allows."
+                )
+            self.K = self.p_nuc * RHO_NUCLEAR * c**2 / RHO_NUCLEAR ** self.gamma
+        self.mass_per_particle = m_n
+
+    def pressure(self, rho):
+        return self.K * np.asarray(rho, dtype=float) ** self.gamma
+
+    def dP_dx(self, rho):
+        return self.K * self.gamma * np.asarray(rho, dtype=float) ** (self.gamma - 1.0)
+
+    def rest_mass_density(self, rho):
+        return np.asarray(rho, dtype=float)
+
+    def mass_energy_density(self, rho):
+        rho = np.asarray(rho, dtype=float)
+        return rho + self.pressure(rho) / ((self.gamma - 1.0) * c**2)
+
+    def sound_speed_ratio(self, rho):
+        """
+        c_s/c from c_s^2 = dP/d(eps).  For this polytrope
+
+            dP/drho   = Gamma K rho^(Gamma-1),
+            deps/drho = c^2 + Gamma K rho^(Gamma-1)/(Gamma - 1),
+
+        so a sufficiently stiff polytrope becomes acausal (c_s > c) above
+        some density.  Checking where that happens is one of the exercises.
+        """
+        rho = np.asarray(rho, dtype=float)
+        dPdrho = self.gamma * self.K * rho ** (self.gamma - 1.0)
+        depsdrho = c**2 + dPdrho / (self.gamma - 1.0)
+        return np.sqrt(dPdrho / depsdrho)
+
+    def x_from_density(self, rho):
+        return _require_positive("central density", rho)
+
+
+def make_eos(name, p_nuc=None, gamma=None, K=None):
+    """Factory for the equations of state offered to the student."""
+    if name == "electron":
+        raise ValueError("Use wd_structure() for the electron-gas white-dwarf EOS.")
+    if name == "neutron":
+        return FermiGasEOS(m_n, m_n)
+    if name == "polytrope":
+        return PolytropeEOS(p_nuc=0.04 if p_nuc is None else p_nuc,
+                            gamma=2.5 if gamma is None else gamma,
+                            K=K)
+    raise ValueError(f"Unknown equation of state {name!r}; use 'neutron' or 'polytrope'.")
+
+
+# ======================================================================
+# Stellar structure integration (Newtonian and TOV)
+# ======================================================================
+def integrate_structure(eos, y_c, relativistic=False,
+                        r_scale=1.0e7, y_floor=1.0e-8,
+                        step_frac=0.01, max_steps=MAX_STRUCT_STEPS,
+                        keep_profile=False):
+    """
+    Integrate a spherical star outward from the centre.
+
+    Newtonian (relativistic=False):
+        dm/dr = 4 pi r^2 rho
+        dP/dr = -G m rho / r^2
+
+    TOV (relativistic=True):
+        dm/dr = 4 pi r^2 (eps/c^2)
+        dP/dr = -G (eps/c^2 + P/c^2)(m + 4 pi r^3 P/c^2)
+                 / ( r^2 (1 - 2 G m /(r c^2)) )
+
+    The integration variable is the EOS parameter y (the Fermi relativity
+    parameter x, or the rest-mass density for a polytrope), advanced with
+
+        dy/dr = (dP/dr) / (dP/dy).
+
+    Returns (M_kg, R_m, profile_or_None).
+    """
+    y = float(y_c)
+    if y <= 0.0:
+        raise ValueError("The central EOS variable must be positive.")
+
+    r = r_scale * step_frac * 1.0e-6
+    rho_c = float(eos.mass_energy_density(y) if relativistic
+                  else eos.rest_mass_density(y))
+    m = (4.0 / 3.0) * np.pi * r**3 * rho_c
+
+    rs, ms, ys = ([r], [m], [y]) if keep_profile else (None, None, None)
+
+    def derivs(r_, m_, y_):
+        rho_rest = float(eos.rest_mass_density(y_))
+        if relativistic:
+            rho_g = float(eos.mass_energy_density(y_))
+            P = float(eos.pressure(y_))
+            metric = 1.0 - 2.0 * G * m_ / (r_ * c**2)
+            if metric <= 0.0:
+                raise RuntimeError(
+                    "The TOV integration reached a horizon (1 - 2Gm/rc^2 <= 0); "
+                    "the central density is too high for this equation of state."
+                )
+            dP = -(G * (rho_g + P / c**2) * (m_ + 4.0 * np.pi * r_**3 * P / c**2)
+                   / (r_**2 * metric))
+            dm = 4.0 * np.pi * r_**2 * rho_g
+        else:
+            dP = -G * m_ * rho_rest / r_**2
+            dm = 4.0 * np.pi * r_**2 * rho_rest
+        dPdy = float(eos.dP_dx(y_))
+        if dPdy <= 0.0:
+            raise RuntimeError("dP/dy vanished during the structure integration.")
+        return dm, dP / dPdy
+
+    steps = 0
+    while y > y_floor * y_c:
+        dm_dr, dy_dr = derivs(r, m, y)
+        # Step control: never change y by more than step_frac, and never
+        # advance by more than step_frac of the current radius.
+        dr_cap = step_frac * max(r_scale, r)
+        if dy_dr != 0.0:
+            dr = min(dr_cap, step_frac * abs(y / dy_dr))
+        else:
+            dr = dr_cap
+        dr = max(dr, 1.0e-6)
+
+        k1m, k1y = dm_dr, dy_dr
+        try:
+            k2m, k2y = derivs(r + 0.5 * dr, m + 0.5 * dr * k1m, max(y + 0.5 * dr * k1y, 1e-30))
+            k3m, k3y = derivs(r + 0.5 * dr, m + 0.5 * dr * k2m, max(y + 0.5 * dr * k2y, 1e-30))
+            k4m, k4y = derivs(r + dr, m + dr * k3m, max(y + dr * k3y, 1e-30))
+        except (ValueError, FloatingPointError):
+            break
+
+        m_next = m + (dr / 6.0) * (k1m + 2 * k2m + 2 * k3m + k4m)
+        y_next = y + (dr / 6.0) * (k1y + 2 * k2y + 2 * k3y + k4y)
+
+        if not (math.isfinite(m_next) and math.isfinite(y_next)):
+            raise RuntimeError(
+                "The structure integration produced a non-finite state; "
+                "reduce --step_frac."
+            )
+        if y_next <= 0.0:
+            # Linearly interpolate the surface within this step.
+            frac = y / (y - y_next)
+            r += frac * dr
+            m += frac * (m_next - m)
+            y = 0.0
+            if keep_profile:
+                rs.append(r); ms.append(m); ys.append(0.0)
+            break
+
+        r += dr
+        m = m_next
+        y = y_next
+        if keep_profile:
+            rs.append(r); ms.append(m); ys.append(y)
+
+        steps += 1
+        if steps > max_steps:
+            raise RuntimeError(
+                f"The structure integration exceeded {max_steps:,} steps; "
+                "increase --step_frac or check the central density."
+            )
+
+    profile = None
+    if keep_profile:
+        profile = dict(r=np.asarray(rs), m=np.asarray(ms), y=np.asarray(ys))
+    return m, r, profile
+
+
+# ======================================================================
+# White dwarfs: structure, mass-radius relation, Mestel cooling
+# ======================================================================
+def chandrasekhar_mass(mu_e):
+    """The Chandrasekhar limit, M_Ch = 5.836 mu_e^-2 solar masses."""
+    return 5.836 / mu_e**2
+
+
+def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
+                 rho_lo=1.0e7, rho_hi=1.0e13, tol=1.0e-5, max_iter=80):
+    """
+    Find the central density that gives a white dwarf of the requested
+    mass, by bisection on the exact Chandrasekhar structure integration.
+
+    Returns (rho_c, M_kg, R_m).
+    """
+    m_target_msun = _require_positive("white-dwarf mass", m_target_msun)
+    mu_e = _require_positive("mu_e", mu_e)
+    m_ch = chandrasekhar_mass(mu_e)
+    if m_target_msun >= 0.999 * m_ch:
+        raise ValueError(
+            f"A white dwarf of {m_target_msun:g} Msun is not supported: the "
+            f"Chandrasekhar limit for mu_e = {mu_e:g} is {m_ch:.3f} Msun."
+        )
+
+    eos = FermiGasEOS(m_e, mu_e * m_u)
+    target = m_target_msun * M_sun
+
+    def mass_of(rho_c):
+        x_c = eos.x_from_density(rho_c)
+        r_scale = 1.0e7 * (rho_c / 1.0e9) ** (-1.0 / 6.0)
+        M, R, _ = integrate_structure(eos, x_c, relativistic=False,
+                                      r_scale=max(r_scale, 1.0e5),
+                                      step_frac=step_frac)
+        return M, R
+
+    lo, hi = rho_lo, rho_hi
+    m_lo, _ = mass_of(lo)
+    m_hi, _ = mass_of(hi)
+    if m_lo > target or m_hi < target:
+        raise RuntimeError(
+            "Bisection could not bracket the requested white-dwarf mass; "
+            "try a mass further from the Chandrasekhar limit."
+        )
+    M = R = float("nan")
+    for _ in range(max_iter):
+        mid = math.sqrt(lo * hi)
+        M, R = mass_of(mid)
+        if abs(M - target) / target < tol:
+            return mid, M, R
+        if M < target:
+            lo = mid
+        else:
+            hi = mid
+    return math.sqrt(lo * hi), M, R
+
+
+def wd_mass_radius_curve(mu_e=2.0, n=40, rho_lo=1.0e8, rho_hi=1.0e14,
+                         step_frac=0.01):
+    """Mass-radius relation for cold white dwarfs (exact electron EOS)."""
+    n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
+    eos = FermiGasEOS(m_e, mu_e * m_u)
+    rho = np.geomspace(rho_lo, rho_hi, n)
+    M = np.empty(n)
+    R = np.empty(n)
+    for i, rc in enumerate(rho):
+        x_c = eos.x_from_density(rc)
+        r_scale = max(1.0e7 * (rc / 1.0e9) ** (-1.0 / 6.0), 1.0e5)
+        m_kg, r_m, _ = integrate_structure(eos, x_c, relativistic=False,
+                                           r_scale=r_scale, step_frac=step_frac)
+        M[i] = m_kg / M_sun
+        R[i] = r_m / R_sun
+    return rho, M, R
+
+
+def mestel_constant(mu_env, mu_e_env, kappa0):
+    """
+    Coefficient C in the Mestel luminosity law L = C M T_c^{7/2}.
+
+    Derivation (see the help file).  A radiative envelope with Kramers
+    opacity kappa = kappa0 rho T^-3.5 and a zero surface boundary condition
+    obeys
+
+        P = sqrt(2 K' / 8.5) T^4.25,    K' = 16 pi a c G M k /(3 kappa0 mu m_u L).
+
+    Matching that envelope to the isothermal degenerate core, where the
+    non-relativistic electron pressure K1 (rho/mu_e)^{5/3} equals the ideal
+    gas pressure, eliminates the transition density and leaves
+
+        L = C M T_c^{7/2},
+        C = (32 pi a c G k)/(25.5 kappa0 mu m_u) * [K1 (mu m_u/(k mu_e))^{5/3}]^3 .
+
+    Because L is proportional to M and the ion heat content is also
+    proportional to M, the core-temperature history T_c(t) predicted by
+    this model does not depend on the mass of the white dwarf at all,
+    although the luminosity does.
+    """
+    K1 = 1.0036e7          # SI: P = K1 (rho/mu_e)^{5/3}, P in Pa, rho in kg/m^3
+    bracket = K1 * (mu_env * m_u / (k_B * mu_e_env)) ** (5.0 / 3.0)
+    return (32.0 * np.pi * a_rad * c * G * k_B
+            / (25.5 * kappa0 * mu_env * m_u)) * bracket**3
+
+
+def kramers_kappa0(X, Z):
+    """
+    Combined bound-free plus free-free Kramers coefficient in SI units
+    (kappa = kappa0 rho T^-3.5, kappa in m^2/kg, rho in kg/m^3).
+
+    cgs coefficients: kappa_bf = 4.34e25 Z(1+X), kappa_ff = 3.68e22 (1-Z)(1+X),
+    both in cm^2/g with rho in g/cm^3.  Converting kappa to m^2/kg and rho to
+    kg/m^3 multiplies both by 1e-4.
+
+    Note the strong dependence on Z.  A white-dwarf envelope is essentially
+    metal free because heavy elements sink out of it, so free-free
+    absorption dominates and the envelope is far more transparent than a
+    solar-composition envelope would be.
+    """
+    X, Y, Z = check_composition(X, Z)
+    kappa_cgs = 4.34e25 * Z * (1.0 + X) + 3.68e22 * (1.0 - Z) * (1.0 + X)
+    return 1.0e-4 * kappa_cgs
+
+
+def integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=14.0,
+                         X_env=0.70, Z_env=0.0,
+                         Tc0=3.0e7, Tc_end=3.0e6, n_steps=4000,
+                         step_frac=0.01):
+    """
+    Mestel cooling of a white dwarf.
+
+    Structure: the exact Chandrasekhar EOS fixes R(M).
+    Thermal content: only the ions contribute,
+
+        U = (3/2) (k/(A m_u)) M T_c ,
+
+    because the degenerate electrons are already in their ground state.
+    Cooling: dU/dt = -L with L = C M T_c^{7/2}, so
+
+        dT_c/dt = -(2/3) (A m_u/k) C T_c^{7/2} ,
+
+    whose analytic solution is t proportional to T_c^{-5/2}, equivalently
+    the classic Mestel result L proportional to t^{-7/5}.  The program
+    integrates the ODE with RK4 so that the analytic law can be checked.
+    """
+    m_msun = _require_positive("white-dwarf mass", m_msun)
+    mu_e = _require_positive("mu_e", mu_e)
+    A_ion = _require_positive("A_ion", A_ion)
+    Tc0 = _require_positive("Tc0", Tc0)
+    Tc_end = _require_positive("Tc_end", Tc_end)
+    if Tc_end >= Tc0:
+        raise ValueError(
+            f"Tc_end ({Tc_end:g} K) must be below the starting core "
+            f"temperature Tc0 ({Tc0:g} K)."
+        )
+    if Tc0 > 1.0e9:
+        raise ValueError("Tc0 above 1e9 K is outside the range of this cooling model.")
+    n_steps = _require_int("n_cool", n_steps, lo=MIN_TRACK_STEPS, hi=MAX_TRACK_STEPS)
+
+    X_env, Y_env, Z_env = check_composition(X_env, Z_env)
+    mu_env = mean_molecular_weight(X_env, Z_env)
+    mu_e_env = mean_molecular_weight_per_electron(X_env)
+    kappa0 = kramers_kappa0(X_env, Z_env)
+
+    rho_c, M_kg, R_m = wd_structure(m_msun, mu_e=mu_e, step_frac=step_frac)
+    C = mestel_constant(mu_env, mu_e_env, kappa0)
+
+    heat_capacity = 1.5 * k_B * M_kg / (A_ion * m_u)   # dU/dT_c
+
+    def dTdt(T):
+        return -C * M_kg * T ** 3.5 / heat_capacity
+
+    # Analytic solution, kept for comparison with the RK4 result.
+    coef = heat_capacity / (2.5 * C * M_kg)
+    t_end_analytic = coef * (Tc_end ** -2.5 - Tc0 ** -2.5)
+
+    # Because dT/dt goes as T^3.5 the cooling is extremely stiff at early
+    # times.  Steps are therefore chosen so that each one changes T_c by a
+    # fixed fractional amount, giving about n_steps steps in total.
+    alpha = math.log(Tc0 / Tc_end) / n_steps
+
+    t_list, T_list, L_list = [], [], []
+    t = 0.0
+    T = Tc0
+    steps = 0
+    while True:
+        t_list.append(t)
+        T_list.append(T)
+        L_list.append(C * M_kg * T ** 3.5)
+        if T <= Tc_end:
+            break
+        steps += 1
+        if steps > MAX_TRACK_STEPS:
+            raise RuntimeError("The cooling integration exceeded the step limit.")
+
+        dt = alpha * T / abs(dTdt(T))
+
+        k1 = dTdt(T)
+        k2 = dTdt(max(T + 0.5 * dt * k1, 1.0))
+        k3 = dTdt(max(T + 0.5 * dt * k2, 1.0))
+        k4 = dTdt(max(T + dt * k3, 1.0))
+        T_next = T + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+        if not math.isfinite(T_next) or T_next >= T or T_next <= 0.0:
+            raise RuntimeError(
+                "The cooling integration failed to decrease the core "
+                "temperature; increase --n_cool."
+            )
+        if T_next <= Tc_end:
+            frac = (T - Tc_end) / (T - T_next)
+            t += frac * dt
+            T = Tc_end
+        else:
+            t += dt
+            T = T_next
+
+    t_arr = np.asarray(t_list)
+    T_arr = np.asarray(T_list)
+    L_arr = np.asarray(L_list)              # W
+    L_lsun = L_arr / L_sun
+    Teff = (L_arr / (4.0 * np.pi * R_m**2 * sigma_SB)) ** 0.25
+
+    rho_mr, M_mr, R_mr = wd_mass_radius_curve(mu_e=mu_e, n=36, step_frac=step_frac)
+
+    summary = dict(
+        m_msun=M_kg / M_sun, m_requested=m_msun,
+        mu_e=mu_e, A_ion=A_ion,
+        X_env=X_env, Z_env=Z_env, mu_env=mu_env, mu_e_env=mu_e_env,
+        kappa0=kappa0,
+        rho_c=rho_c, R_km=R_m / 1.0e3, R_rsun=R_m / R_sun,
+        R_rearth=R_m / 6.371e6,
+        M_ch=chandrasekhar_mass(mu_e),
+        Tc0=Tc0, Tc_end=Tc_end,
+        L_start=L_lsun[0], L_end=L_lsun[-1],
+        Teff_start=Teff[0], Teff_end=Teff[-1],
+        t_end_gyr=t_arr[-1] / GYR,
+        t_end_analytic_gyr=t_end_analytic / GYR,
+        mestel_C=C,
+        n_points=t_arr.size,
+        mean_density=M_kg / ((4.0 / 3.0) * np.pi * R_m**3),
+        surface_gravity=G * M_kg / R_m**2,
+    )
+
+    return dict(
+        kind="wdcool",
+        t=t_arr, Tc=T_arr, L=L_lsun, Teff=Teff,
+        mr_rho=rho_mr, mr_M=M_mr, mr_R=R_mr,
+        summary=summary,
+    )
+
+
+# ======================================================================
+# Neutron stars: TOV mass-radius relation
+# ======================================================================
+def ns_mass_radius_curve(eos_name="neutron", n=40,
+                         rho_lo=1.0e17, rho_hi=5.0e19,
+                         relativistic=True, p_nuc=None, gamma=None, K=None,
+                         step_frac=0.01):
+    """
+    Sequence of neutron-star models obtained by integrating the TOV (or,
+    with relativistic=False, the Newtonian) equations for a range of
+    central densities.
+
+    Returns central density, mass, radius, compactness and surface
+    gravitational redshift arrays.
+    """
+    n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
+    rho_lo = _require_positive("rho_lo", rho_lo)
+    rho_hi = _require_positive("rho_hi", rho_hi)
+    if rho_hi <= rho_lo:
+        raise ValueError("rho_hi must exceed rho_lo.")
+
+    eos = make_eos(eos_name, p_nuc=p_nuc, gamma=gamma, K=K)
+    rho = np.geomspace(rho_lo, rho_hi, n)
+
+    M = np.full(n, np.nan)
+    R = np.full(n, np.nan)
+    for i, rc in enumerate(rho):
+        y_c = eos.x_from_density(rc)
+        r_scale = 1.5e4
+        try:
+            m_kg, r_m, _ = integrate_structure(eos, y_c, relativistic=relativistic,
+                                               r_scale=r_scale, step_frac=step_frac)
+        except RuntimeError:
+            continue
+        M[i] = m_kg / M_sun
+        R[i] = r_m / 1.0e3            # km
+
+    good = np.isfinite(M) & np.isfinite(R) & (M > 0)
+    if good.sum() < 3:
+        raise RuntimeError(
+            "Fewer than three neutron-star models converged; adjust the "
+            "central-density range."
+        )
+
+    compact = np.full(n, np.nan)
+    z_surf = np.full(n, np.nan)
+    compact[good] = G * M[good] * M_sun / (R[good] * 1.0e3 * c**2)
+    inner = 1.0 - 2.0 * compact[good]
+    ok = inner > 0
+    idx = np.where(good)[0][ok]
+    z_surf[idx] = 1.0 / np.sqrt(1.0 - 2.0 * compact[idx]) - 1.0
+
+    i_max = int(np.nanargmax(M))
+    summary = dict(
+        eos=eos_name,
+        relativistic=bool(relativistic),
+        gamma=(getattr(eos, "gamma", float("nan"))),
+        K=(getattr(eos, "K", float("nan"))),
+        p_nuc=(getattr(eos, "p_nuc", float("nan"))),
+        n_models=int(good.sum()),
+        rho_lo=rho_lo, rho_hi=rho_hi,
+        M_max=float(M[i_max]),
+        R_at_Mmax=float(R[i_max]),
+        rho_at_Mmax=float(rho[i_max]),
+        compact_at_Mmax=float(compact[i_max]),
+        cs_over_c_at_Mmax=float(eos.sound_speed_ratio(
+            eos.x_from_density(rho[i_max]))),
+        causal=bool(eos.sound_speed_ratio(eos.x_from_density(rho[i_max])) <= 1.0),
+        z_at_Mmax=float(z_surf[i_max]),
+        stable_branch=bool(i_max < n - 1),
+        M_min=float(np.nanmin(M[good])),
+        R_min=float(np.nanmin(R[good])),
+        R_max=float(np.nanmax(R[good])),
+    )
+    return dict(
+        kind="nsmr",
+        rho=rho, M=M, R=R, compact=compact, z=z_surf,
+        i_max=i_max, summary=summary,
+    )
