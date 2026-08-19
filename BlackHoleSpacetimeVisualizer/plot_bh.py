@@ -256,7 +256,7 @@ def plot_infall(result, outdir=None, dpi=150, lw=1.7, figsize=(12.5, 9.2)):
              label=r"$t=\tau$ (Newtonian expectation)")
     ax2.set_xlabel(r"proper time $\tau$ [ms]")
     ax2.set_ylabel(r"Schwarzschild coordinate time $t$ [ms]")
-    ax2.set_title("The distant observer's clock runs away")
+    ax2.set_title("Coordinate time races ahead of proper time")
     ax2.grid(True, lw=0.3, alpha=0.5)
     ax2.legend(fontsize=8, loc="upper left", framealpha=0.85)
 
@@ -306,29 +306,40 @@ def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(13.5, 5.6)):
         fontsize=11.5, fontweight="bold")
 
     # --- Panel 1: r_AH(v) and r_EH(v) -------------------------------------
-    ax1.axvspan(s["v1_rs0"], s["v2_rs0"], color="#fdecd8", zorder=0,
-               label="accretion under way")
+    no_accretion = (s["m0_msun"] == s["m1_msun"])
+    if not no_accretion:
+        ax1.axvspan(s["v1_rs0"], s["v2_rs0"], color="#fdecd8", zorder=0,
+                   label="accretion under way")
     ax1.plot(v, r_ah, color=C_AH, lw=lw, ls="--", label=r"apparent horizon $r_{AH}=2M(v)$")
     ax1.plot(v, r_eh, color=C_EH, lw=lw, label=r"event horizon $r_{EH}(v)$")
-    ax1.axvline(s["v1_rs0"], color="gray", lw=0.8, ls=":")
-    ax1.axvline(s["v2_rs0"], color="gray", lw=0.8, ls=":")
+    if not no_accretion:
+        ax1.axvline(s["v1_rs0"], color="gray", lw=0.8, ls=":")
+        ax1.axvline(s["v2_rs0"], color="gray", lw=0.8, ls=":")
     ax1.set_xlabel(r"advanced time $v / r_{s0}$")
     ax1.set_ylabel(r"$r / r_{s0}$")
     ax1.set_title("Apparent vs. event horizon")
     ax1.grid(True, lw=0.3, alpha=0.5)
     ax1.legend(fontsize=8, loc="upper left", framealpha=0.9)
-    ax1.text(0.98, 0.04,
-             "event horizon rises\nbefore accretion starts:\nit anticipates the future",
-             transform=ax1.transAxes, ha="right", va="bottom", fontsize=7.7,
-             bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray",
-                       alpha=0.9))
+    if no_accretion:
+        ax1.text(0.98, 0.04,
+                 "M0 = M1: no accretion,\nso $r_{AH}=r_{EH}=r_{s0}$\nfor the whole run",
+                 transform=ax1.transAxes, ha="right", va="bottom", fontsize=7.7,
+                 bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray",
+                           alpha=0.9))
+    else:
+        ax1.text(0.98, 0.04,
+                 "event horizon rises\nbefore accretion starts:\nit anticipates the future",
+                 transform=ax1.transAxes, ha="right", va="bottom", fontsize=7.7,
+                 bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray",
+                           alpha=0.9))
 
     # --- Panel 2: geodesic family -----------------------------------------
     for fam in result["family"]:
         col = C_ESCAPE if fam["escapes"] else C_PLUNGE
         ax2.plot(fam["v"] / rs0, fam["r"] / rs0, color=col, lw=1.1, alpha=0.85)
     ax2.plot(v, r_eh, color=C_EH, lw=lw, label="event-horizon generator")
-    ax2.axvspan(s["v1_rs0"], s["v2_rs0"], color="#fdecd8", zorder=0)
+    if not no_accretion:
+        ax2.axvspan(s["v1_rs0"], s["v2_rs0"], color="#fdecd8", zorder=0)
     ax2.set_xlim(v.min(), v.max())
     # Escaping family members are integrated well past r_s1 (out to an
     # unambiguous-escape cutoff), so cap the axis at a fixed multiple of the

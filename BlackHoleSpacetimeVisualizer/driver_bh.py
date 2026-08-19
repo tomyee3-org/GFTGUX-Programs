@@ -137,11 +137,8 @@ def _head(title):
     print(SEP)
 
 
-def _print_warnings(s):
-    notes = s.get("warnings") or []
-    if not notes:
-        return
-    print("  NOTES ON THIS RUN")
+def _print_note_lines(notes):
+    """Word-wrap and print a list of note strings, no header or separator."""
     for note in notes:
         text = note.strip()
         line = "        "
@@ -153,6 +150,14 @@ def _print_warnings(s):
                 line = f"{line} {word}" if line.strip() else line + word
         if line.strip():
             print(line)
+
+
+def _print_warnings(s):
+    notes = s.get("warnings") or []
+    if not notes:
+        return
+    print("  NOTES ON THIS RUN")
+    _print_note_lines(notes)
     print(SEP)
 
 
@@ -191,9 +196,14 @@ def _print_tidal_compare(rows, separation_m, limit_g):
           f"  {'r_crit/r_s':>11}  {'survives?':>10}")
     for row in rows:
         verdict = "yes" if row["survives_horizon"] else "no"
+        flag = "  *" if row.get("warnings") else ""
         print(f"  {row['m_msun']:12.4g}  {row['rs_km']:12.4g}"
               f"  {row['a_radial_horizon_g']:14.4e}"
-              f"  {row['r_crit_over_rs']:11.4g}  {verdict:>10}")
+              f"  {row['r_crit_over_rs']:11.4g}  {verdict:>10}{flag}")
+    if any(row.get("warnings") for row in rows):
+        print("  * outside the astrophysically known black-hole mass range:")
+        all_notes = [note for row in rows for note in row.get("warnings", [])]
+        _print_note_lines(all_notes)
     print(SEP)
 
 
@@ -232,15 +242,27 @@ def _print_horizons_summary(s):
     print(SEP)
     print(f"  Event-horizon generator located at r/r_s0 = "
           f"{s['r_crit_over_rs0']:.8f} at v_start")
-    print(f"  Bisection residual  : {s['residual_rs0']:.3e}  r_s0"
+    print(f"  Bisection bracket width : {s['residual_rs0']:.3e}  r_s0"
           f"   ({s['bisect_iters']} iterations)")
+    print("      (this is only the bisection's own precision; it is not a")
+    print("       measure of the separate, generally larger error from the")
+    print("       finite --v_start_margin_rs0 -- see the help file and EXP-10)")
     print(SEP)
-    print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
-    print("  alone.  Event horizon r_EH(v): global, found by shooting outgoing")
-    print("  light rays to the far future.  r_EH >= r_AH always; the two")
-    print("  coincide only once the mass has stopped growing (v > v2), and the")
-    print("  event horizon starts rising measurably *before* the accretion")
-    print("  begins (v < v1) -- it anticipates mass that has not arrived yet.")
+    no_accretion = (s["m0_msun"] == s["m1_msun"])
+    if no_accretion:
+        print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
+        print("  alone.  Event horizon r_EH(v): global, found by shooting outgoing")
+        print("  light rays to the far future.  Here M0 = M1, so the hole never")
+        print("  accretes: the mass function is constant, and the apparent and")
+        print("  event horizons coincide at r = r_s0 for the whole run, as they")
+        print("  always do in a static (unchanging) spacetime.")
+    else:
+        print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
+        print("  alone.  Event horizon r_EH(v): global, found by shooting outgoing")
+        print("  light rays to the far future.  r_EH >= r_AH always; the two")
+        print("  coincide only once the mass has stopped growing (v > v2), and the")
+        print("  event horizon starts rising measurably *before* the accretion")
+        print("  begins (v < v1) -- it anticipates mass that has not arrived yet.")
     print(SEP)
     _print_warnings(s)
 
@@ -268,6 +290,14 @@ def _run_embed(kw, outdir, csvdir, dpi, lw):
 
 
 def _run_tidal(kw, outdir, csvdir, dpi, lw):
+    # limit_g is validated here, unconditionally, because plot_tidal draws
+    # the illustrative survival-limit line on every tidal plot -- not only
+    # when --compare_masses is supplied and the physics layer's own
+    # validation (inside compare_tidal_across_masses) actually runs.
+    kw["limit_g"] = _finite("limit_g", kw["limit_g"])
+    if kw["limit_g"] <= 0.0:
+        raise ValueError(f"limit_g must be greater than zero; got {kw['limit_g']:g}.")
+
     result = phys.tidal_profile(m_msun=kw["M"], r_min_rs=kw["r_min_rs"],
                                 r_max_rs=kw["r_max_rs"], n_r=kw["n_r"],
                                 separation_m=kw["separation"])

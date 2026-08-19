@@ -168,13 +168,22 @@ def embedding_profile(m_msun=10.0, r_max_rs=8.0, n_r=400):
 
         z(r) = 2 sqrt[ r_s (r - r_s) ]           (Flamm's paraboloid, 1916).
 
-    The embedding is defined only for r >= r_s: the curvature of the
-    equatorial slice grows without bound as r -> r_s, and dz/dr diverges
-    there, which is exactly the vertical "throat" seen in the plot.  Nothing
-    in the static exterior geometry corresponds to r < r_s, so the surface
-    is not extended inside the throat; the popular picture of a "wormhole
-    tube" continuing on the far side belongs to the maximally extended
-    (Kruskal) spacetime, a different and larger solution, not to this one.
+    The embedding is defined only for r >= r_s: dz/dr diverges as r -> r_s,
+    which is exactly the vertical "throat" seen in the plot.  It is worth
+    being precise about what diverges and what does not: dz/dr is the slope
+    of the *embedding* -- an extrinsic property of how the 2-D slice sits
+    inside the auxiliary flat 3-D space used to draw it -- and it is this
+    slope, not the slice's own intrinsic curvature, that blows up.  The
+    intrinsic Gaussian curvature of the slice itself, computable from the
+    2-D metric alone, is K(r) = r_s / (2 r^3): finite everywhere on the
+    domain r >= r_s, including at the throat, where it takes the finite
+    value K(r_s) = 1/(2 r_s^2).  The throat is a smooth, regular minimal
+    surface, not a curvature singularity; nothing in this static exterior
+    geometry is singular before r = 0.  Nothing in the static exterior
+    geometry corresponds to r < r_s, so the surface is not extended inside
+    the throat; the popular picture of a "wormhole tube" continuing on the
+    far side belongs to the maximally extended (Kruskal) spacetime, a
+    different and larger solution, not to this one.
     """
     m_msun, warn_m = check_mass("mass", m_msun)
     r_max_rs = _require_finite("r_max_rs", r_max_rs)
@@ -220,8 +229,9 @@ def embedding_profile(m_msun=10.0, r_max_rs=8.0, n_r=400):
 def _proper_radial_distance(rs, r_from, r_to, n=4000):
     """
     Proper radial distance integral(dr / sqrt(1 - r_s/r)) from r_from to
-    r_to (both >= r_s), by Simpson's rule.  Used only for the small
-    illustrative comparison printed alongside the embedding diagram.
+    r_to (both >= r_s), by the trapezoidal rule on a fine, substitution-
+    regularised grid (see below).  Used only for the small illustrative
+    comparison printed alongside the embedding diagram.
     """
     if r_to <= r_from:
         return 0.0
@@ -249,18 +259,26 @@ def tidal_acceleration(m_msun, r_m, separation_m=1.8):
 
     From the Riemann tensor of the Schwarzschild geometry projected into the
     local orthonormal frame of a free-falling observer, the tidal
-    (geodesic-deviation) acceleration along a radial separation dr is
+    (geodesic-deviation) acceleration magnitudes across a separation dr (or
+    dl) are
 
-        a_radial     = + (2GM/r^3) dr        (stretching, along the line to the hole)
-        a_tangential = - (GM/r^3)  dl        (compressing, in either transverse
-                                               direction)
+        a_radial     = (2GM/r^3) dr          (stretching: the two ends are
+                                               pulled apart, along the line
+                                               to the hole)
+        a_tangential = (GM/r^3)  dl           (compressing: the two ends are
+                                               pushed together, in either
+                                               transverse direction)
 
-    These are exact results for Schwarzschild, and -- a fact worth pausing
-    on -- they are the *same* whether the observer is static or in radial
-    free fall: the relevant curvature components are invariant under boosts
-    along the radial direction, so the tide felt by someone falling in is
-    identical, at each instant, to the tide that would be felt by someone
-    momentarily at rest at the same radius.
+    Both are returned here as positive magnitudes; the sense of each -- one
+    stretching, the other compressing -- is carried by the words "radial"
+    and "tangential" and stated explicitly wherever these numbers are
+    printed, plotted or labelled in a CSV column, rather than by a sign on
+    the number itself.  These are exact results for Schwarzschild, and -- a
+    fact worth pausing on -- they are the *same* whether the observer is
+    static or in radial free fall: the relevant curvature components are
+    invariant under boosts along the radial direction, so the tide felt by
+    someone falling in is identical, at each instant, to the tide that would
+    be felt by someone momentarily at rest at the same radius.
     """
     M_kg = m_msun * M_sun
     r_m = np.asarray(r_m, dtype=float)
@@ -334,10 +352,17 @@ def compare_tidal_across_masses(mass_list_msun, separation_m=1.8, limit_g=100.0)
     and whether that survival radius lies inside or outside the horizon
     (i.e. whether the tidal limit is reached before or after the horizon
     is crossed).
+
+    Each mass is validated the same way as the primary `--M` mass (via
+    `check_mass`), so a comparison mass outside the astrophysically known
+    range is flagged in the returned row's `warnings`, not silently accepted
+    -- the earlier version of this function used a looser check that missed
+    this.
     """
+    limit_g = _require_positive("limit_g", limit_g)
     rows = []
     for m in mass_list_msun:
-        m = _require_positive("mass", m)
+        m, warn_m = check_mass("compare_masses entry", m)
         rs = schwarzschild_radius(m)
         a_r_h, a_t_h = tidal_acceleration(m, rs, separation_m)
         r_crit = survival_radius(m, separation_m, limit_g)
@@ -346,6 +371,7 @@ def compare_tidal_across_masses(mass_list_msun, separation_m=1.8, limit_g=100.0)
             a_radial_horizon=a_r_h, a_radial_horizon_g=a_r_h / g0,
             r_crit_m=r_crit, r_crit_over_rs=r_crit / rs,
             survives_horizon=bool(r_crit < rs),
+            warnings=warn_m,
         ))
     return rows
 
@@ -417,11 +443,24 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     r0 = r0_rs * r_s, from r0 down to r_stop = r_stop_rs * r_s, with RK4 in
     the particle's own proper time tau.
 
-    The step size is refined geometrically as the particle approaches
-    r_stop, in the same spirit as the structure integrators of the other
-    GFtGU programs: the coordinate time t and the redshift factor both vary
-    increasingly rapidly (in fact divergently, in the tau -> tau_horizon
-    limit) as r -> r_s, while r(tau) itself remains perfectly smooth.
+    The step size is refined geometrically near *both* ends of the track,
+    in the same spirit as the structure integrators of the other GFtGU
+    programs. Near r_stop the refinement is needed because the coordinate
+    time t and the redshift factor both vary increasingly rapidly (in fact
+    divergently, in the tau -> tau_horizon limit) as r -> r_s. Near r0 it is
+    needed for a different reason: dr/dtau, as a *function of r*, behaves as
+    -const * sqrt(r0 - r) close to release (the particle starts from rest,
+    so its speed rises like the square root of the distance fallen), which
+    has an infinite slope in r at r = r0. RK4's fourth-order accuracy
+    assumes the right-hand side is smooth on the scale of a step, and that
+    assumption fails right at this branch point; without refining the step
+    there too, the integrator silently drops to first-order accuracy for
+    the whole run, however small --step_frac is made elsewhere. Capping the
+    step by the (shrinking) distance to r0, exactly as is already done for
+    the distance to r_stop, restores full fourth-order behaviour: with this
+    version of the integrator, --step_frac 0.2 (the coarsest value allowed)
+    already agrees with an exact closed-form (cycloid-parametrised) benchmark
+    solution to better than one part in 10^6 for the default parameters.
 
     r_stop_rs must exceed 1: the Schwarzschild t coordinate, and this
     integrator's use of it, both break down at the horizon itself, which is
@@ -465,7 +504,16 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     while r > r_stop and steps < MAX_STEPS:
         drdtau, _ = _infall_state(rs, r0, E, r)
         speed = max(abs(drdtau), 1.0e-6 * c)
-        dtau = min(step_frac * (r - r_stop) / speed, step_frac * rs / c * 50.0)
+        # Cap the step by the (shrinking) distance to r_stop, as before, AND
+        # by the (shrinking) distance back to r0: dr/dtau has an infinite
+        # slope in r right at r0 (release from rest), and without this
+        # second cap RK4's accuracy silently degrades from fourth order to
+        # first order for the whole run -- see the docstring above.
+        dist_to_stop = r - r_stop
+        dist_from_start = max(r0 - r, 1.0e-9 * rs)
+        dtau = min(step_frac * dist_to_stop / speed,
+                  step_frac * dist_from_start / speed,
+                  step_frac * rs / c * 50.0)
         dtau = max(dtau, 1.0e-12 * rs / c)
 
         def f(rr):
@@ -664,12 +712,29 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         radius is bisected until the geodesic neither clearly escapes nor
         clearly plunges by v_end.
 
-    Because the shooting method can only be started at a *finite* v_start,
-    not at v = -infinity, the located event horizon carries a small,
-    controllable residual error before v1 that shrinks as v_start is moved
-    earlier or the number of bisection iterations is increased -- itself a
-    genuine feature of the calculation, not a numerical embarrassment, and
-    one of the suggested exercises asks you to demonstrate it directly.
+    Two distinct, and easily conflated, sources of error attach to the
+    located event horizon, and this function reports only one of them
+    numerically:
+
+      * the **bisection bracket width**, `residual_rs0` below, which
+        measures nothing but how many times the bracket was halved; it
+        shrinks by very nearly a factor of two per iteration of
+        `bisect_iters` and is driven to floating-point-noise levels
+        (~2^-60) by the default settings. It says nothing about how close
+        the *bracket itself* sits to the true critical radius.
+
+      * the **finite-v_start truncation error**, not computed or reported
+        as a single number here: because the true event-horizon generator
+        only asymptotes to r = 2 m0 as v_start -> -infinity, starting the
+        shooting method at any finite v_start leaves the located horizon
+        systematically offset from the true one near v_start, by an amount
+        that empirically decays exponentially in `v_start_margin_rs0` (see
+        Exercise EXP-10, which has the student measure that decay directly)
+        rather than shrinking with `bisect_iters` at all.
+
+    In short: `bisect_iters` controls how precisely the bracketed radius is
+    found; `v_start_margin_rs0` controls how close that bracket is to the
+    true answer. Increasing one without the other buys little.
     """
     m0_msun, warn0 = check_mass("M0", m0_msun)
     m1_msun, warn1 = check_mass("M1", m1_msun)
@@ -698,18 +763,37 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     v_end = v2 + v_end_margin_rs0 * rs0
 
     # --- bisection for the critical (event-horizon) initial radius -------
+    # For a large final-to-initial mass ratio m1/m0, the true critical
+    # radius at v_start (deep in the static era before accretion) sits well
+    # above r_s0: the horizon has to have "grown into" most of its eventual
+    # size early, in the teleological sense, to end up tangent to r_s1 by
+    # the time accretion finishes. A fixed [0.5, 1.5] r_s0 bracket -- fine
+    # for a modest mass ratio -- can fail to bracket the critical radius at
+    # all once m1/m0 is large, so both ends are searched outward
+    # geometrically until they do, before bisecting.
     lo = 0.5 * rs0
-    hi = 1.5 * rs0
+    hi = max(1.5 * rs0, 1.5 * rs1)
 
     def escapes(r_i):
         _, r_arr = _integrate_null_geodesic(v_start, r_i, v_end, m0, m1, v1, v2)
         return r_arr[-1] > rs1
 
+    for _ in range(20):
+        if not escapes(lo):
+            break
+        lo *= 0.5
+    for _ in range(60):
+        if escapes(hi):
+            break
+        hi *= 1.6
+
     if escapes(lo) or not escapes(hi):
         raise RuntimeError(
-            "The shooting-method bracket [0.5, 1.5] r_s0 did not bracket "
-            "the event horizon; this should not happen for a physically "
-            "reasonable mass ratio and accretion duration."
+            f"Could not bracket the event horizon even after adaptively "
+            f"widening the search to [{lo/rs0:.3g}, {hi/rs0:.3g}] r_s0; try "
+            "a larger --v_end_margin_rs0 (so trial geodesics have enough "
+            "advanced time to clearly escape or plunge) or check that "
+            "--M0/--M1 and the accretion window are physically reasonable."
         )
 
     for _ in range(bisect_iters):
@@ -765,9 +849,13 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
 
     warnings = list(warn0) + list(warn1)
     warnings.append(
-        f"the located event horizon carries a residual uncertainty of about "
-        f"{residual_rs0:.2e} r_s0 from the finite v_start and the {bisect_iters}-"
-        "iteration bisection; see the algorithm section of the help file."
+        f"the bisection bracket has been narrowed to a width of about "
+        f"{residual_rs0:.2e} r_s0 ({bisect_iters} iterations); this measures "
+        "only the bisection's own precision, not how close the shooting "
+        "method's finite --v_start_margin_rs0 brings the located horizon to "
+        "the true one -- see the algorithm section of the help file, and "
+        "Exercise EXP-10, for that separate and generally larger source of "
+        "error."
     )
 
     return dict(
