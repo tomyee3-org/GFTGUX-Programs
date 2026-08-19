@@ -629,6 +629,17 @@ def _integrate_null_geodesic(v_start, r_start, v_end, m0, m1, v1, v2,
     appears, spuriously, to turn around and escape.  A trajectory that
     reaches a small radius is instead declared to have plunged and the
     integration stops there.
+
+    "Escapes" and "plunges" are both, necessarily, finite-time numerical
+    verdicts, not the literal infinite-time statements those words describe:
+    a trajectory is called plunged the moment r first drops to or below
+    r_floor = 1e-4*(m0+m1), and unambiguously escaped the moment r first
+    exceeds 1e4*(m0+m1); a trajectory that reaches v_end without doing
+    either is classified by comparing its radius there with r_s1 (see the
+    caller). All three thresholds are comfortably far from the interesting
+    region near the horizon for any physically reasonable mass, but they
+    are thresholds, not limits -- worth stating plainly rather than leaving
+    implicit.
     """
     v_scale = max(v2 - v1, m0 + m1, 1.0e-30)
     r_floor = 1.0e-4 * (m0 + m1)
@@ -730,11 +741,36 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         systematically offset from the true one near v_start, by an amount
         that empirically decays exponentially in `v_start_margin_rs0` (see
         Exercise EXP-10, which has the student measure that decay directly)
-        rather than shrinking with `bisect_iters` at all.
+        rather than shrinking with `bisect_iters` at all. This offset is not
+        a numerical artefact to be apologised for: `r_crit_over_rs0 - 1` IS
+        the (finite-v_start) physical separation between the located event
+        horizon and the static horizon r = 2 m0 -- a real, if approximate,
+        measurement of how far in advance the horizon "knows" accretion is
+        coming, limited only by how early the student chooses to start
+        looking.
 
     In short: `bisect_iters` controls how precisely the bracketed radius is
     found; `v_start_margin_rs0` controls how close that bracket is to the
-    true answer. Increasing one without the other buys little.
+    true answer. Increasing one without the other buys little -- and past
+    some point (each trial geodesic's own RK4 integration error, and
+    eventually floating-point precision in the bisection itself) buys
+    nothing at all: doubling `bisect_iters` from 60 to 120 will not locate
+    the horizon any better once the bracket has already narrowed to a few
+    parts in 2^-60, the scale of double-precision round-off.
+
+    A different, non-shooting construction of the same event horizon is
+    also possible and worth naming explicitly: integrate a single outgoing
+    null geodesic *backward* in v from the exactly known boundary condition
+    r = 2 m1 at v = v2 (once the mass has stopped growing, the event and
+    apparent horizons coincide there), rather than forward from a guessed
+    starting radius at v_start. Backward integration has no bracket to find
+    and no v_start truncation error at all -- it is arguably the numerically
+    cleaner approach. It is not used here because the forward shooting
+    method visualises the event horizon as the separatrix between families
+    of light rays that escape and light rays that plunge (see the geodesic-
+    family panel and Exercises EXP-10/EXP-13), which is judged to have
+    greater tutorial value for a first encounter with a teleological
+    horizon; a future version could offer both as a `--method` choice.
     """
     m0_msun, warn0 = check_mass("M0", m0_msun)
     m1_msun, warn1 = check_mass("M1", m1_msun)
