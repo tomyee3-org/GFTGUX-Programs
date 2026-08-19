@@ -14,9 +14,10 @@ Four calculations share this module:
   hr       The same track calculation repeated over a grid of masses, with
            an optional set of isochrones constructed from the tracks.
 
-  wdcool   White-dwarf structure from the exact Chandrasekhar degenerate
-           electron equation of state (integrated as ODEs in radius),
-           followed by a Mestel cooling ODE for the core temperature.
+  wdcool   White-dwarf structure from the zero-temperature Chandrasekhar
+           degenerate-electron equation of state in Newtonian hydrostatic
+           equilibrium (integrated as ODEs in radius), followed by a Mestel
+           cooling ODE for the core temperature.
 
   nsmr     Neutron-star mass-radius relation from the Tolman-Oppenheimer-
            Volkoff equations with a choice of equation of state.
@@ -27,11 +28,16 @@ solar radii, solar luminosities, kelvin, kilometres and years.
 Every model in this module is a deliberately simple teaching model.  The
 help file (StellarEvolutionTracks.html) states explicitly which results are
 integrated from stated differential equations and which are prescriptions
-or empirical fits.
+or empirical fits.  Nothing here is a substitute for a stellar-evolution
+code: the tracks stop at helium ignition, and the compact-object modes are
+separate calculations reached through a schematic remnant prescription
+rather than a continuous integration.
 """
 
 import math
 import numpy as np
+
+MODEL_VERSION = "1.1.0"
 
 # ----------------------------------------------------------------------
 # Physical constants (SI, CODATA / IAU nominal values)
@@ -62,6 +68,12 @@ MIN_TRACK_STEPS   = 50
 MAX_STRUCT_STEPS  = 400_000
 MAX_GRID_POINTS   = 20_000
 MAX_MASSES        = 40
+
+# Range over which the closures of this one-zone model are pedagogically
+# reliable.  Masses outside it are still accepted -- watching the
+# approximations fail is one of the exercises -- but the run says so.
+TRUSTED_MASS_LO = 0.35     # below this, stars are fully convective
+TRUSTED_MASS_HI = 15.0     # above this, winds and radiation pressure matter
 
 
 # ======================================================================
@@ -122,7 +134,7 @@ def mean_molecular_weight(X, Z):
 
         1/mu = 2X + (3/4)Y + (1/2)Z,        Y = 1 - X - Z.
 
-    Solar composition X = 0.70, Z = 0.02 gives mu = 0.6152.
+    Solar composition X = 0.70, Z = 0.02 gives mu = 0.6173.
     """
     X, Y, Z = check_composition(X, Z)
     inv = 2.0 * X + 0.75 * Y + 0.5 * Z
@@ -209,10 +221,15 @@ def default_core_fraction(m_msun):
     Fraction q_c of the stellar mass that acts as a well-mixed hydrogen
     reservoir on the main sequence.
 
-    Low-mass stars have small radiative cores; stars above about
-    1.2 solar masses have convective cores that grow with mass.  The
+    Stars somewhat below the Sun have small radiative cores; stars above
+    about 1.2 solar masses have convective cores that grow with mass.  The
     values below are calibrated so that a 1 solar-mass track has a
     main-sequence lifetime near 10 Gyr.
+
+    The fixed q_c = 0.15 below 1.2 Msun does NOT describe stars below
+    about 0.35 Msun, which are fully convective and can therefore burn a
+    far larger fraction of their hydrogen.  Tracks below TRUSTED_MASS_LO
+    carry a warning for that reason.
     """
     if m_msun <= 1.2:
         return 0.15
@@ -270,14 +287,23 @@ def zams_curve(m_lo=0.15, m_hi=60.0, n=200):
 # ======================================================================
 def core_mass_luminosity(mc_msun):
     """
-    Paczynski-type core-mass-luminosity relation for a hydrogen shell
-    burning around a degenerate helium core,
+    Schematic core-mass-luminosity closure for a hydrogen shell burning
+    around a degenerate helium core,
 
         L/L_sun = 2.3e5 (M_c/M_sun)^6 .
 
-    Valid roughly for 0.17 < M_c/M_sun < 0.5.  Used here, deliberately,
-    over a slightly wider range as a smooth closure for the shell-burning
-    phase; the help file discusses the consequences.
+    A steep power law of this kind is the standard qualitative statement
+    of the red-giant-branch core-mass-luminosity relation for low-mass
+    stars, and it is the reason the giant-branch tip is nearly a standard
+    candle.  It is NOT the Paczynski relation, which describes shell
+    burning on the thermally pulsing AGB and is close to linear in M_c.
+    The particular coefficient and exponent used here are a pedagogical
+    fit chosen to put the solar giant-branch tip near 2500 L_sun; treat
+    them as a closure, not as a calibrated published relation.
+
+    Reasonable roughly for 0.17 < M_c/M_sun < 0.5.  Used here,
+    deliberately, over a slightly wider range as a smooth closure for the
+    shell-burning phase; the help file discusses the consequences.
     """
     return 2.3e5 * mc_msun ** 6.0
 
@@ -324,22 +350,37 @@ def kelvin_helmholtz_time(m_msun, r_rsun, l_lsun):
 
 def predicted_remnant(m_msun):
     """
-    Predicted end state, using the Kalirai et al. (2008) initial-final
-    mass relation for white dwarfs.  Returns (kind, mass_msun, note).
+    Schematic end state.  Returns (kind, mass_msun, note).
+
+    This is a classification, not a result of the integration: the track
+    stops at helium ignition and everything after it -- core helium
+    burning, the AGB, thermal pulses, mass loss and envelope ejection --
+    is skipped.  The white-dwarf branch uses the linear initial-final
+    mass relation of Kalirai et al. (2008), whose direct constraints
+    reach only to initial masses near 1.2 Msun; applying it from 0.5 to
+    8 Msun is an extrapolation, and later work (for example Cummings et
+    al. 2018) shows the real relation is not globally linear.
     """
     if m_msun < 0.5:
         return ("helium white dwarf",
                 0.109 * m_msun + 0.394,
-                "main-sequence lifetime exceeds the age of the Universe")
+                "schematic; main-sequence lifetime exceeds the age of the "
+                "Universe, so no such star has yet formed")
     if m_msun < 8.0:
         mf = 0.109 * m_msun + 0.394
         kind = "carbon-oxygen white dwarf" if m_msun < 6.5 else "oxygen-neon white dwarf"
-        return (kind, mf, "initial-final mass relation of Kalirai et al. (2008)")
+        note = ("schematic; Kalirai et al. (2008) linear initial-final mass "
+                "relation" if m_msun <= 1.2 else
+                "schematic; Kalirai et al. (2008) relation extrapolated "
+                "beyond its calibrated progenitor range")
+        return (kind, mf, note)
     if m_msun < 20.0:
         return ("neutron star", 1.4,
-                "core-collapse supernova; remnant mass is EOS dependent")
+                "schematic classification; the remnant mass is set by the "
+                "explosion and the nuclear EOS, neither of which is modelled")
     return ("black hole", 0.2 * m_msun,
-            "very rough; strongly dependent on mass loss and metallicity")
+            "schematic classification; very rough, and strongly dependent "
+            "on mass loss and metallicity")
 
 
 # ======================================================================
@@ -435,10 +476,33 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
             f"core_efficiency must lie in (0, 1]; got {core_efficiency:g}."
         )
     expansion = _require_positive("expansion", expansion)
+    if expansion < 1.0:
+        raise ValueError(
+            f"expansion = {expansion:g} is below 1, but the parameter is "
+            "defined as the growth factor R_TAMS/R_ZAMS and detailed models "
+            "show main-sequence stars expand.  Use 1.0 for no expansion."
+        )
     if expansion > 10.0:
         raise ValueError(
             f"expansion = {expansion:g} is unphysically large for the main "
             "sequence; values between 1 and 3 are sensible."
+        )
+
+    # Accepted range and trustworthy range are not the same thing.
+    warnings = []
+    if m_msun < TRUSTED_MASS_LO:
+        warnings.append(
+            f"M = {m_msun:g} Msun is below {TRUSTED_MASS_LO:g} Msun, where "
+            "stars are fully convective.  The fixed hydrogen-reservoir "
+            "fraction q_c of this model understates the available fuel, so "
+            "the lifetime is a lower limit only."
+        )
+    elif m_msun > TRUSTED_MASS_HI:
+        warnings.append(
+            f"M = {m_msun:g} Msun is above {TRUSTED_MASS_HI:g} Msun, where "
+            "mass loss, radiation pressure and convection dominate.  The "
+            "track is qualitative at best; treat it as a demonstration of "
+            "where the approximations fail."
         )
 
     n_ms = _require_int("n_ms", n_ms, lo=MIN_TRACK_STEPS, hi=MAX_TRACK_STEPS)
@@ -500,8 +564,11 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
         return L_l, R_r, mu_eff
 
     # Estimated main-sequence lifetime; used only to pick the timestep.
+    # A track that will be stopped at t_max is resolved over the interval
+    # actually integrated, so a truncated run is not coarser than a
+    # complete one.
     t_ms_est = EPS_NUC * (X - x_end) * reservoir_kg / (L0 * L_sun)
-    dt = t_ms_est / n_ms
+    dt = min(t_ms_est, t_max_gyr * GYR) / n_ms
 
     t_list, Xc_list, L_list, R_list, T_list, mu_list, mc_list = [], [], [], [], [], [], []
     phase_list = []
@@ -510,6 +577,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
     Xc = X
     steps = 0
     truncated = False
+    t_stop_s = t_max_gyr * GYR
 
     while True:
         L_l, R_r, mu_eff = L_of_Xc(Xc)
@@ -524,7 +592,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
 
         if Xc <= x_end:
             break
-        if t > t_max_gyr * GYR:
+        if t >= t_stop_s:
             truncated = True
             break
         steps += 1
@@ -556,24 +624,45 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
                 "check the composition and core fraction."
             )
 
-        if Xc_next <= x_end:
+        if Xc_next <= x_end and t + dt * (Xc - x_end) / (Xc - Xc_next) <= t_stop_s:
             # Interpolate the final partial step so the track ends exactly
             # at the requested central hydrogen abundance.
             frac = (Xc - x_end) / (Xc - Xc_next)
             t += frac * dt
             Xc = x_end
+        elif t + dt >= t_stop_s:
+            # Interpolate to t_max exactly, so a truncated track always
+            # stops at the age the student asked for.
+            frac = (t_stop_s - t) / dt
+            Xc = Xc + frac * (Xc_next - Xc)
+            t = t_stop_s
+            truncated = True
         else:
             t += dt
             Xc = Xc_next
 
-    t_ms = t
-    L_tams = L_list[-1]
-    T_tams = T_list[-1]
-    R_tams = R_list[-1]
-    mc_tams = core_efficiency * qc * m_msun
-
     reached_tams = not truncated
-    phase_end = "main sequence (truncated at t_max)" if truncated else "TAMS"
+    t_stop_reached = t                       # age of the last main-sequence point
+    t_ms = t if reached_tams else float("nan")
+    Xc_end = Xc
+
+    # These are terminal-age main-sequence quantities and are only defined
+    # if the star actually reached the terminal-age main sequence.
+    L_tams = L_list[-1] if reached_tams else float("nan")
+    T_tams = T_list[-1] if reached_tams else float("nan")
+    R_tams = R_list[-1] if reached_tams else float("nan")
+    mc_tams = core_efficiency * qc * m_msun if reached_tams else float("nan")
+    mc_end = mc_list[-1]
+
+    phase_end = ("main sequence, integration stopped at t_max"
+                 if truncated else "TAMS")
+    if truncated:
+        warnings.append(
+            f"the star was still burning hydrogen at t_max = {t_max_gyr:g} "
+            "Gyr, so the track was stopped there.  It has no terminal-age "
+            "main sequence, no post-main-sequence phase and no meaningful "
+            "main-sequence lifetime; raise --t_max to follow it further."
+        )
 
     # ---------------- post-main-sequence ----------------
     #
@@ -590,7 +679,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
     #            Kelvin-Helmholtz timescale t_KH = G M^2/(R L) and ignites
     #            helium when it reaches the Hayashi line.
     #
-    post_ok = include_postms and reached_tams
+    post_ok = bool(include_postms and reached_tams)
     t_he = float("nan")
     L_tip = float("nan")
     mc_ign = float("nan")
@@ -648,7 +737,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
                     mc_list.append(mc)
                     phase_list.append(1 if mc < mc_hayashi else 2)
 
-                if mc >= mc_ign or t > t_max_gyr * GYR:
+                if mc >= mc_ign:
                     break
                 pstep += 1
                 if pstep > MAX_TRACK_STEPS:
@@ -729,6 +818,10 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
         t_ms_gyr=t_ms / GYR,
         t_ms_est_gyr=t_ms_est / GYR,
         truncated=truncated,
+        reached_tams=reached_tams,
+        t_stop_gyr=t_stop_reached / GYR,
+        Xc_end=Xc_end,
+        mc_end=mc_end,
         t_max_gyr=t_max_gyr,
         post_ms=post_ok,
         core_efficiency=core_efficiency,
@@ -743,6 +836,8 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
         phase_end=phase_end,
         remnant_kind=kind, remnant_msun=mrem, remnant_note=note,
         n_points=t_arr.size,
+        warnings=warnings,
+        model_version=MODEL_VERSION,
     )
 
     return dict(
@@ -756,10 +851,38 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
 # ======================================================================
 # HR-diagram grid and isochrones
 # ======================================================================
+def turnoff_mass(masses, t_ms_gyr, age_gyr):
+    """
+    Main-sequence turn-off mass at a given age, from the computed t_MS(M).
+
+    Interpolates log t_MS against log M over the tracks that actually
+    reached the terminal-age main sequence.  Returns None if the age lies
+    outside the range spanned by the mass grid, which is the honest answer
+    for a sparse grid.
+    """
+    pairs = [(m, t) for m, t in zip(masses, t_ms_gyr)
+             if t is not None and math.isfinite(t) and t > 0.0 and m > 0.0]
+    if len(pairs) < 2:
+        return None
+    pairs.sort(key=lambda q: q[1])                 # increasing lifetime
+    lt = [math.log10(t) for _, t in pairs]
+    lm = [math.log10(m) for m, _ in pairs]
+    la = math.log10(age_gyr)
+    if la < lt[0] or la > lt[-1]:
+        return None
+    return float(10.0 ** np.interp(la, lt, lm))
+
+
 def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
     """
     Run integrate_track for each mass and, optionally, build isochrones by
     interpolating every track to a set of ages.
+
+    Isochrone points carry the evolutionary phase of the interpolated
+    point, so that a turn-off can be identified unambiguously rather than
+    guessed from a sparse mass list.  The isochrones are pedagogical
+    interpolants through a handful of simplified tracks, not a substitute
+    for a modern isochrone library.
     """
     masses = [ _require_positive("mass", m) for m in masses ]
     if not masses:
@@ -777,29 +900,51 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
 
     isochrones = []
     if isochrone_gyr:
+        lifetimes = [tr["summary"]["t_ms_gyr"] for tr in tracks]
+        grid_masses = [tr["summary"]["m_msun"] for tr in tracks]
         for age in isochrone_gyr:
             age = _require_positive("isochrone age", age)
             pts = []
             for tr in tracks:
                 t_gyr = tr["t"] / GYR
                 if t_gyr[0] <= age <= t_gyr[-1]:
-                    logT = np.interp(age, t_gyr, np.log10(tr["Teff"]))
-                    logL = np.interp(age, t_gyr, np.log10(tr["L"]))
-                    pts.append((tr["summary"]["m_msun"], logT, logL))
+                    logT = float(np.interp(age, t_gyr, np.log10(tr["Teff"])))
+                    logL = float(np.interp(age, t_gyr, np.log10(tr["L"])))
+                    j = int(np.searchsorted(t_gyr, age, side="right")) - 1
+                    j = min(max(j, 0), tr["phase"].size - 1)
+                    phase = int(tr["phase"][j])
+                    tms = tr["summary"]["t_ms_gyr"]
+                    on_ms = bool(phase == 0)
+                    pts.append((tr["summary"]["m_msun"], logT, logL,
+                                phase, on_ms, tms))
             if len(pts) >= 2:
-                isochrones.append(dict(age_gyr=age, points=pts))
+                isochrones.append(dict(
+                    age_gyr=age, points=pts,
+                    turnoff_mass=turnoff_mass(grid_masses, lifetimes, age),
+                ))
 
     m_z, logT_z, logL_z = zams_curve()
+
+    grid_warnings = []
+    for tr in tracks:
+        for w in tr["summary"]["warnings"]:
+            grid_warnings.append(f"M = {tr['summary']['m_msun']:g} Msun: {w}")
 
     summary = dict(
         n_tracks=len(tracks),
         masses=[tr["summary"]["m_msun"] for tr in tracks],
         lifetimes_gyr=[tr["summary"]["t_ms_gyr"] for tr in tracks],
+        reached_tams=[tr["summary"]["reached_tams"] for tr in tracks],
+        stop_gyr=[tr["summary"]["t_stop_gyr"] for tr in tracks],
         totals_gyr=[tr["summary"]["t_total_gyr"] for tr in tracks],
         n_isochrones=len(isochrones),
         isochrone_ages=[iso["age_gyr"] for iso in isochrones],
+        isochrone_turnoffs=[iso["turnoff_mass"] for iso in isochrones],
+        t_max_gyr=tracks[0]["summary"]["t_max_gyr"],
         X=tracks[0]["summary"]["X"], Z=tracks[0]["summary"]["Z"],
         core_weight=tracks[0]["summary"]["core_weight"],
+        warnings=grid_warnings,
+        model_version=MODEL_VERSION,
     )
     return dict(kind="hr", tracks=tracks, isochrones=isochrones,
                 zams=(m_z, logT_z, logL_z), summary=summary)
@@ -914,9 +1059,13 @@ class PolytropeEOS:
             self.p_nuc = _require_positive("p_nuc", p_nuc)
             if self.p_nuc > 1.0:
                 raise ValueError(
-                    f"p_nuc = {self.p_nuc:g} exceeds 1: the pressure at nuclear "
-                    "density would exceed its rest-mass energy density, which "
-                    "no causal equation of state allows."
+                    f"p_nuc = {self.p_nuc:g} exceeds 1: the pressure at "
+                    "nuclear density would exceed the rest-mass energy "
+                    "density there.  Causality is strictly a condition on "
+                    "the sound speed, dP/d(eps) <= c^2, but P > rho c^2 at "
+                    "saturation density is far outside anything nuclear "
+                    "physics supports, so it is refused here.  Use the "
+                    "reported c_s/c to test causality properly."
                 )
             self.K = self.p_nuc * RHO_NUCLEAR * c**2 / RHO_NUCLEAR ** self.gamma
         self.mass_per_particle = m_n
@@ -1042,8 +1191,16 @@ def integrate_structure(eos, y_c, relativistic=False,
             k2m, k2y = derivs(r + 0.5 * dr, m + 0.5 * dr * k1m, max(y + 0.5 * dr * k1y, 1e-30))
             k3m, k3y = derivs(r + 0.5 * dr, m + 0.5 * dr * k2m, max(y + 0.5 * dr * k2y, 1e-30))
             k4m, k4y = derivs(r + dr, m + dr * k3m, max(y + dr * k3y, 1e-30))
-        except (ValueError, FloatingPointError):
-            break
+        except (ValueError, FloatingPointError) as exc:
+            # A failed Runge-Kutta stage is a numerical or equation-of-state
+            # failure, not a stellar surface.  Reporting it as a surface
+            # would return a plausible-looking but incomplete star.
+            raise RuntimeError(
+                "The structure integration failed at r = "
+                f"{r:.4g} m (central EOS variable {y_c:.6g}): {exc}.  "
+                "Reduce --step_frac, or move the central density into a "
+                "range this equation of state can represent."
+            ) from exc
 
         m_next = m + (dr / 6.0) * (k1m + 2 * k2m + 2 * k3m + k4m)
         y_next = y + (dr / 6.0) * (k1y + 2 * k2y + 2 * k3y + k4y)
@@ -1085,6 +1242,30 @@ def integrate_structure(eos, y_c, relativistic=False,
 # ======================================================================
 # White dwarfs: structure, mass-radius relation, Mestel cooling
 # ======================================================================
+def check_mu_e(mu_e):
+    """
+    Validate the electron mean molecular weight of degenerate matter.
+
+    mu_e is the mass per electron in atomic mass units -- roughly the
+    number of nucleons per electron -- so mu_e = 2 for helium, carbon and
+    oxygen and mu_e = 1 for pure hydrogen.  Ordinary fully ionised matter
+    cannot have fewer than one nucleon per electron, so mu_e >= 1.
+    """
+    mu_e = _require_positive("mu_e", mu_e)
+    if mu_e < 1.0:
+        raise ValueError(
+            f"mu_e = {mu_e:g} means fewer than one nucleon per electron.  "
+            "mu_e is the mass per electron in atomic mass units: 1 for pure "
+            "hydrogen, 2 for helium, carbon or oxygen, about 2.15 for iron."
+        )
+    if mu_e > 3.0:
+        raise ValueError(
+            f"mu_e = {mu_e:g} is heavier per electron than any plausible "
+            "white-dwarf composition (iron is about 2.15)."
+        )
+    return mu_e
+
+
 def chandrasekhar_mass(mu_e):
     """The Chandrasekhar limit, M_Ch = 5.836 mu_e^-2 solar masses."""
     return 5.836 / mu_e**2
@@ -1099,7 +1280,7 @@ def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
     Returns (rho_c, M_kg, R_m).
     """
     m_target_msun = _require_positive("white-dwarf mass", m_target_msun)
-    mu_e = _require_positive("mu_e", mu_e)
+    mu_e = check_mu_e(mu_e)
     m_ch = chandrasekhar_mass(mu_e)
     if m_target_msun >= 0.999 * m_ch:
         raise ValueError(
@@ -1141,8 +1322,12 @@ def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
 
 def wd_mass_radius_curve(mu_e=2.0, n=40, rho_lo=1.0e8, rho_hi=1.0e14,
                          step_frac=0.01):
-    """Mass-radius relation for cold white dwarfs (exact electron EOS)."""
+    """
+    Mass-radius relation for cold white dwarfs, using the zero-temperature
+    electron equation of state in Newtonian hydrostatic equilibrium.
+    """
     n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
+    mu_e = check_mu_e(mu_e)
     eos = FermiGasEOS(m_e, mu_e * m_u)
     rho = np.geomspace(rho_lo, rho_hi, n)
     M = np.empty(n)
@@ -1211,22 +1396,34 @@ def integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=14.0,
     """
     Mestel cooling of a white dwarf.
 
-    Structure: the exact Chandrasekhar EOS fixes R(M).
-    Thermal content: only the ions contribute,
+    Structure: the zero-temperature Chandrasekhar electron EOS fixes R(M).
+    Thermal content: in the Mestel approximation only the ions contribute,
 
         U = (3/2) (k/(A m_u)) M T_c ,
 
-    because the degenerate electrons are already in their ground state.
+    because the heat capacity of the strongly degenerate electrons is
+    smaller than the ionic one by roughly kT/E_F.  It is small, not zero.
     Cooling: dU/dt = -L with L = C M T_c^{7/2}, so
 
-        dT_c/dt = -(2/3) (A m_u/k) C T_c^{7/2} ,
+        dT_c/dt = -(2/3) (A m_u/k) C T_c^{7/2} .
 
-    whose analytic solution is t proportional to T_c^{-5/2}, equivalently
-    the classic Mestel result L proportional to t^{-7/5}.  The program
-    integrates the ODE with RK4 so that the analytic law can be checked.
+    The exact solution with a finite starting temperature is
+
+        t = [U'/(2.5 C M)] (T_c^{-5/2} - T_c0^{-5/2}),
+
+    which is what this routine reports as the analytic age.  Only for
+    T_c << T_c0 does that reduce to t proportional to T_c^{-5/2} and hence
+    to the classic late-time Mestel result L proportional to t^{-7/5}.
+    The program also integrates the ODE with RK4 so the two can be
+    compared.
+
+    Note which composition controls what: the core mu_e sets the structure
+    (radius and central density), A_ion sets the ionic heat capacity, and
+    the ENVELOPE composition (X_env, Z_env) sets the opacity and hence the
+    Mestel coefficient C.  Students are often surprised by the last one.
     """
     m_msun = _require_positive("white-dwarf mass", m_msun)
-    mu_e = _require_positive("mu_e", mu_e)
+    mu_e = check_mu_e(mu_e)
     A_ion = _require_positive("A_ion", A_ion)
     Tc0 = _require_positive("Tc0", Tc0)
     Tc_end = _require_positive("Tc_end", Tc_end)
@@ -1320,6 +1517,8 @@ def integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=14.0,
         n_points=t_arr.size,
         mean_density=M_kg / ((4.0 / 3.0) * np.pi * R_m**3),
         surface_gravity=G * M_kg / R_m**2,
+        warnings=[],
+        model_version=MODEL_VERSION,
     )
 
     return dict(
@@ -1342,8 +1541,13 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     with relativistic=False, the Newtonian) equations for a range of
     central densities.
 
-    Returns central density, mass, radius, compactness and surface
-    gravitational redshift arrays.
+    Returns central density, mass, radius, compactness and (for a
+    relativistic sequence only) surface gravitational redshift arrays.
+
+    The turning point of M(rho_c) marks the onset of radial instability
+    for cold, non-rotating, one-parameter equilibrium sequences of this
+    kind.  It is reported only when the sequence actually turns over
+    within the sampled range, and only for the TOV equations.
     """
     n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
     rho_lo = _require_positive("rho_lo", rho_lo)
@@ -1367,22 +1571,87 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         M[i] = m_kg / M_sun
         R[i] = r_m / 1.0e3            # km
 
-    good = np.isfinite(M) & np.isfinite(R) & (M > 0)
+    # A model is only accepted if it is a star.  A very stiff equation of
+    # state at extreme central density can drive the integrator into a
+    # degenerate state that formally returns, and reporting that as a
+    # zero-radius neutron star would be worse than dropping it.
+    good = (np.isfinite(M) & np.isfinite(R)
+            & (M > 1.0e-4) & (R > 1.0e-2))
+    M = np.where(good, M, np.nan)
+    R = np.where(good, R, np.nan)
     if good.sum() < 3:
         raise RuntimeError(
             "Fewer than three neutron-star models converged; adjust the "
             "central-density range."
         )
 
-    compact = np.full(n, np.nan)
-    z_surf = np.full(n, np.nan)
-    compact[good] = G * M[good] * M_sun / (R[good] * 1.0e3 * c**2)
-    inner = 1.0 - 2.0 * compact[good]
-    ok = inner > 0
-    idx = np.where(good)[0][ok]
-    z_surf[idx] = 1.0 / np.sqrt(1.0 - 2.0 * compact[idx]) - 1.0
+    warnings = []
+    if int(good.sum()) < n:
+        warnings.append(
+            f"{n - int(good.sum())} of the {n} requested central densities "
+            "did not yield a valid stellar model and were dropped.  With a "
+            "very stiff equation of state this usually means the "
+            "integration reached a horizon; lower --rho_hi."
+        )
 
-    i_max = int(np.nanargmax(M))
+    # GM/Rc^2 is always computable.  For a TOV sequence it is the physical
+    # compactness; for a Newtonian sequence it is only a diagnostic showing
+    # where the Newtonian description stops being self-consistent.
+    compact = np.full(n, np.nan)
+    compact[good] = G * M[good] * M_sun / (R[good] * 1.0e3 * c**2)
+
+    # The Schwarzschild surface redshift is a general-relativistic result
+    # and is left undefined for a Newtonian sequence.
+    z_surf = np.full(n, np.nan)
+    if relativistic:
+        idx = np.where(good)[0]
+        idx = idx[1.0 - 2.0 * compact[idx] > 0.0]
+        z_surf[idx] = 1.0 / np.sqrt(1.0 - 2.0 * compact[idx]) - 1.0
+
+    gi = np.where(good)[0]
+    i_max = int(gi[int(np.argmax(M[gi]))])
+
+    # A genuine maximum needs converged models on BOTH sides of it.  If the
+    # mass is still rising at the top of the grid there is no turning point,
+    # nothing has been shown to be unstable, and the largest sampled mass is
+    # not a maximum mass.
+    turning_point = bool(i_max < gi[-1])
+    if not turning_point:
+        warnings.append(
+            "the mass is still rising at the highest central density "
+            "sampled, so no turning point was found.  The value reported "
+            "is the largest sampled mass, not a maximum mass, and no model "
+            "in this sequence has been shown to be unstable.  Raise "
+            "--rho_hi to look for the true turning point."
+        )
+
+    # Sound speed over the whole stable (or, without a turning point, the
+    # whole sampled) branch, not only at the extremum.
+    stable_idx = gi[gi <= i_max]
+    cs_branch = np.array([float(eos.sound_speed_ratio(eos.x_from_density(rho[i])))
+                          for i in stable_idx])
+    cs_max_branch = float(np.max(cs_branch))
+    i_cs = int(stable_idx[int(np.argmax(cs_branch))])
+    cs_at_max = float(eos.sound_speed_ratio(eos.x_from_density(rho[i_max])))
+    causal = bool(cs_max_branch <= 1.0)
+    if not causal:
+        warnings.append(
+            f"the sound speed reaches c_s/c = {cs_max_branch:.3f} on the "
+            f"branch (at rho_c = {rho[i_cs]:.3e} kg/m^3).  This equation of "
+            "state is acausal there and the models above that density are "
+            "not physically admissible."
+        )
+
+    if not relativistic:
+        warnings.append(
+            "this is a Newtonian sequence.  GM/Rc^2 is reported only as a "
+            "self-consistency diagnostic -- it shows where Newtonian "
+            "gravity ceases to be an acceptable approximation -- and the "
+            "gravitational redshift, the Buchdahl bound and the "
+            "turning-point stability criterion, all of which are results of "
+            "general relativity, are not reported."
+        )
+
     summary = dict(
         eos=eos_name,
         relativistic=bool(relativistic),
@@ -1395,14 +1664,18 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         R_at_Mmax=float(R[i_max]),
         rho_at_Mmax=float(rho[i_max]),
         compact_at_Mmax=float(compact[i_max]),
-        cs_over_c_at_Mmax=float(eos.sound_speed_ratio(
-            eos.x_from_density(rho[i_max]))),
-        causal=bool(eos.sound_speed_ratio(eos.x_from_density(rho[i_max])) <= 1.0),
+        cs_over_c_at_Mmax=cs_at_max,
+        cs_over_c_max_branch=cs_max_branch,
+        rho_at_cs_max=float(rho[i_cs]),
+        causal=causal,
         z_at_Mmax=float(z_surf[i_max]),
-        stable_branch=bool(i_max < n - 1),
+        turning_point=turning_point,
+        stable_branch=turning_point,
         M_min=float(np.nanmin(M[good])),
         R_min=float(np.nanmin(R[good])),
         R_max=float(np.nanmax(R[good])),
+        warnings=warnings,
+        model_version=MODEL_VERSION,
     )
     return dict(
         kind="nsmr",

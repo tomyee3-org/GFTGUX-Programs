@@ -10,6 +10,11 @@ Four calculations share one program, chosen with --mode:
     wdcool   white-dwarf structure and Mestel cooling
     nsmr     neutron-star mass-radius relation from the TOV equations
 
+The four calculations are linked models of successive stages, not one
+continuous integration: a track stops at helium ignition, and the remnant
+it reports is a classification from the initial mass that you can then
+hand to wdcool or nsmr yourself.
+
 Examples
 --------
   # Evolution of the Sun
@@ -34,6 +39,7 @@ Examples
 import argparse
 
 import driver_sev
+import physics_sev
 
 
 def _positive_int(text):
@@ -46,22 +52,44 @@ def _positive_int(text):
     return value
 
 
+def _observed_mass(text):
+    """--m_observed: a positive reference mass, or exactly 0 to omit it."""
+    try:
+        value = float(text)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number.") from exc
+    if value < 0.0:
+        raise argparse.ArgumentTypeError(
+            f"{value:g} is negative; use 0 to omit the reference line."
+        )
+    return value
+
+
 def parse_args():
     p = argparse.ArgumentParser(
         prog="StellarEvolutionTracks",
         description=(
             "Integrate simple stellar-evolution equations, build HR-diagram "
             "tracks and isochrones, follow white-dwarf cooling curves, and "
-            "solve the TOV equations for neutron-star mass-radius relations."
+            "solve the TOV equations for neutron-star mass-radius relations.  "
+            "This is a transparent teaching model, not a stellar-evolution "
+            "code: every run prints which of its ingredients were integrated "
+            "and which were prescribed."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    p.add_argument("--version", action="version",
+                   version=f"StellarEvolutionTracks {physics_sev.MODEL_VERSION}")
     p.add_argument("--mode", choices=driver_sev.MODES, default="tracks",
                    help="which calculation to run")
 
     g = p.add_argument_group("Star (modes: tracks, hr)")
     g.add_argument("--mass", type=float, default=1.0, metavar="M_SUN",
-                   help="stellar mass for a single track [solar masses]")
+                   help="stellar mass for a single track [solar masses]; "
+                        "accepted from 0.08 to 120, but the model is only "
+                        f"pedagogically reliable from "
+                        f"{physics_sev.TRUSTED_MASS_LO:g} to "
+                        f"{physics_sev.TRUSTED_MASS_HI:g}")
     g.add_argument("--masses", type=str, metavar="LIST",
                    default="0.5,0.8,1.0,1.5,2.0,3.0,5.0,10.0",
                    help="comma-separated masses for the HR-diagram grid")
@@ -82,7 +110,8 @@ def parse_args():
     g.add_argument("--core_weight", type=float, default=0.36, metavar="W",
                    help="core weighting index w in mu_eff = mu_env^(1-w) mu_core^w")
     g.add_argument("--expansion", type=float, default=1.70, metavar="FACTOR",
-                   help="main-sequence radius growth factor R_TAMS/R_ZAMS")
+                   help="main-sequence radius growth factor R_TAMS/R_ZAMS; "
+                        "must be at least 1 (use 1 for no growth)")
     g.add_argument("--core_efficiency", type=float, default=0.75, metavar="FRAC",
                    help="helium-core mass at TAMS as a fraction of q_c M")
     g.add_argument("--homology", action="store_true",
@@ -97,7 +126,10 @@ def parse_args():
     g.add_argument("--n_post", type=_positive_int, default=3000, metavar="N",
                    help="post-main-sequence steps")
     g.add_argument("--t_max", type=float, default=15.0, metavar="GYR",
-                   help="stop a track at this age if it is still burning")
+                   help="stop a track at this age if it is still burning "
+                        "hydrogen; it does not limit the post-main-sequence "
+                        "phase, and a track stopped this way reports no "
+                        "main-sequence lifetime and no remnant timeline")
     g.add_argument("--x_end", type=float, default=1.0e-3, metavar="FRAC",
                    help="central hydrogen fraction that defines the TAMS")
 
@@ -105,7 +137,10 @@ def parse_args():
     g.add_argument("--wd_mass", type=float, default=0.6, metavar="M_SUN",
                    help="white-dwarf mass [solar masses]")
     g.add_argument("--mu_e", type=float, default=2.0, metavar="MU",
-                   help="electron mean molecular weight of the degenerate core")
+                   help="mean molecular weight per electron of the degenerate "
+                        "core, i.e. the mass per electron in atomic mass "
+                        "units (about the number of nucleons per electron): "
+                        "1 for hydrogen, 2 for helium, carbon or oxygen")
     g.add_argument("--A_ion", type=float, default=14.0, metavar="A",
                    help="mean ion mass number (14 for a carbon-oxygen mixture)")
     g.add_argument("--X_env", type=float, default=0.70, metavar="FRAC",
@@ -121,7 +156,10 @@ def parse_args():
 
     g = p.add_argument_group("Neutron star (mode: nsmr)")
     g.add_argument("--eos", choices=("polytrope", "neutron"),
-                   default="polytrope", help="equation of state")
+                   default="polytrope",
+                   help="equation of state: a toy stiff polytrope, or the "
+                        "ideal degenerate neutron gas of Oppenheimer and "
+                        "Volkoff")
     g.add_argument("--gamma", type=float, default=None, metavar="GAMMA",
                    help="polytropic index (default 2.5)")
     g.add_argument("--p_nuc", type=float, default=None, metavar="FRAC",
@@ -135,8 +173,11 @@ def parse_args():
                    help="lowest central density")
     g.add_argument("--rho_hi", type=float, default=5.0e19, metavar="KG_M3",
                    help="highest central density")
-    g.add_argument("--m_observed", type=float, default=2.01, metavar="M_SUN",
-                   help="observational lower bound drawn on the plot; 0 to omit")
+    g.add_argument("--m_observed", type=_observed_mass, default=2.01,
+                   metavar="M_SUN",
+                   help="observational reference mass drawn on the first "
+                        "panel, for comparison with measured high-mass "
+                        "pulsars; 0 to omit it")
 
     g = p.add_argument_group("Structure integration control (modes: wdcool, nsmr)")
     g.add_argument("--step_frac", type=float, default=0.01, metavar="FRAC",
@@ -175,7 +216,7 @@ def main():
             eos=args.eos, n_mr=args.n_mr,
             rho_lo=args.rho_lo, rho_hi=args.rho_hi,
             newtonian=args.newtonian, p_nuc=args.p_nuc, gamma=args.gamma,
-            m_observed=(None if args.m_observed <= 0 else args.m_observed),
+            m_observed=(None if args.m_observed == 0 else args.m_observed),
             step_frac=args.step_frac,
             outdir=args.outdir, csvdir=args.csvdir, no_plot=args.no_plot,
             dpi=args.dpi, lw=args.lw,

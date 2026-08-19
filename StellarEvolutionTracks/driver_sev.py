@@ -90,6 +90,47 @@ def _parse_float_list(name, text, lo=None, hi=None, max_items=None):
 # ======================================================================
 # CSV output
 # ======================================================================
+PARAMS_BY_MODE = {
+    "tracks": ("mass", "X", "Z", "qc", "burning", "opacity", "core_weight",
+               "expansion", "core_efficiency", "homology", "postms",
+               "n_ms", "n_post", "t_max", "x_end"),
+    "hr":     ("masses", "isochrones", "X", "Z", "qc", "burning", "opacity",
+               "core_weight", "expansion", "core_efficiency", "homology",
+               "postms", "n_ms", "n_post", "t_max", "x_end"),
+    "wdcool": ("wd_mass", "mu_e", "A_ion", "X_env", "Z_env", "Tc0", "Tc_end",
+               "n_cool", "step_frac"),
+    "nsmr":   ("eos", "gamma", "p_nuc", "newtonian", "n_mr", "rho_lo",
+               "rho_hi", "m_observed", "step_frac"),
+}
+
+
+def _provenance(mode, kw):
+    """
+    Comment lines recording exactly how a data file was produced.
+
+    Only the parameters that the selected mode actually uses are listed,
+    so a CSV file can never suggest that an irrelevant option had an
+    effect on the numbers beside it.
+    """
+    lines = [
+        f"StellarEvolutionTracks version {phys.MODEL_VERSION}",
+        f"mode = {mode}",
+        f"run at {datetime.now().isoformat(timespec='seconds')}",
+        "parameters actually used by this mode:",
+    ]
+    for name in PARAMS_BY_MODE[mode]:
+        value = kw.get(name)
+        if name == "qc" and value is None:
+            value = "mass dependent (default)"
+        if name == "burning" and value is None:
+            value = "mass dependent (default)"
+        if name in ("gamma", "p_nuc") and value is None:
+            value = "default"
+        lines.append(f"    {name} = {value}")
+    lines.append("options belonging to the other modes were not used")
+    return lines
+
+
 def _write_csv(csvdir, prefix, header, rows, comments=()):
     os.makedirs(csvdir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -134,7 +175,27 @@ TRACK_HEADER = ["M_Msun", "age_Gyr", "phase", "X_c", "Mcore_Msun", "mu_eff",
 # ======================================================================
 def _head(title):
     print(SEP)
-    print(f"  StellarEvolutionTracks — {title}")
+    print(f"  StellarEvolutionTracks {phys.MODEL_VERSION} — {title}")
+    print(SEP)
+
+
+def _print_warnings(s):
+    """Print any model-validity warnings raised by the physics layer."""
+    notes = s.get("warnings") or []
+    if not notes:
+        return
+    print("  NOTES ON THIS RUN")
+    for note in notes:
+        text = note.strip()
+        line = "        "
+        for word in text.split():
+            if len(line) + len(word) + 1 > W:
+                print(line)
+                line = "        " + word
+            else:
+                line = f"{line} {word}" if line.strip() else line + word
+        if line.strip():
+            print(line)
     print(SEP)
 
 
@@ -154,14 +215,19 @@ def _print_track_summary(s):
     print(f"  ZAMS                : L = {s['L_zams']:.4g} Lsun,"
           f"  R = {s['R_zams']:.4g} Rsun,  Teff = {s['T_zams']:.0f} K")
     if s["truncated"]:
-        print(f"  Main sequence       : still burning at t_max = {s['t_max_gyr']:g} Gyr")
-        print(f"  Central X_c reached : {s['X']:.3f} -> see the data file")
+        print(f"  Integration stopped : t_max = {s['t_stop_gyr']:.4g} Gyr,"
+              " still on the main sequence")
+        print(f"  MS lifetime         : not reached; t_MS > {s['t_stop_gyr']:.4g} Gyr")
+        print(f"  Central X_c at stop : {s['Xc_end']:.4f}"
+              f"   (started at {s['X']:.3f})")
+        print(f"  Helium core at stop : {s['mc_end']:.4f}  Msun"
+              f"   (core efficiency {s['core_efficiency']:.2f})")
     else:
         print(f"  TAMS                : L = {s['L_tams']:.4g} Lsun,"
               f"  Teff = {s['T_tams']:.0f} K")
         print(f"  MS lifetime         : {s['t_ms_gyr']:.4g}  Gyr")
-    print(f"  Helium core at TAMS : {s['mc_tams']:.4f}  Msun"
-          f"   (core efficiency {s['core_efficiency']:.2f})")
+        print(f"  Helium core at TAMS : {s['mc_tams']:.4f}  Msun"
+              f"   (core efficiency {s['core_efficiency']:.2f})")
     if s["post_ms"]:
         print(f"  Post-MS regime      : {s['post_regime']}")
         print(f"  Post-MS duration    : {s['t_post_gyr']:.4g}  Gyr")
@@ -169,14 +235,23 @@ def _print_track_summary(s):
         print(f"  Core mass at end    : {s['mc_ign']:.4f}  Msun")
         print(f"  Luminosity at end   : {s['L_tip']:.5g}  Lsun")
         print(f"  Total age at end    : {s['t_total_gyr']:.4g}  Gyr")
+    elif s["truncated"]:
+        print("  Post-MS             : not computed (no TAMS was reached)")
     else:
         print("  Post-MS             : not computed")
     print(SEP)
-    print(f"  Predicted remnant   : {s['remnant_kind']}"
+    print(f"  Schematic remnant   : {s['remnant_kind']}"
           f",  about {s['remnant_msun']:.3f} Msun")
     print(f"                        ({s['remnant_note']})")
+    if s["post_ms"]:
+        print("  The track above stops at helium ignition.  The remnant is a")
+        print("  classification from the initial mass, not an integrated result.")
+    else:
+        print("  The remnant is a classification from the initial mass, not an")
+        print("  integrated result: this track did not reach helium ignition.")
     print(f"  Track points        : {s['n_points']:,}")
     print(SEP)
+    _print_warnings(s)
 
 
 def _print_hr_summary(s):
@@ -187,10 +262,26 @@ def _print_hr_summary(s):
           + (f"  at {', '.join(f'{a:g}' for a in s['isochrone_ages'])} Gyr"
              if s["n_isochrones"] else ""))
     print(SEP)
-    print(f"  {'M [Msun]':>10}  {'t_MS [Gyr]':>12}  {'t_end [Gyr]':>12}")
-    for m, tms, tot in zip(s["masses"], s["lifetimes_gyr"], s["totals_gyr"]):
-        print(f"  {m:10.3f}  {tms:12.4g}  {tot:12.4g}")
+    print(f"  {'M [Msun]':>10}  {'t_MS [Gyr]':>13}  {'t_end [Gyr]':>12}")
+    for m, tms, tot, reached, stop in zip(
+            s["masses"], s["lifetimes_gyr"], s["totals_gyr"],
+            s["reached_tams"], s["stop_gyr"]):
+        label = f"{tms:13.4g}" if reached else f"{'> ' + format(stop, '.4g'):>13}"
+        print(f"  {m:10.3f}  {label}  {tot:12.4g}")
+    if not all(s["reached_tams"]):
+        print(f"  '>' marks a track still on the main sequence at t_max = "
+              f"{s['t_max_gyr']:g} Gyr:")
+        print("  its main-sequence lifetime is longer than the value shown.")
+    if s["n_isochrones"]:
+        print(SEP)
+        print(f"  {'age [Gyr]':>10}  {'turn-off mass [Msun]':>22}")
+        for age, mto in zip(s["isochrone_ages"], s["isochrone_turnoffs"]):
+            text = f"{mto:22.3f}" if mto is not None else f"{'outside the mass grid':>22}"
+            print(f"  {age:10.4g}  {text}")
+        print("  Turn-off masses come from t_MS(M) over the tracks that")
+        print("  reached the TAMS; widen --masses or --t_max to cover an age.")
     print(SEP)
+    _print_warnings(s)
 
 
 def _print_wd_summary(s):
@@ -220,6 +311,12 @@ def _print_wd_summary(s):
     print(f"  Relative difference : {rel:.3e}")
     print(f"  Cooling points      : {s['n_points']:,}")
     print(SEP)
+    print("  Model: zero-temperature Chandrasekhar electron structure with")
+    print("  classical Mestel cooling.  The core mu_e sets the structure,")
+    print("  A_ion sets the ionic heat capacity, and the ENVELOPE X and Z")
+    print("  set the opacity and therefore the cooling clock.")
+    print(SEP)
+    _print_warnings(s)
 
 
 def _print_ns_summary(s):
@@ -235,20 +332,34 @@ def _print_ns_summary(s):
     print(f"  Central densities   : {s['rho_lo']:.3e} .. {s['rho_hi']:.3e} kg/m^3"
           f"   ({s['n_models']} models)")
     print(SEP)
-    print(f"  Maximum mass        : {s['M_max']:.4f}  Msun")
+    if s["turning_point"]:
+        print(f"  Maximum mass        : {s['M_max']:.4f}  Msun")
+    else:
+        print(f"  Largest sampled mass: {s['M_max']:.4f}  Msun"
+              "   (NOT a maximum: see below)")
     print(f"  Radius there        : {s['R_at_Mmax']:.3f}  km")
     print(f"  Central density     : {s['rho_at_Mmax']:.4e}  kg/m^3")
-    print(f"  Compactness GM/Rc^2 : {s['compact_at_Mmax']:.4f}"
-          f"   (Buchdahl bound 0.4444)")
-    print(f"  Surface redshift z  : {s['z_at_Mmax']:.4f}")
-    print(f"  Sound speed c_s/c   : {s['cs_over_c_at_Mmax']:.4f}"
-          + ("" if s["causal"] else "   *** ACAUSAL: c_s > c ***"))
+    if s["relativistic"]:
+        print(f"  Compactness GM/Rc^2 : {s['compact_at_Mmax']:.4f}"
+              f"   (Buchdahl bound 0.4444)")
+        print(f"  Surface redshift z  : {s['z_at_Mmax']:.4f}")
+    else:
+        print(f"  GM/Rc^2 there       : {s['compact_at_Mmax']:.4f}"
+              "   (diagnostic only)")
+        print("                        A Newtonian star with GM/Rc^2 near or")
+        print("                        above 0.1 is not self-consistent; the")
+        print("                        redshift and the Buchdahl bound are")
+        print("                        results of general relativity and are")
+        print("                        therefore not reported here.")
+    print(f"  Sound speed c_s/c   : {s['cs_over_c_at_Mmax']:.4f} there,"
+          f"  {s['cs_over_c_max_branch']:.4f} peak on the branch"
+          + ("" if s["causal"] else "   *** ACAUSAL ***"))
     print(f"  Radius range        : {s['R_min']:.2f} .. {s['R_max']:.2f}  km")
-    if not s["stable_branch"]:
-        print("  NOTE: the mass is still rising at the highest central density")
-        print("        sampled, so this maximum is only the end of the grid.")
-        print("        Increase --rho_hi to find the true turning point.")
+    if s["turning_point"] and s["relativistic"]:
+        print("  The turning point of M(rho_c) marks the onset of radial")
+        print("  instability for cold, non-rotating sequences of this kind.")
     print(SEP)
+    _print_warnings(s)
 
 
 # ======================================================================
@@ -267,15 +378,17 @@ def _run_tracks(kw, outdir, csvdir, dpi, lw):
     _print_track_summary(result["summary"])
     if csvdir is not None:
         s = result["summary"]
+        life = (f"t_MS = {s['t_ms_gyr']:.6g} Gyr" if s["reached_tams"]
+                else f"TAMS not reached; t_MS > {s['t_stop_gyr']:.6g} Gyr")
         _write_csv(csvdir, f"sev_track_{s['m_msun']:.2f}Msun",
                    TRACK_HEADER, _track_rows(result),
-                   comments=[
-                       "StellarEvolutionTracks - single-star evolution track",
-                       f"M = {s['m_msun']} Msun, X = {s['X']}, Z = {s['Z']}",
-                       f"burning = {s['burning']}, opacity = {s['opacity']}, "
-                       f"qc = {s['qc']:.4f}, core_weight = {s['core_weight']}",
-                       f"t_MS = {s['t_ms_gyr']:.6g} Gyr",
-                   ])
+                   comments=["single-star evolution track"]
+                   + _provenance("tracks", kw)
+                   + [f"resolved qc = {s['qc']:.4f}, burning = {s['burning']}",
+                      life,
+                      f"schematic remnant: {s['remnant_kind']}, "
+                      f"{s['remnant_msun']:.4f} Msun (not an integrated result)"]
+                   + [f"warning: {w}" for w in s["warnings"]])
     if not kw["no_plot"]:
         viz.plot_track(result, outdir=outdir, dpi=dpi, lw=lw)
     return result
@@ -302,20 +415,31 @@ def _run_hr(kw, outdir, csvdir, dpi, lw):
         for tr in result["tracks"]:
             rows.extend(_track_rows(tr))
         _write_csv(csvdir, "sev_hr_grid", TRACK_HEADER, rows,
-                   comments=[
-                       "StellarEvolutionTracks - HR-diagram track grid",
-                       f"masses = {result['summary']['masses']}",
-                       f"X = {result['summary']['X']}, Z = {result['summary']['Z']}",
-                   ])
+                   comments=["HR-diagram track grid"]
+                   + _provenance("hr", kw)
+                   + [f"warning: {w}" for w in result["summary"]["warnings"]])
         if result["isochrones"]:
             iso_rows = []
+            names = {0: "MS", 1: "SGB", 2: "RGB"}
             for iso in result["isochrones"]:
-                for m, lt, ll in iso["points"]:
-                    iso_rows.append([f"{iso['age_gyr']:g}", f"{m:.4f}",
-                                     f"{lt:.6f}", f"{ll:.6f}"])
+                mto = iso["turnoff_mass"]
+                for m, lt, ll, phase, on_ms, tms in iso["points"]:
+                    iso_rows.append([
+                        f"{iso['age_gyr']:g}", f"{m:.4f}",
+                        f"{lt:.6f}", f"{ll:.6f}",
+                        names[phase], "yes" if on_ms else "no",
+                        f"{tms:.6g}" if tms == tms else "not reached",
+                        f"{mto:.4f}" if mto is not None else "",
+                    ])
             _write_csv(csvdir, "sev_hr_isochrones",
-                       ["age_Gyr", "M_Msun", "log10_Teff", "log10_L"], iso_rows,
-                       comments=["StellarEvolutionTracks - isochrones"])
+                       ["age_Gyr", "M_Msun", "log10_Teff", "log10_L",
+                        "phase", "still_on_MS", "t_MS_Gyr",
+                        "turnoff_mass_Msun"], iso_rows,
+                       comments=["isochrones interpolated along the tracks",
+                                 "turnoff_mass_Msun is the mass whose t_MS "
+                                 "equals the isochrone age; blank if that age "
+                                 "falls outside the mass grid"]
+                       + _provenance("hr", kw))
     if not kw["no_plot"]:
         viz.plot_hr_diagram(result, outdir=outdir, dpi=dpi, lw=lw)
     return result
@@ -344,21 +468,20 @@ def _run_wdcool(kw, outdir, csvdir, dpi, lw):
         _write_csv(csvdir, f"sev_wdcool_{s['m_msun']:.2f}Msun",
                    ["age_Gyr", "Tc_K", "L_Lsun", "Teff_K", "log10_Teff", "log10_L"],
                    rows,
-                   comments=[
-                       "StellarEvolutionTracks - white-dwarf Mestel cooling",
-                       f"M = {s['m_msun']:.4f} Msun, R = {s['R_km']:.2f} km, "
-                       f"rho_c = {s['rho_c']:.4e} kg/m^3",
-                       f"mu_e = {s['mu_e']}, A_ion = {s['A_ion']}, "
-                       f"envelope X = {s['X_env']}, Z = {s['Z_env']}",
-                   ])
+                   comments=["white-dwarf structure and classical Mestel cooling"]
+                   + _provenance("wdcool", kw)
+                   + [f"R = {s['R_km']:.2f} km, rho_c = {s['rho_c']:.4e} kg/m^3",
+                      f"Kramers kappa_0 = {s['kappa0']:.6e} SI "
+                      "(bound-free plus free-free)",
+                      f"Mestel coefficient C = {s['mestel_C']:.6e} SI"])
         mr_rows = [[f"{r:.6e}", f"{m:.6f}",
                     f"{rr * phys.R_sun / 1e3:.4f}"]
                    for r, m, rr in zip(result["mr_rho"], result["mr_M"],
                                        result["mr_R"])]
         _write_csv(csvdir, "sev_wd_mass_radius",
                    ["rho_c_kg_m3", "M_Msun", "R_km"], mr_rows,
-                   comments=["StellarEvolutionTracks - cold white-dwarf "
-                             "mass-radius relation"])
+                   comments=["cold white-dwarf mass-radius relation"]
+                   + _provenance("wdcool", kw))
     if not kw["no_plot"]:
         viz.plot_wd_cooling(result, outdir=outdir, dpi=dpi, lw=lw)
     return result
@@ -374,26 +497,40 @@ def _run_nsmr(kw, outdir, csvdir, dpi, lw):
     )
     _print_ns_summary(result["summary"])
     if csvdir is not None:
+        s = result["summary"]
+        classify = s["turning_point"] and s["relativistic"]
         rows = []
         for i in range(result["rho"].size):
+            if classify:
+                branch = "stable" if i <= result["i_max"] else "unstable"
+            else:
+                branch = "not classified"
             rows.append([
                 f"{result['rho'][i]:.6e}",
                 f"{result['M'][i]:.6f}",
                 f"{result['R'][i]:.4f}",
                 f"{result['compact'][i]:.6f}",
-                f"{result['z'][i]:.6f}",
-                "stable" if i <= result["i_max"] else "unstable",
+                f"{result['z'][i]:.6f}" if s["relativistic"] else "",
+                branch,
             ])
-        s = result["summary"]
+        headline = (f"M_max = {s['M_max']:.4f} Msun at R = {s['R_at_Mmax']:.3f} km"
+                    if s["turning_point"] else
+                    f"largest sampled mass {s['M_max']:.4f} Msun at "
+                    f"R = {s['R_at_Mmax']:.3f} km; no turning point was found")
+        notes = ["neutron-star mass-radius sequence",
+                 "gravity: " + ("TOV (general relativistic)"
+                                if s["relativistic"] else "Newtonian")]
+        if not s["relativistic"]:
+            notes.append("surface_redshift_z is blank: it is a GR result")
+            notes.append("compactness_GM_Rc2 is a self-consistency diagnostic "
+                         "only, not a physical compactness")
         _write_csv(csvdir, f"sev_nsmr_{s['eos']}",
                    ["rho_c_kg_m3", "M_Msun", "R_km", "compactness_GM_Rc2",
                     "surface_redshift_z", "branch"], rows,
-                   comments=[
-                       "StellarEvolutionTracks - neutron-star mass-radius relation",
-                       f"EOS = {s['eos']}, "
-                       + ("TOV" if s["relativistic"] else "Newtonian"),
-                       f"M_max = {s['M_max']:.4f} Msun at R = {s['R_at_Mmax']:.3f} km",
-                   ])
+                   comments=notes + _provenance("nsmr", kw)
+                   + [headline,
+                      f"peak c_s/c on the branch = {s['cs_over_c_max_branch']:.4f}"]
+                   + [f"warning: {w}" for w in s["warnings"]])
     if not kw["no_plot"]:
         viz.plot_ns_mass_radius(result, outdir=outdir, dpi=dpi, lw=lw,
                                 m_observed=kw["m_observed"])

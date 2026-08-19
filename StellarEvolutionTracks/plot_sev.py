@@ -117,9 +117,19 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
                      color=PHASE_COLOR[code], lw=lw, label=PHASE_NAME[code])
     ax1.plot(np.log10(T[0]), np.log10(L[0]), marker="o", ms=6, color="k",
              ls="none", label="ZAMS", zorder=5)
-    i_tams = int(np.argmax(t_gyr >= s["t_ms_gyr"])) if s["post_ms"] else len(T) - 1
-    ax1.plot(np.log10(T[i_tams]), np.log10(L[i_tams]), marker="s", ms=6,
-             mfc="none", mec="k", ls="none", label="TAMS", zorder=5)
+    if s["reached_tams"]:
+        i_tams = (int(np.argmax(t_gyr >= s["t_ms_gyr"])) if s["post_ms"]
+                  else len(T) - 1)
+        ax1.plot(np.log10(T[i_tams]), np.log10(L[i_tams]), marker="s", ms=6,
+                 mfc="none", mec="k", ls="none", label="TAMS", zorder=5)
+    else:
+        # The track was stopped at t_max while still burning hydrogen, so
+        # its last point is an integration stop, not a terminal-age main
+        # sequence.  Labelling it TAMS would be a straightforward lie.
+        ax1.plot(np.log10(T[-1]), np.log10(L[-1]), marker="x", ms=8, mew=1.6,
+                 color="k", ls="none",
+                 label=fr"stopped at $t_{{\rm max}}={s['t_stop_gyr']:.3g}\,$Gyr",
+                 zorder=5)
     if s["post_ms"]:
         ax1.plot(np.log10(T[-1]), np.log10(L[-1]), marker="*", ms=13,
                  color=C_MARK, ls="none", label="He ignition", zorder=5)
@@ -133,8 +143,13 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
     # --- Panel 2: luminosity history ----------------------------------
     ax2.plot(t_gyr, L, color=C_MS, lw=lw)
     ax2.set_yscale("log")
-    ax2.axvline(s["t_ms_gyr"], color="k", lw=0.9, ls=":",
-                label=fr"TAMS  $t={s['t_ms_gyr']:.3g}\,$Gyr")
+    if s["reached_tams"]:
+        ax2.axvline(s["t_ms_gyr"], color="k", lw=0.9, ls=":",
+                    label=fr"TAMS  $t={s['t_ms_gyr']:.3g}\,$Gyr")
+    else:
+        ax2.axvline(s["t_stop_gyr"], color="k", lw=0.9, ls=":",
+                    label=fr"integration stop  $t_{{\rm max}}"
+                          fr"={s['t_stop_gyr']:.3g}\,$Gyr (still on the MS)")
     ax2.set_xlabel("Age [Gyr]")
     ax2.set_ylabel(r"$L/L_\odot$")
     ax2.set_title("Luminosity history")
@@ -144,7 +159,8 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
     # --- Panel 3: radius history --------------------------------------
     ax3.plot(t_gyr, R, color=C_RGB, lw=lw)
     ax3.set_yscale("log")
-    ax3.axvline(s["t_ms_gyr"], color="k", lw=0.9, ls=":")
+    ax3.axvline(s["t_ms_gyr"] if s["reached_tams"] else s["t_stop_gyr"],
+                color="k", lw=0.9, ls=":")
     ax3.set_xlabel("Age [Gyr]")
     ax3.set_ylabel(r"$R/R_\odot$")
     ax3.set_title("Radius history")
@@ -165,11 +181,16 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
     ax4.legend(handles, [h.get_label() for h in handles],
                fontsize=8, loc="center right", framealpha=0.8)
 
-    note = [fr"$t_{{\rm MS}}={s['t_ms_gyr']:.3g}\,$Gyr"]
+    if s["reached_tams"]:
+        note = [fr"$t_{{\rm MS}}={s['t_ms_gyr']:.3g}\,$Gyr"]
+    else:
+        note = [fr"$t_{{\rm MS}}>{s['t_stop_gyr']:.3g}\,$Gyr (not reached)"]
     if s["post_ms"]:
         note.append(fr"$t_{{\rm post}}={s['t_post_gyr']:.3g}\,$Gyr")
-    note.append(f"remnant: {s['remnant_kind']}")
-    note.append(fr"$M_{{\rm rem}}\approx{s['remnant_msun']:.2f}\,M_\odot$")
+        note.append("track ends at He ignition")
+    note.append(f"schematic remnant: {s['remnant_kind']}")
+    note.append(fr"$M_{{\rm rem}}\approx{s['remnant_msun']:.2f}\,M_\odot$"
+                " (not integrated)")
     ax1.text(0.02, 0.98, "\n".join(note), transform=ax1.transAxes,
              ha="left", va="top", fontsize=8,
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
@@ -227,7 +248,15 @@ def plot_hr_diagram(result, outdir=None, dpi=150, lw=1.5, figsize=(10.0, 8.5)):
     all_T = np.concatenate([np.log10(tr["Teff"]) for tr in tracks])
     all_L = np.concatenate([np.log10(tr["L"]) for tr in tracks])
     _frame_hr(ax, all_T, all_L, pad_x=0.06, pad_y=0.35)
-    ax.set_title(r"Masses annotated at the ZAMS, in $M_\odot$", fontsize=9.5)
+    truncated = [m for m, ok in zip(s["masses"], s["reached_tams"]) if not ok]
+    subtitle = r"Masses annotated at the ZAMS, in $M_\odot$"
+    subtitle += "  ·  schematic teaching tracks and isochrones"
+    if truncated:
+        subtitle += ("\nstill on the main sequence at "
+                     fr"$t_{{\rm max}}={s['t_max_gyr']:g}\,$Gyr: "
+                     + ", ".join(f"{m:g}" for m in truncated)
+                     + r"$\,M_\odot$")
+    ax.set_title(subtitle, fontsize=9.5)
     ax.legend(fontsize=8.5, loc="lower left", framealpha=0.85)
 
     _finish(fig, outdir, "sev_hr", dpi)
@@ -250,7 +279,9 @@ def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
     fig.suptitle(
         f"White-dwarf structure and cooling — "
         fr"$M={s['m_msun']:.3f}\,M_\odot$,  $\mu_e={s['mu_e']:.2f}$,  "
-        fr"$A_{{\rm ion}}={s['A_ion']:.0f}$,  envelope $Z={s['Z_env']:g}$",
+        fr"$A_{{\rm ion}}={s['A_ion']:.0f}$,  envelope $Z={s['Z_env']:g}$"
+        "\nzero-temperature Chandrasekhar structure with classical Mestel "
+        "cooling: ages are model ages, not modern cooling ages",
         fontsize=11.5, fontweight="bold")
 
     # --- Panel 1: mass-radius relation --------------------------------
@@ -287,7 +318,7 @@ def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
     ax2.set_yscale("log")
     ax2.set_xlabel("Cooling age [Gyr]")
     ax2.set_ylabel(r"$L/L_\odot$")
-    ax2.set_title("Cooling luminosity")
+    ax2.set_title("Cooling luminosity (Mestel model)")
     ax2.grid(True, which="both", lw=0.3, alpha=0.5)
     ax2.legend(fontsize=8, loc="lower left", framealpha=0.85)
 
@@ -339,49 +370,73 @@ def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
 # ----------------------------------------------------------------------
 def plot_ns_mass_radius(result, outdir=None, dpi=150, lw=1.7,
                         figsize=(13.0, 4.8), m_observed=2.01):
-    """Neutron-star mass-radius relation with stability and GR limits."""
+    """
+    Neutron-star mass-radius relation.
+
+    The figure adapts to what has actually been computed.  Stability
+    labels appear only when the sequence really turned over; the
+    gravitational redshift, the horizon line and the Buchdahl bound are
+    results of general relativity and are drawn only for a TOV sequence.
+    For a Newtonian run the third panel becomes a self-consistency
+    diagnostic instead.
+    """
     s = result["summary"]
     rho = result["rho"]
     M = result["M"]
     R = result["R"]
     z = result["z"]
     i_max = result["i_max"]
+    gr = bool(s["relativistic"])
+    turned = bool(s["turning_point"])
+    classify = gr and turned            # only then is "unstable" meaningful
 
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=True)
     ax1, ax2, ax3 = axes
 
-    eos_label = (f"ideal degenerate neutron gas" if s["eos"] == "neutron"
-                 else fr"polytrope $\Gamma={s['gamma']:g}$, $p_{{\rm nuc}}={s['p_nuc']:g}$")
-    fig.suptitle(
-        f"Neutron-star models — {eos_label}, "
-        + ("TOV (general relativistic)" if s["relativistic"] else "Newtonian gravity"),
-        fontsize=11.5, fontweight="bold")
+    eos_label = ("ideal degenerate neutron gas" if s["eos"] == "neutron"
+                 else fr"toy stiff polytrope $\Gamma={s['gamma']:g}$, "
+                      fr"$p_{{\rm nuc}}={s['p_nuc']:g}$")
+    title = (f"Neutron-star models — {eos_label}, "
+             + ("TOV (general relativistic)" if gr else "Newtonian gravity"))
+    if not gr:
+        title += ("\nNewtonian gravity is not a valid description of a "
+                  "neutron star: this run is a controlled failure, for "
+                  "comparison with the TOV result")
+    fig.suptitle(title, fontsize=11.5, fontweight="bold")
 
     stable = np.arange(M.size) <= i_max
     good = np.isfinite(M) & np.isfinite(R)
 
     # --- Panel 1: mass-radius -----------------------------------------
-    sel = good & stable
-    ax1.plot(R[sel], M[sel], color=C_MS, lw=lw, label="stable branch")
-    sel2 = good & ~stable
-    if np.any(sel2):
-        ax1.plot(R[sel2], M[sel2], color=C_ZAMS, lw=1.1, ls="--",
-                 label="unstable branch")
-    ax1.plot([R[i_max]], [M[i_max]], marker="*", ms=15, color=C_MARK,
-             ls="none",
-             label=fr"$M_{{\rm max}}={M[i_max]:.3f}\,M_\odot$")
+    if classify:
+        ax1.plot(R[good & stable], M[good & stable], color=C_MS, lw=lw,
+                 label="stable branch")
+        if np.any(good & ~stable):
+            ax1.plot(R[good & ~stable], M[good & ~stable], color=C_ZAMS,
+                     lw=1.1, ls="--", label="unstable branch")
+        ax1.plot([R[i_max]], [M[i_max]], marker="*", ms=15, color=C_MARK,
+                 ls="none",
+                 label=fr"$M_{{\rm max}}={M[i_max]:.3f}\,M_\odot$")
+    else:
+        ax1.plot(R[good], M[good], color=C_MS, lw=lw,
+                 label="computed sequence")
+        ax1.plot([R[i_max]], [M[i_max]], marker="*", ms=15, color=C_MARK,
+                 ls="none",
+                 label=fr"largest sampled mass ${M[i_max]:.3f}\,M_\odot$")
     if m_observed is not None and m_observed > 0:
         ax1.axhline(m_observed, color=C_RGB, lw=1.0, ls="--",
-                    label=fr"observed  $M>{m_observed:g}\,M_\odot$")
+                    label=fr"$\sim{m_observed:g}\,M_\odot$ observational"
+                          " benchmark")
 
     r_grid = np.linspace(max(np.nanmin(R[good]) * 0.6, 1.0),
                          np.nanmax(R[good]) * 1.15, 200)
-    m_bh = r_grid * 1.0e3 * phys.c**2 / (2.0 * phys.G * phys.M_sun)
-    m_buch = 4.0 * r_grid * 1.0e3 * phys.c**2 / (9.0 * phys.G * phys.M_sun)
-    ax1.plot(r_grid, m_bh, color="k", lw=0.9, ls=":",
-             label=r"$R=2GM/c^2$ (black hole)")
-    ax1.plot(r_grid, m_buch, color="k", lw=0.9, ls="-.",
-             label=r"$R=9GM/4c^2$ (Buchdahl)")
+    if gr:
+        m_bh = r_grid * 1.0e3 * phys.c**2 / (2.0 * phys.G * phys.M_sun)
+        m_buch = 4.0 * r_grid * 1.0e3 * phys.c**2 / (9.0 * phys.G * phys.M_sun)
+        ax1.plot(r_grid, m_bh, color="k", lw=0.9, ls=":",
+                 label=r"$R=2GM/c^2$ (black hole)")
+        ax1.plot(r_grid, m_buch, color="k", lw=0.9, ls="-.",
+                 label=r"$R=9GM/4c^2$ (Buchdahl)")
     ax1.set_xlim(r_grid[0], r_grid[-1])
     ax1.set_ylim(0, max(np.nanmax(M[good]) * 1.35,
                         (m_observed or 0) * 1.25))
@@ -392,45 +447,60 @@ def plot_ns_mass_radius(result, outdir=None, dpi=150, lw=1.7,
     ax1.legend(fontsize=7.0, loc="upper right", framealpha=0.92)
 
     # --- Panel 2: mass vs central density -----------------------------
-    ax2.plot(rho[good & stable], M[good & stable], color=C_MS, lw=lw,
-             label="stable  $dM/d\\rho_c>0$")
-    if np.any(good & ~stable):
-        ax2.plot(rho[good & ~stable], M[good & ~stable], color=C_ZAMS,
-                 lw=1.1, ls="--", label="unstable  $dM/d\\rho_c<0$")
+    if classify:
+        ax2.plot(rho[good & stable], M[good & stable], color=C_MS, lw=lw,
+                 label="stable  $dM/d\\rho_c>0$")
+        if np.any(good & ~stable):
+            ax2.plot(rho[good & ~stable], M[good & ~stable], color=C_ZAMS,
+                     lw=1.1, ls="--", label="unstable  $dM/d\\rho_c<0$")
+        ax2.set_title("Turning point sets the maximum mass")
+    else:
+        ax2.plot(rho[good], M[good], color=C_MS, lw=lw,
+                 label="computed sequence")
+        ax2.set_title("No turning point in the sampled range"
+                      if not turned else "Mass against central density")
     ax2.plot([rho[i_max]], [M[i_max]], marker="*", ms=15, color=C_MARK, ls="none")
     ax2.set_xscale("log")
     ax2.set_xlabel(r"central density $\rho_c$ [kg m$^{-3}$]")
     ax2.set_ylabel(r"$M/M_\odot$")
-    ax2.set_title("Turning point sets the maximum mass")
     ax2.grid(True, which="both", lw=0.3, alpha=0.5)
     ax2.legend(fontsize=8, loc="lower right", framealpha=0.85)
 
-    # --- Panel 3: compactness and redshift ----------------------------
+    # --- Panel 3: compactness, and redshift only if it means anything --
     ax3.plot(M[good], result["compact"][good], color=C_MS, lw=lw,
-             label=r"compactness $GM/Rc^2$")
-    ax3.axhline(4.0 / 9.0, color="k", lw=0.9, ls="-.",
-                label=r"Buchdahl bound $4/9$")
+             label=r"compactness $GM/Rc^2$" if gr
+             else r"$GM/Rc^2$ (consistency diagnostic)")
     ax3.set_xlabel(r"$M/M_\odot$")
     ax3.set_ylabel(r"$GM/Rc^2$")
     ax3.grid(True, lw=0.3, alpha=0.5)
-    ax3b = ax3.twinx()
-    ax3b.plot(M[good], z[good], color=C_RGB, lw=lw, ls="--",
-              label=r"surface redshift $z$")
-    ax3b.set_ylabel(r"surface redshift $z$")
-    ax3.set_title("Compactness and gravitational redshift")
-    handles = ax3.get_lines() + ax3b.get_lines()
+    if gr:
+        ax3.axhline(4.0 / 9.0, color="k", lw=0.9, ls="-.",
+                    label=r"Buchdahl bound $4/9$")
+        ax3b = ax3.twinx()
+        ax3b.plot(M[good], z[good], color=C_RGB, lw=lw, ls="--",
+                  label=r"surface redshift $z$")
+        ax3b.set_ylabel(r"surface redshift $z$")
+        ax3.set_title("Compactness and gravitational redshift")
+        handles = ax3.get_lines() + ax3b.get_lines()
+    else:
+        ax3.axhline(0.1, color="k", lw=0.9, ls="-.",
+                    label=r"$GM/Rc^2=0.1$: Newtonian gravity in trouble")
+        ax3.set_title("Where the Newtonian description breaks down")
+        handles = ax3.get_lines()
     ax3.legend(handles, [h.get_label() for h in handles],
                fontsize=7.5, loc="upper left", framealpha=0.85)
 
-    note = "\n".join([
-        fr"$R(M_{{\rm max}})={s['R_at_Mmax']:.2f}$ km",
-        fr"$\rho_c={s['rho_at_Mmax']:.2e}$ kg m$^{{-3}}$",
-        fr"$z_{{\rm surf}}={s['z_at_Mmax']:.3f}$",
-        fr"$c_s/c={s['cs_over_c_at_Mmax']:.3f}$"
-        + ("" if s["causal"] else "  (acausal!)"),
-    ])
-    ax2.text(0.03, 0.97, note, transform=ax2.transAxes, ha="left", va="top",
-             fontsize=8, bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
-                                   ec="gray", alpha=0.9))
+    lines = [fr"$R={s['R_at_Mmax']:.2f}$ km",
+             fr"$\rho_c={s['rho_at_Mmax']:.2e}$ kg m$^{{-3}}$"]
+    if gr:
+        lines.append(fr"$z_{{\rm surf}}={s['z_at_Mmax']:.3f}$")
+    lines.append(fr"$c_s/c={s['cs_over_c_max_branch']:.3f}$ peak"
+                 + ("" if s["causal"] else "  (acausal!)"))
+    if not turned:
+        lines.append("no turning point found")
+    ax2.text(0.03, 0.97, "\n".join(lines), transform=ax2.transAxes,
+             ha="left", va="top", fontsize=8,
+             bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
+                       ec="gray", alpha=0.9))
 
     _finish(fig, outdir, f"sev_nsmr_{s['eos']}", dpi)
