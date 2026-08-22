@@ -9,7 +9,8 @@ Four calculations share one program, chosen with --mode:
                spatial geometry
     tidal      radial (stretching) and tangential (compressing) tidal
                acceleration vs. radius, and an optional cross-mass
-               "would you survive to the horizon" comparison
+               comparison of an illustrative tidal-acceleration threshold
+               against the horizon
     infall     a test particle dropped from rest and followed radially
                inward: proper time, distant-observer coordinate time, local
                speed, and the redshift of light it sends outward
@@ -32,7 +33,8 @@ Examples
   # Tidal acceleration, comparing a stellar-mass hole with Sgr A*
   python main.py --mode tidal --M 10 --compare_masses 10,4.31e6
 
-  # Radial infall released at 6 Schwarzschild radii, saving a figure and CSV
+  # Radial infall released at 6 Schwarzschild radii, displayed on screen
+  # AND saved as a PNG in ./runs, with a CSV written to ./data
   python main.py --mode infall --M 10 --r0_rs 6 --outdir ./runs --csvdir ./data
 
   # A black hole doubling in mass: event horizon vs. apparent horizon
@@ -138,11 +140,19 @@ def parse_args():
 
     g = p.add_argument_group("Output")
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",
-                   help="save a timestamped PNG in PATH instead of displaying it")
+                   help="also save a timestamped PNG in PATH, IN ADDITION to "
+                        "displaying the figure on screen (the screen display "
+                        "is never suppressed by --outdir; use --no_plot to "
+                        "skip the figure, and so the screen display, entirely)")
     g.add_argument("--csvdir", type=str, default=None, metavar="PATH",
-                   help="also write timestamped CSV data files in PATH")
+                   help="also write timestamped CSV data files in PATH; has "
+                        "no effect on whether the figure is shown on screen "
+                        "or saved, and combines freely with --outdir and "
+                        "--no_plot")
     g.add_argument("--no_plot", action="store_true",
-                   help="skip the figure entirely (requires --csvdir)")
+                   help="skip the figure entirely -- no screen display and "
+                        "no PNG, regardless of --outdir (requires --csvdir, "
+                        "so the run still produces some output)")
     g.add_argument("--dpi", type=int, default=150, metavar="N",
                    help="PNG resolution")
     g.add_argument("--lw", type=float, default=1.6, metavar="PT",

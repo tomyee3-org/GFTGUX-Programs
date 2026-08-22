@@ -47,7 +47,7 @@ gravity g.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 
 # ----------------------------------------------------------------------
 # Physical constants (SI, CODATA / IAU nominal values)
@@ -548,6 +548,19 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
         rs_list.append(r)
         steps += 1
 
+    if r > r_stop:
+        # The loop above can only exit with r > r_stop by exhausting
+        # MAX_STEPS: silently reporting that truncated track as though it
+        # were the finished run would misstate tau_total and t_total.  This
+        # is not expected for any physically reasonable --r0_rs, --r_stop_rs
+        # and --step_frac, but fail loudly rather than risk it.
+        raise RuntimeError(
+            f"The infall integration did not reach r_stop after the "
+            f"maximum of {MAX_STEPS:,} steps (stopped at r = {r/rs:.6g} "
+            f"r_s, {steps:,} steps taken); try a larger --step_frac or a "
+            "--r_stop_rs further from the horizon."
+        )
+
     r_arr = np.array(rs_list)
     tau_arr = np.array(taus)
     t_arr = np.array(ts)
@@ -694,6 +707,23 @@ def _integrate_null_geodesic(v_start, r_start, v_end, m0, m1, v1, v2,
 
         if r > 1.0e4 * (m0 + m1):     # unambiguously escaped
             break
+
+    if v < v_end and r > r_floor and r <= 1.0e4 * (m0 + m1) and steps >= max_steps:
+        # Loop exited only because the internal step cap was reached, with
+        # the trajectory neither plunged, escaped, nor at v_end: silently
+        # returning this partial track would let the caller (in particular
+        # the bisection shooting search) misclassify an unresolved
+        # trajectory as one that has genuinely escaped or plunged. This
+        # should not happen for any physically reasonable input -- surface
+        # it loudly rather than let it corrupt the located event horizon.
+        raise RuntimeError(
+            f"An outgoing null-geodesic integration hit the internal step "
+            f"cap ({max_steps:,} steps) before reaching v_end, r_floor, or "
+            f"the escape radius (stopped at r/(m0+m1) = {r/(m0+m1):.3g}, "
+            f"v short of v_end by {(v_end - v)/v_scale:.3g} in v_scale "
+            "units). Try a larger --v_end_margin_rs0, a shorter "
+            "--duration_rs0, or a smaller --M1/--M0 ratio."
+        )
 
     return np.asarray(v_list), np.asarray(r_list)
 

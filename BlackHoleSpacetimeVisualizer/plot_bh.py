@@ -14,8 +14,11 @@ One routine per mode:
     plot_horizons     apparent horizon vs. event horizon in a Vaidya
                       spacetime, with the shooting-method geodesic family
 
-Each routine either displays the figure or writes a timestamped PNG into a
-directory chosen by the student.
+Each routine always displays the figure on screen; if the student also
+supplies --outdir, it additionally writes a timestamped PNG into that
+directory -- the screen display and the saved file are not alternatives,
+both happen on the same run. Use --no_plot to skip the figure (and so
+both the screen display and any PNG) entirely.
 """
 
 import os
@@ -48,15 +51,20 @@ def _timestamp_name(prefix):
 
 
 def _finish(fig, outdir, prefix, dpi):
-    """Save a timestamped PNG or display the figure on screen."""
+    """
+    Display the figure on screen, and -- if `outdir` is given -- ALSO save a
+    timestamped PNG there. --outdir is additive: it augments the on-screen
+    display, it does not replace it. To skip the figure (and hence the
+    screen display) entirely, use --no_plot, which keeps this function from
+    being called at all.
+    """
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
         path = os.path.join(outdir, _timestamp_name(prefix))
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
         print(f"[plot_bh] PNG saved -> {path}")
-    else:
-        print("[plot_bh] Displaying figure on screen ...")
-        plt.show()
+    print("[plot_bh] Displaying figure on screen ...")
+    plt.show()
     plt.close(fig)
 
 
@@ -245,8 +253,11 @@ def plot_infall(result, outdir=None, dpi=150, lw=1.7, figsize=(12.5, 9.2)):
     ax1.grid(True, lw=0.3, alpha=0.5)
     ax1.legend(fontsize=8, loc="upper right", framealpha=0.85)
     ax1.text(0.03, 0.06,
-             fr"crosses $r_s$ at finite $\tau \approx {tau_ms[-1]:.4g}$ ms",
-             transform=ax1.transAxes, ha="left", va="bottom", fontsize=8,
+             fr"reaches $r={s['r_stop_rs']:.6g}\,r_s$ at $\tau \approx "
+             fr"{tau_ms[-1]:.4g}$ ms (run stopped there; the horizon"
+             "\nitself is crossed at a slightly larger, finite $\\tau$, "
+             "not computed by this run)",
+             transform=ax1.transAxes, ha="left", va="bottom", fontsize=7.3,
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray",
                        alpha=0.9))
 
@@ -278,7 +289,7 @@ def plot_infall(result, outdir=None, dpi=150, lw=1.7, figsize=(12.5, 9.2)):
     ax4.invert_xaxis()
     ax4.set_xlabel(r"$r/r_s$")
     ax4.set_ylabel(r"$\nu_{\rm obs}/\nu_{\rm emit}$")
-    ax4.set_title("Light sent outward is seen ever fainter, ever later")
+    ax4.set_title("Light sent outward is increasingly redshifted, ever later")
     ax4.grid(True, which="both", lw=0.3, alpha=0.5)
     ax4.legend(fontsize=8, loc="upper right", framealpha=0.85)
 

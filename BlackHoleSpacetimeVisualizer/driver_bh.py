@@ -216,9 +216,12 @@ def _print_infall_summary(s):
     print(f"  Integration stopped at r = {s['r_stop_rs']:.5g}  r_s")
     print(SEP)
     print(f"  Proper time elapsed (falling observer's own clock):")
-    print(f"      tau = {s['tau_total_ms']:.5g}  ms")
+    print(f"      tau = {s['tau_total_ms']:.8g}  ms")
     print(f"  Schwarzschild coordinate time elapsed (distant observer's clock):")
-    print(f"      t   = {s['t_total_ms']:.5g}  ms   (t/tau = {s['t_total_ms']/s['tau_total_ms']:.4g})")
+    print(f"      t   = {s['t_total_ms']:.8g}  ms   (t/tau = {s['t_total_ms']/s['tau_total_ms']:.4g})")
+    print("      (printed to 8 figures so EXP-11's 1e-5-level closed-form"
+          " comparison can be read off directly; the CSV file carries the"
+          " same precision internally either way)")
     print(f"  Local infall speed at the last recorded point : {s['v_local_final']:.6f}  c")
     print(f"  Redshift factor (nu_obs/nu_emit) at that point: {s['redshift_final']:.4e}")
     print(SEP)
