@@ -114,13 +114,18 @@ def plot_inspiral(result, outdir=None,
     ax3.legend(fontsize=7.5, loc="upper left", framealpha=0.75)
     ax3.grid(True, lw=0.3, alpha=0.5)
 
+    # The figure is always shown on screen. When --outdir is given, a
+    # timestamped PNG is *additionally* saved to that folder; saving happens
+    # before plt.show() so the file is written even if the user closes the
+    # interactive window without waiting, or the run is otherwise interrupted
+    # after the window appears.
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
         fpath = os.path.join(outdir, _timestamp_fname())
         fig.savefig(fpath, dpi=dpi, bbox_inches="tight")
         print(f"[plot_gw] PNG saved -> {fpath}")
-    else:
-        print("[plot_gw] Displaying figure on screen ...")
-        plt.show()
+
+    print("[plot_gw] Displaying figure on screen ...")
+    plt.show()
 
     plt.close(fig)

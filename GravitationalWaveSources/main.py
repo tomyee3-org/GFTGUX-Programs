@@ -14,7 +14,7 @@ Examples
   # Add the optional illustrative Schwarzschild ringdown for a BBH example
   python main.py --m1 36 --m2 29 --d 440 --ringdown --t_before 0.2 --t_after 0.05
 
-  # Save a plot
+  # Also save a timestamped PNG (in addition to the on-screen display)
   python main.py --outdir ./runs
 """
 
@@ -66,7 +66,8 @@ def parse_args():
 
     g = p.add_argument_group("Output")
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",
-                   help="save a timestamped PNG in PATH instead of displaying it")
+                   help="also save a timestamped PNG in PATH, in addition to "
+                        "displaying it on screen (default: display only)")
     return p.parse_args()
 
 
