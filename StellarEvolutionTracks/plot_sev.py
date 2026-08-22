@@ -10,8 +10,8 @@ One routine per mode:
     plot_wd_cooling     white-dwarf structure and cooling, four panels
     plot_ns_mass_radius neutron-star mass-radius relation, three panels
 
-Each routine either displays the figure or writes a timestamped PNG into
-a directory chosen by the student.
+Each routine displays the figure.  When an output directory is supplied,
+it also writes a timestamped PNG into that directory before displaying it.
 """
 
 import os
@@ -45,15 +45,14 @@ def _timestamp_name(prefix):
 
 
 def _finish(fig, outdir, prefix, dpi):
-    """Save a timestamped PNG or display the figure on screen."""
+    """Optionally save a timestamped PNG, then display the figure."""
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
         path = os.path.join(outdir, _timestamp_name(prefix))
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
         print(f"[plot_sev] PNG saved -> {path}")
-    else:
-        print("[plot_sev] Displaying figure on screen ...")
-        plt.show()
+    print("[plot_sev] Displaying figure on screen ...")
+    plt.show()
     plt.close(fig)
 
 

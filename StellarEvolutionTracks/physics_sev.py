@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.1.1"
 
 # ----------------------------------------------------------------------
 # Physical constants (SI, CODATA / IAU nominal values)
@@ -356,10 +356,12 @@ def predicted_remnant(m_msun):
     stops at helium ignition and everything after it -- core helium
     burning, the AGB, thermal pulses, mass loss and envelope ejection --
     is skipped.  The white-dwarf branch uses the linear initial-final
-    mass relation of Kalirai et al. (2008), whose direct constraints
-    reach only to initial masses near 1.2 Msun; applying it from 0.5 to
-    8 Msun is an extrapolation, and later work (for example Cummings et
-    al. 2018) shows the real relation is not globally linear.
+    mass relation of Kalirai et al. (2008).  That work extended direct
+    constraints DOWN to an initial mass of 1.16 Msun and combined them
+    with the existing higher-mass cluster sample, which reached about
+    7 Msun.  Applying the fit below 1.16 Msun or above about 7 Msun is
+    therefore an extrapolation.  Later work (for example Cummings et
+    al. 2018) shows that the real relation is not globally linear.
     """
     if m_msun < 0.5:
         return ("helium white dwarf",
@@ -369,10 +371,17 @@ def predicted_remnant(m_msun):
     if m_msun < 8.0:
         mf = 0.109 * m_msun + 0.394
         kind = "carbon-oxygen white dwarf" if m_msun < 6.5 else "oxygen-neon white dwarf"
-        note = ("schematic; Kalirai et al. (2008) linear initial-final mass "
-                "relation" if m_msun <= 1.2 else
-                "schematic; Kalirai et al. (2008) relation extrapolated "
-                "beyond its calibrated progenitor range")
+        if m_msun < 1.16:
+            note = ("schematic; Kalirai et al. (2008) linear initial-final "
+                    "mass relation extrapolated below its directly "
+                    "constrained progenitor range")
+        elif m_msun <= 7.0:
+            note = ("schematic; Kalirai et al. (2008) linear initial-final "
+                    "mass relation (later work finds a non-linear relation)")
+        else:
+            note = ("schematic; Kalirai et al. (2008) linear initial-final "
+                    "mass relation extrapolated above its directly "
+                    "constrained progenitor range")
         return (kind, mf, note)
     if m_msun < 20.0:
         return ("neutron star", 1.4,

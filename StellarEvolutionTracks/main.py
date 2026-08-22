@@ -37,6 +37,7 @@ Examples
 """
 
 import argparse
+import math
 
 import driver_sev
 import physics_sev
@@ -58,6 +59,11 @@ def _observed_mass(text):
         value = float(text)
     except (TypeError, ValueError) as exc:
         raise argparse.ArgumentTypeError(f"{text!r} is not a number.") from exc
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not finite; use a finite positive mass, or 0 to "
+            "omit the reference line."
+        )
     if value < 0.0:
         raise argparse.ArgumentTypeError(
             f"{value:g} is negative; use 0 to omit the reference line."
@@ -118,7 +124,9 @@ def parse_args():
                    help="use pure homology scalings for the ZAMS and the radius "
                         "response instead of the empirical fits")
     g.add_argument("--no_postms", dest="postms", action="store_false",
-                   help="stop each track at the terminal-age main sequence")
+                   default=argparse.SUPPRESS,
+                   help="stop each track at the terminal-age main sequence "
+                        "(post-main-sequence evolution is included by default)")
 
     g = p.add_argument_group("Stellar integration control (modes: tracks, hr)")
     g.add_argument("--n_ms", type=_positive_int, default=3000, metavar="N",
@@ -185,16 +193,21 @@ def parse_args():
 
     g = p.add_argument_group("Output")
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",
-                   help="save a timestamped PNG in PATH instead of displaying it")
+                   help="also save a timestamped PNG in PATH; the figure is "
+                        "still displayed on screen")
     g.add_argument("--csvdir", type=str, default=None, metavar="PATH",
-                   help="also write timestamped CSV data files in PATH")
+                   help="also write timestamped CSV data files in PATH; this "
+                        "does not affect the screen display")
     g.add_argument("--no_plot", action="store_true",
                    help="skip the figure entirely (requires --csvdir)")
     g.add_argument("--dpi", type=int, default=150, metavar="N",
                    help="PNG resolution")
     g.add_argument("--lw", type=float, default=1.6, metavar="PT",
                    help="curve line width [points]")
-    return p.parse_args()
+    args = p.parse_args()
+    if not hasattr(args, "postms"):
+        args.postms = True
+    return args
 
 
 def main():
