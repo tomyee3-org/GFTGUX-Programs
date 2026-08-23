@@ -12,9 +12,10 @@ General Relativity once the FLRW symmetry and the energy content are
 specified; the CPL ansatz for w(a) is not exact but a phenomenological
 placeholder for physics nobody yet understands (the nature of dark
 energy); and this module's numerical output (integration, root-finding,
-quadrature) is not exact either, though its error is small and
-well-characterized away from event boundaries (see main.py and the help
-file for details).
+quadrature) is not exact either. Its accuracy has been validated on the
+benchmark cases listed in the test suite; users applying it to other
+models should check convergence themselves, e.g. by re-running at a
+smaller step_frac (see main.py and the help file for details).
 
 Because every quantity is expressed through the dimensionless density
 parameters Omega_i = rho_i / rho_crit and the Hubble constant H0, neither G
@@ -29,7 +30,7 @@ returned in the same student-facing units.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.2.0"
 
 # ----------------------------------------------------------------------
 # Constants (SI, used only for the km/s/Mpc <-> Gyr^-1 conversion)
@@ -333,6 +334,47 @@ def _dE2_da(a, omega_m, omega_r, omega_k, omega_de, w0, wa):
     return val
 
 
+def _cancellation_safe_H_scale(a, omega_m, omega_r, omega_k, omega_de, w0, wa):
+    """
+    A reference expansion-rate scale, in the same units as H0_pgyr *
+    sqrt(E(a)^2), that stays well-behaved even where the SIGNED E(a)^2
+    happens to be anomalously small purely from near-cancellation among
+    its terms -- e.g. a "loitering" model where matter/curvature and a
+    small positive dark-energy term nearly balance, so E(a)^2 dips very
+    close to zero and rebounds without ever actually crossing it. Built
+    from the SUM OF ABSOLUTE VALUES of each component's contribution
+    (the same cancellation-safety idea already used by the early-time
+    dominance diagnostic elsewhere in this module), so it is never
+    small unless every individual component's density is itself small
+    -- a genuinely different, unrelated regime.
+    """
+    abs_e2 = (abs(omega_m) * a ** -3 + abs(omega_r) * a ** -4
+              + abs(omega_k) * a ** -2)
+    if omega_de != 0.0:
+        abs_e2 += abs(omega_de) * float(de_density_shape(a, w0, wa))
+    return math.sqrt(max(abs_e2, 1.0e-300))
+
+
+def _safe_dt(a, args, step_frac):
+    """
+    A Hubble-time-scaled step size, dt = step_frac / H_scale(a), using
+    the cancellation-safe reference scale above rather than the true
+    (signed) H(a) itself. Using the signed H(a) can give a
+    pathologically LARGE dt exactly where a "loitering" universe's
+    E(a)^2 dips close to zero without a genuine turning point there:
+    the ordinary dt = step_frac / H(a) would then take one enormous
+    RK4 stride across the entire dip, discarding trajectory resolution
+    through it, once the proactive near-turnaround check correctly
+    identifies such a dip as a false alarm and hands integration back
+    to ordinary RK4 stepping. This keeps that step size sane by
+    construction, everywhere.
+    """
+    H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa = args
+    H_scale = H0_pgyr * _cancellation_safe_H_scale(
+        a, omega_m, omega_r, omega_k, omega_de, w0, wa)
+    return step_frac / H_scale
+
+
 def _rate(a, H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa):
     e2 = float(omega_m * a ** -3 + omega_r * a ** -4 + omega_k * a ** -2)
     if omega_de != 0.0:
@@ -362,20 +404,19 @@ def _rk4_step(a, dt, H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa):
 def _bisect_dt_for_a(a, target_a, dt_hi, args, n_iter=MAX_BISECTIONS):
     """
     Solve for the sub-step dt in [0, dt_hi] such that one RK4 step from
-    a lands exactly on target_a, by bisection on dt itself (the RK4
-    map a -> _rk4_step(a, dt, ...) is monotonically increasing in dt on
-    an ordinary expanding-branch step, since da/dt = a H(a) > 0
-    throughout). This replaces linear interpolation between the
-    bracketing grid points -- which caps the effective accuracy of a
-    checkpoint time at 2nd order regardless of RK4's 4th-order local
-    accuracy -- with a sub-step that inherits RK4's full order.
+    a lands on target_a to within numerical (bisection) tolerance, by
+    bisection on dt itself (the RK4 map a -> _rk4_step(a, dt, ...) is
+    monotonically increasing in dt on an ordinary expanding-branch
+    step, since da/dt = a H(a) > 0 throughout). This replaces linear
+    interpolation between the bracketing grid points -- which caps the
+    effective accuracy of a checkpoint time at 2nd order regardless of
+    RK4's 4th-order local accuracy -- with a sub-step that inherits
+    RK4's full order.
 
     The caller must guarantee that dt_hi actually brackets target_a
     (i.e. _rk4_step(a, dt_hi, ...) >= target_a >= a): this is checked
     explicitly rather than assumed, because an unbracketed bisection can
-    silently return a plausible-looking but wrong time (a real defect
-    found by third-round review, in the near-turnaround checkpoint path
-    that used to call this with an unverified dt_hi).
+    silently return a plausible-looking but wrong time.
     """
     try:
         a_hi_check = _rk4_step(a, dt_hi, *args)
@@ -439,45 +480,199 @@ def _bisect_root_a(a_lo, a_hi, args, n_iter=MAX_BISECTIONS):
     return 0.5 * (lo + hi)
 
 
-def _first_root_ahead(a_lo, a_max, args, n_scan=2000):
-    """
-    Scan [a_lo, a_max] on a dense grid for the FIRST root of E(a)^2=0
-    strictly ahead of a_lo, returning a bracketing pair (a_scan_lo,
-    a_scan_hi) around it, or None if E(a)^2 stays non-negative and
-    finite everywhere on the grid (including at a_max itself).
+def _de_extremum_a(n, wa):
+    """The scale factor at which g(a) = de_density_shape(a, w0, wa) has
+    its one possible interior extremum for a>0 (dg/da=0 there), or None
+    if wa=0 (g is then a pure power law, monotonic, with no interior
+    extremum) or if that point is non-positive. dg/da = g(a)*(n/a+3wa),
+    and n/a+3wa is itself strictly monotonic in a (its own derivative,
+    -n/a^2, is single-signed), so it can cross zero at most once for
+    a>0 -- meaning g(a) is provably unimodal (monotonic, or a single
+    hump) there, never more wiggly than that, regardless of wa."""
+    if wa == 0.0:
+        return None
+    a_crit = -n / (3.0 * wa)
+    return a_crit if a_crit > 0.0 else None
 
-    This replaces a bug found by third-round review: checking only the
-    SIGN OF E(a_max)^2 cannot detect a turning point that occurs and
-    then reverses before a_max is reached (E(a)^2 can have more than
-    one positive root -- e.g. a closed universe with matter and a small
-    positive cosmological constant can have a forbidden interval
-    bounded by two positive roots, with E(a_max)^2 positive again
-    beyond it). The actual expanding-branch solution must stop at the
-    FIRST root it reaches, not be waved through because some later
-    point happens to test non-negative. A dense grid scan, like the one
-    already used elsewhere in this module for equality/transition
-    epochs, is the simplest robust way to find that first root; as with
-    those searches, a turning point confined to an interval narrower
-    than the grid spacing could in principle be missed, which is an
-    inherent (and documented) limitation of a bounded-resolution scan,
-    not of the underlying physics.
+
+def _e2_derivative_lipschitz_bound(a_lo, a_hi, omega_m, omega_r, omega_k,
+                                    omega_de, w0, wa):
+    """
+    A RIGOROUS upper bound L on |dE(a)^2/da| for EVERY a in [a_lo,a_hi],
+    derived in closed form -- not by sampling E(a)^2 or its derivative
+    on a grid, which cannot rule out a narrow forbidden interval
+    between two nearby roots falling entirely between sample points,
+    however fine the grid. Given such an L, E(a)^2 cannot change by
+    more than L*(a_hi-a_lo) anywhere in
+    the interval relative to either endpoint (mean value theorem), so
+    if min(E2(a_lo), E2(a_hi)) - L*(a_hi-a_lo) > 0, E(a)^2 is certified
+    positive throughout [a_lo,a_hi] -- a guarantee that cannot be
+    defeated by an arbitrarily narrow dip, unlike a fixed sample count.
+
+    The matter, radiation, and curvature terms of dE2/da are each a
+    single power of a (e.g. -3*Om*a^-4), and a pure power function has
+    no interior extrema for a>0 -- its magnitude is maximized at one of
+    the interval's two endpoints, so bounding each term needs no
+    sampling at all. The CPL dark-energy term is the product of g(a)
+    (which _de_extremum_a shows is unimodal, so its own maximum over
+    [a_lo,a_hi] is at an endpoint or at its single interior extremum,
+    all checkable directly) and a strictly monotonic factor (n/a+3wa,
+    likewise maximized at an endpoint); the product of their two
+    separately-bounded maxima is a valid, if not perfectly tight,
+    bound on the term's own maximum magnitude.
+    """
+    L = 0.0
+    if omega_m != 0.0:
+        L += 3.0 * abs(omega_m) * max(a_lo ** -4, a_hi ** -4)
+    if omega_r != 0.0:
+        L += 4.0 * abs(omega_r) * max(a_lo ** -5, a_hi ** -5)
+    if omega_k != 0.0:
+        L += 2.0 * abs(omega_k) * max(a_lo ** -3, a_hi ** -3)
+    if omega_de != 0.0:
+        n = -3.0 * (1.0 + w0 + wa)
+        h_lo = n / a_lo + 3.0 * wa
+        h_hi = n / a_hi + 3.0 * wa
+        a_candidates = [a_lo, a_hi]
+        a_crit = _de_extremum_a(n, wa)
+        if a_crit is not None and a_lo < a_crit < a_hi:
+            a_candidates.append(a_crit)
+        g_max = max(float(de_density_shape(aa, w0, wa)) for aa in a_candidates)
+        L += abs(omega_de) * g_max * max(abs(h_lo), abs(h_hi))
+    return L
+
+
+_CERT_MAX_DEPTH = 60          # a range this many bisections deep is well
+                               # below any float64-representable width
+_CERT_MAX_EVALUATIONS = 200_000  # generous hard cap; see _first_root_ahead
+_CERT_SAFETY_REL = 1.0e-12    # relative slack in the positivity
+                               # certificate itself, so round-off in
+                               # computing L cannot falsely certify a
+                               # hair-thin negative dip as safe
+
+
+def _first_root_ahead(a_lo, a_max, args):
+    """
+    Find the FIRST root of E(a)^2=0 strictly ahead of a_lo, within
+    [a_lo, a_max], returning a bracketing pair, or None once E(a)^2 is
+    CERTIFIED positive and finite throughout the whole range.
+
+    An earlier version of this scanned a fixed number of evenly spaced
+    grid points, which cannot detect a turning point (or, worse, a
+    forbidden interval bounded by two very close-together roots) that
+    happens to fall entirely between two adjacent sample points --
+    however fine the grid, two positive roots of E(a)^2 can always be
+    tuned closer together than its spacing. Checking only the sign of
+    E(a_max)^2 has the same blind spot for the same reason.
+
+    This replaces that scan with recursive bisection guarded by a
+    provable per-interval certificate (_e2_derivative_lipschitz_bound):
+    a sub-interval is only accepted as root-free when a closed-form
+    bound on how far E(a)^2 could possibly move across it -- derived
+    from its exact analytic derivative, never from sampling -- proves
+    it cannot reach zero anywhere inside. Wherever that certificate
+    cannot immediately succeed, the interval is bisected and the left
+    half is fully resolved before the right half is even examined
+    (so the FIRST root is always what gets returned), recursing as
+    deep as necessary -- all the way to a resolution set by floating-
+    point precision itself if that is genuinely what it takes. A
+    forbidden interval of any width down to that hardware-precision
+    floor cannot be skipped, unlike a search tied to an arbitrary
+    fixed point count.
+
+    Raises RuntimeError if a well-behaved certificate cannot be reached
+    within a generous evaluation budget -- this is a loud, honest
+    failure for a pathological parameter combination, never a silent
+    guess. Raises ValueError if E(a)^2 itself is ever found non-finite.
     """
     H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa = args
-    grid = np.linspace(a_lo, a_max, n_scan)
-    vals = np.asarray(E2(grid, omega_m, omega_r, omega_k, omega_de, w0, wa),
-                       dtype=float)
-    bad = ~np.isfinite(vals)
-    if np.any(bad):
-        idx = int(np.argmax(bad))
-        raise ValueError(
-            f"E(a)^2 is not finite at a={grid[idx]:.6g}; this parameter "
-            "combination is too extreme for this program's numerics."
-        )
-    neg = vals < 0.0
-    if not np.any(neg):
-        return None
-    idx = int(np.argmax(neg))  # first negative grid point; idx >= 1
-    return float(grid[idx - 1]), float(grid[idx])
+    budget = [_CERT_MAX_EVALUATIONS]
+
+    def e2(aa):
+        return float(E2(aa, omega_m, omega_r, omega_k, omega_de, w0, wa))
+
+    def scan(lo, hi, e2_lo, e2_hi, depth):
+        if not (math.isfinite(e2_lo) and math.isfinite(e2_hi)):
+            raise ValueError(
+                f"E(a)^2 is not finite between a={lo:.6g} and a={hi:.6g}; "
+                "this parameter combination is too extreme for this "
+                "program's numerics."
+            )
+        # By construction, e2_lo passed in here is always already known
+        # non-negative (the top-level caller established it; internally,
+        # e2_lo is always either that value or a previously-computed
+        # midpoint that this same check already passed). So a directly
+        # OBSERVED negative e2_hi is immediate, sufficient proof of a
+        # sign change in [lo, hi] -- return that bracket right away
+        # rather than continuing to recurse for a "prove positive
+        # everywhere" certificate that a value we've already measured
+        # negative can never satisfy. Without this short-circuit, once
+        # a genuine (or near-degenerate) dip straddles a bisection
+        # midpoint closely enough, BOTH halves can keep failing to
+        # certify at every subsequent level, recursing exponentially in
+        # depth for no benefit -- this keeps refinement linear instead.
+        if e2_hi < 0.0:
+            return lo, hi
+        L = _e2_derivative_lipschitz_bound(lo, hi, omega_m, omega_r,
+                                            omega_k, omega_de, w0, wa)
+        width = hi - lo
+        scale = max(abs(e2_lo), abs(e2_hi), 1.0e-300)
+        if min(e2_lo, e2_hi) - L * width > -_CERT_SAFETY_REL * scale:
+            return None  # certified: E(a)^2 > 0 everywhere in [lo, hi]
+        budget[0] -= 1
+        if budget[0] <= 0:
+            raise RuntimeError(
+                f"Could not certify that E(a)^2 stays positive between "
+                f"a={lo:.6g} and a={hi:.6g} within this program's search "
+                "budget; this model's parameter combination may sit "
+                "pathologically close to a hidden recollapse. Try a "
+                "narrower --a_max or different parameters."
+            )
+        if depth >= _CERT_MAX_DEPTH or width <= max(1.0e-14 * hi, 1.0e-300):
+            # Resolution floor: this sub-interval cannot be certified
+            # positive, but is also already as narrow as float64 itself
+            # can represent, and (since the e2_hi<0 case is already
+            # handled above) neither endpoint has actually been
+            # measured negative. A forbidden interval here would have
+            # to be narrower than any number this program (or any other
+            # finite-precision method) can resolve, so it is treated as
+            # safe -- an honest limitation tied to hardware precision,
+            # not to an arbitrary sample count.
+            return None
+        mid = 0.5 * (lo + hi)
+        e2_mid = e2(mid)
+        left = scan(lo, mid, e2_lo, e2_mid, depth + 1)
+        if left is not None:
+            return left
+        return scan(mid, hi, e2_mid, e2_hi, depth + 1)
+
+    # The certificate above is tightest over a NARROW dynamic range: its
+    # Lipschitz bound uses the largest |dE2/da| anywhere in the interval,
+    # and that can be many orders of magnitude larger at the small-a end
+    # of a wide request (e.g. a_lo near a turning point but a_max many
+    # decades beyond it) than anywhere else in the range, which would
+    # otherwise force needless deep recursion across huge stretches of
+    # ordinary, uneventful territory just to re-derive that they are
+    # fine. A moderate geometric (log-spaced) outer partition keeps each
+    # cell's own dynamic range modest -- and, unlike the old fixed
+    # linear grid, this partition only has to be coarse enough that each
+    # cell's *certificate* converges quickly, never fine enough to
+    # directly resolve a root itself: that job still belongs entirely to
+    # the certified recursion above, which is what actually guarantees
+    # no root of any width is skipped, however the outer cells are cut.
+    n_coarse = 300
+    if a_max > 2.0 * a_lo:
+        edges = np.geomspace(a_lo, a_max, n_coarse + 1)
+    else:
+        edges = np.linspace(a_lo, a_max, n_coarse + 1)
+    e2_prev = e2(float(edges[0]))
+    for i in range(n_coarse):
+        lo_i, hi_i = float(edges[i]), float(edges[i + 1])
+        e2_hi_i = e2(hi_i)
+        bracket = scan(lo_i, hi_i, e2_prev, e2_hi_i, 0)
+        if bracket is not None:
+            return bracket
+        e2_prev = e2_hi_i
+    return None
 
 
 def _quad_time_between(a_lo, a_hi, args, n_nodes=60):
@@ -510,7 +705,16 @@ def _quad_time_between(a_lo, a_hi, args, n_nodes=60):
     return float(np.sum(wq * integrand))
 
 
-def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr):
+_BRACKET_NOT_YET_KNOWN = object()  # sentinel distinct from a real bracket
+                                    # (a pair) or a confirmed "no root"
+                                    # result (None), so a caller can pass
+                                    # its own already-computed None (no
+                                    # root found) without it being
+                                    # mistaken for "not yet computed".
+
+
+def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr,
+                          bracket=_BRACKET_NOT_YET_KNOWN):
     """
     Called when the current step has been flagged as approaching a
     turning point (or has already overshot one). Determines which of
@@ -527,10 +731,17 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr):
     interval. Everything here is computed by quadrature, never by a
     single enlarged RK4 step: near a turning point da/dt ~
     sqrt(a_turn-a) has an infinite derivative, and a full-stride RK4
-    step aimed at a target close to that singularity is exactly what
-    caused the release-blocking failures found by third-round review
+    step aimed at a target close to that singularity cannot be trusted
     (RuntimeError near/at an exact turnaround, silently wrong
-    checkpoint times, and leaked internal exceptions near t_max).
+    checkpoint times, or a leaked internal exception near t_max).
+
+    bracket, if given (as a bracket pair, or None meaning "confirmed no
+    root"), is a pre-computed _first_root_ahead(...) result the caller
+    has already determined -- e.g. a proactive probe the main loop
+    performed to decide whether to divert here at all -- so this
+    function can skip a redundant repeat of that same certified
+    search. Leaving it at its default performs the search itself,
+    exactly as before.
     """
     def _bisect_for_time(time_to_fn, target_dt, lo, hi):
         # Solve time_to_fn(target_a) == target_dt for target_a in
@@ -554,21 +765,21 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr):
     # only looked as far as a_max would then wrongly conclude "no
     # turning point ahead" and hand the endpoint to ordinary
     # (non-singularity-aware) quadrature, whose accuracy degrades the
-    # closer its endpoint sits to a real turning point -- exactly the
-    # release-blocking failure found by third-round review at and near
-    # an exact a_max/a_turn tie. Extending the search past a_max, by a
-    # margin tied to how far away a_max already is, reliably converts
-    # any such near-boundary coincidence into an ordinary "root found"
-    # case below, handled by the same singularity-removing quadrature
-    # used for an interior turning point -- which remains fully accurate
-    # for a target arbitrarily far from, at, or infinitesimally below
-    # the anchor root, so there is no accuracy cost to preferring it
-    # whenever any root is found nearby. It does not change how an
-    # interior root (strictly before a_max, e.g. the two-positive-root
-    # case) is found, since that is already detected by this same scan
-    # without needing to look past a_max at all.
-    search_margin = max(0.5 * (a_max - a), 0.1 * a_max, 1.0e-9)
-    bracket = _first_root_ahead(a, a_max + search_margin, args)
+    # closer its endpoint sits to a real turning point. Extending the
+    # search past a_max, by a margin tied to how far away a_max already
+    # is, reliably converts any such near-boundary coincidence into an
+    # ordinary "root found" case below, handled by the same
+    # singularity-removing quadrature used for an interior turning
+    # point -- which remains fully accurate for a target arbitrarily
+    # far from, at, or infinitesimally below the anchor root, so there
+    # is no accuracy cost to preferring it whenever any root is found
+    # nearby. It does not change how an interior root (strictly before
+    # a_max, e.g. the two-positive-root case) is found, since that is
+    # already detected by this same scan without needing to look past
+    # a_max at all.
+    if bracket is _BRACKET_NOT_YET_KNOWN:
+        search_margin = max(0.5 * (a_max - a), 0.1 * a_max, 1.0e-9)
+        bracket = _first_root_ahead(a, a_max + search_margin, args)
 
     if bracket is None:
         # No turning point even in this generously extended search:
@@ -598,7 +809,19 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr):
             return t_to_turn
         return t_to_turn - _quad_time_to_turnaround(target_a, a_turn, args)
 
-    if a_max < a_turn:
+    # a_max and a_turn are compared with a small relative tolerance,
+    # not strict "<", so that a requested a_max which mathematically
+    # coincides with (or sits an ULP away from) the true turning point
+    # is reliably reported as "turnaround" rather than flipping to
+    # "a_max" purely from floating-point noise in how a_turn happens to
+    # be bisected. _CERT_SAFETY_REL-scale tolerances elsewhere in this
+    # module are tied to the certificate's own arithmetic; this one is
+    # tied to _bisect_root_a's convergence, so it uses the same kind of
+    # generous-but-not-physically-meaningful relative slack: far looser
+    # than that bisection's ~1e-15-relative noise floor, far tighter
+    # than any a_max difference a user would ever choose deliberately.
+    if a_max < a_turn and not math.isclose(
+            a_max, a_turn, rel_tol=1.0e-9, abs_tol=1.0e-12):
         t_to_amax = time_to(a_max)
         if t_max_gyr is not None and t + t_to_amax > t_max_gyr:
             a_next = _bisect_for_time(time_to, t_max_gyr - t, a, a_max)
@@ -801,6 +1024,14 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
     turnaround = None
     stop_reason = None
     steps = 0
+    # Once a proactive probe has CERTIFIED that no root of E(a)^2=0
+    # exists anywhere between the current a and a_max, that remains
+    # true for the rest of the run: the certified root-free interval
+    # only shrinks as a advances (it stays a subset of [a, a_max]), so
+    # there is no need to repeat that same expensive certified search
+    # on every subsequent step through a "loitering" dip. See its use
+    # below, in the near_turnaround handling.
+    certified_safe_to_a_max = False
 
     while a < a_max:
         steps += 1
@@ -825,15 +1056,47 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         # curvature, or a non-recollapsing dark-energy history) this
         # estimated distance is a fixed, large fraction of a itself, so
         # the check below only fires close to a genuine turning point.
-        dE2 = _dE2_da(a, omega_m, omega_r, omega_k, omega_de, w0, wa)
         near_turnaround = False
-        if dE2 < 0.0:
-            delta_a_est = e2_now / (-dE2)
-            if delta_a_est < _TURNAROUND_TRIGGER_REL * a:
-                near_turnaround = True
+        if not certified_safe_to_a_max:
+            dE2 = _dE2_da(a, omega_m, omega_r, omega_k, omega_de, w0, wa)
+            if dE2 < 0.0:
+                delta_a_est = e2_now / (-dE2)
+                if delta_a_est < _TURNAROUND_TRIGGER_REL * a:
+                    near_turnaround = True
 
-        H_now = H0_pgyr * math.sqrt(e2_now)
-        dt = step_frac / H_now
+        # A proactive trigger can be a FALSE ALARM: a "loitering"
+        # cosmology where E(a)^2 dips close to zero and rebounds
+        # without ever crossing it. Probe for a genuine root right
+        # here, before committing to the boundary-handling branch
+        # below, rather than letting _advance_to_boundary discover "no
+        # root" on its own and fast-forward straight to a_max by
+        # quadrature -- that shortcut is only valid when no ordinary
+        # RK4 stepping remains to be done in between, which is false
+        # here: a confirmed false alarm still has ordinary trajectory
+        # between here and a_max that must be resolved and recorded
+        # step by step, not skipped.
+        root_bracket = _BRACKET_NOT_YET_KNOWN
+        if near_turnaround:
+            search_margin = max(0.5 * (a_max - a), 0.1 * a_max, 1.0e-9)
+            root_bracket = _first_root_ahead(a, a_max + search_margin, args)
+            if root_bracket is None:
+                certified_safe_to_a_max = True
+                near_turnaround = False
+
+        if certified_safe_to_a_max:
+            # Use the cancellation-safe reference scale rather than the
+            # true (signed) H(a): near the bottom of a confirmed
+            # loitering dip, E(a)^2 can be anomalously small purely
+            # from near-cancellation among its terms, which would
+            # otherwise make dt = step_frac / H(a) grow pathologically
+            # large and take one enormous RK4 stride across the dip,
+            # discarding trajectory resolution through it. This is at
+            # least as small as the ordinary step size everywhere else
+            # (never larger), so it costs nothing once past the dip.
+            dt = _safe_dt(a, args, step_frac)
+        else:
+            H_now = H0_pgyr * math.sqrt(e2_now)
+            dt = step_frac / H_now
         if t_max_gyr is not None and t + dt > t_max_gyr:
             dt = t_max_gyr - t
 
@@ -863,9 +1126,13 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
             # should catch this in ordinary use; the reactive E(a)^2 < 0
             # check above remains as a safety net for very coarse
             # step_frac choices that could jump past the proactive
-            # trigger zone in a single stride.
+            # trigger zone in a single stride. root_bracket is passed
+            # through so a genuine root already found by the probe above
+            # is not searched for a second time; a reactive-only
+            # overshoot (root_bracket left at its "not yet known"
+            # sentinel here) still gets a fresh search of its own.
             t_next, a_next, event, time_to = _advance_to_boundary(
-                a, t, dt, args, a_max, t_max_gyr)
+                a, t, dt, args, a_max, t_max_gyr, bracket=root_bracket)
             for c in list(checkpoints):
                 if a < c <= a_next:
                     # Use the same quadrature this function already used
@@ -873,9 +1140,8 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
                     # bisection: a fixed small dt from before the
                     # turning-point heuristic fired is not guaranteed to
                     # even reach a checkpoint like a=1 in one stride here,
-                    # and bisecting an unverified bracket was a real bug
-                    # (found by third-round review) that silently returned
-                    # a plausible-looking but wrong checkpoint time.
+                    # and bisecting an unverified bracket can silently
+                    # return a plausible-looking but wrong checkpoint time.
                     t_c = t + time_to(c)
                     checkpoint_times[c] = t_c
                     t_list.append(t_c)

@@ -16,6 +16,16 @@ Coverage, by category:
   * A non-monotonic E(a)^2 with two positive roots: the physical
     expanding-branch solution must stop at the FIRST root, not be waved
     through because a later point happens to test non-negative again.
+  * A parameterized sweep of near-double-root separations, from
+    comfortably wide down to a razor-thin fraction of the resolution a
+    fixed-grid scan could ever see, and the complementary "confirmed no
+    root" case just past the critical separation (a loitering model)
+    integrating cleanly to a_max with no discarded trajectory gap.
+  * Boundary coincidence: a_max requested one ULP below an exact
+    analytic turning point must still report 'turnaround', not flip to
+    'a_max' from floating-point noise in the independently bisected
+    a_turn -- while an a_max genuinely, non-trivially short of the
+    turning point must still be respected as the stopping point.
   * Extreme/pathological CPL (w0, wa) parameters, which must raise a
     clear domain error rather than silently overflow to NaN/inf and
     have that non-finite value mistaken for a physical turning point.
@@ -342,6 +352,143 @@ class NonMonotonicE2(unittest.TestCase):
         # Must NOT have been waved through to (or anywhere near) the
         # second root.
         self.assertLess(r["a"][-1], 0.5 * (a_root1 + a_root2))
+
+
+class NearDoubleRootRegression(unittest.TestCase):
+    """Adversarial regression coverage for arbitrarily-close pairs of
+    positive roots of E(a)^2=0. A fixed-resolution grid scan can miss a
+    forbidden interval narrower than its own spacing; these cases probe
+    a range of separations spanning above and below that former
+    (2000-point, ~a_max/2000 wide) grid spacing, with roots found
+    independently via numpy.roots on the matter+curvature+Lambda cubic
+    a^3 E(a)^2 = omega_de*a^3 + omega_k*a + omega_m (w0=-1, wa=0 makes
+    the CPL shape g(a)=1 identically, so this is exactly cubic)."""
+
+    H0 = 70.0
+    OMEGA_M = 1.5
+
+    @classmethod
+    def _positive_real_roots(cls, omega_de):
+        omega_k = 1.0 - cls.OMEGA_M - omega_de
+        roots = np.roots([omega_de, 0.0, omega_k, cls.OMEGA_M])
+        return sorted(r.real for r in roots
+                      if abs(r.imag) < 1.0e-9 and r.real > 0.0)
+
+    @classmethod
+    def _find_critical_omega_de(cls):
+        # Bisect on omega_de for the transition between "two positive
+        # real roots" (a forbidden interval exists) and "zero positive
+        # real roots" (the pair has gone complex, i.e. E(a)^2 dips close
+        # to zero but never crosses it) -- independent of
+        # physics_cosmo.py, using only numpy.roots on the cubic above.
+        lo, hi = 1.0e-6, 0.5
+        assert len(cls._positive_real_roots(lo)) == 2
+        assert len(cls._positive_real_roots(hi)) == 0
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if len(cls._positive_real_roots(mid)) == 2:
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
+    def test_first_root_found_across_a_range_of_separations(self):
+        ode_crit = self._find_critical_omega_de()
+        # Separations from comfortably above the old grid spacing
+        # (~1e-2) down to a razor-thin fraction of it, by moving
+        # omega_de closer to the critical value from below.
+        for eps in (1.0e-3, 1.0e-5, 1.0e-7, 1.0e-9, 1.0e-10):
+            omega_de = ode_crit - eps
+            roots = self._positive_real_roots(omega_de)
+            with self.subTest(eps=eps):
+                self.assertEqual(len(roots), 2,
+                                  "test setup error: expected two "
+                                  "positive real roots")
+                a_root1, a_root2 = roots
+                separation = a_root2 - a_root1
+                r = phys.integrate_evolution(
+                    H0=self.H0, omega_m=self.OMEGA_M, omega_r=0.0,
+                    omega_de=omega_de, w0=-1.0, wa=0.0,
+                    a_i=1.0e-8, a_max=20.0, step_frac=0.005)
+                s = r["summary"]
+                self.assertEqual(
+                    s["stop_reason"], "turnaround",
+                    f"eps={eps:.3g} (root separation={separation:.3g}) "
+                    "was not detected as a turning point")
+                self.assertAlmostEqual(
+                    s["turnaround"]["a_turn"], a_root1, places=4,
+                    msg=f"eps={eps:.3g}: a_turn did not match the "
+                    "independently-computed first root")
+                # No returned sample of the expanding branch may exceed
+                # the first root -- the forbidden interval must never be
+                # crossed, however narrow it is.
+                self.assertLessEqual(max(r["a"]), a_root1 * (1.0 + 1e-9))
+
+    def test_confirmed_no_root_reaches_a_max_without_large_gaps(self):
+        # Just ABOVE critical: the same near-cancellation structure, but
+        # now the two roots have gone complex -- E(a)^2 dips close to
+        # zero and rebounds without crossing it (a "loitering" model).
+        # This must integrate cleanly all the way to a_max, and -- since
+        # an earlier version of this integrator fast-forwarded across
+        # such a confirmed false alarm by quadrature alone, discarding
+        # the RK4 trajectory in between -- must not leave any
+        # anomalously large gap in the returned (a, t) samples.
+        ode_crit = self._find_critical_omega_de()
+        r = phys.integrate_evolution(
+            H0=self.H0, omega_m=self.OMEGA_M, omega_r=0.0,
+            omega_de=ode_crit + 1.0e-8, w0=-1.0, wa=0.0,
+            a_i=1.0e-8, a_max=20.0, step_frac=0.005)
+        s = r["summary"]
+        self.assertEqual(s["stop_reason"], "a_max")
+        self.assertEqual(r["a"][-1], 20.0)
+        a_arr = np.asarray(r["a"])
+        t_arr = np.asarray(r["t_gyr"])
+        # An ordinary step near a=20 with step_frac=0.005 changes a by a
+        # small fraction of a itself; a gap even a few times that large
+        # would indicate a discarded stretch of trajectory, not just an
+        # ordinary variable step size.
+        self.assertLess(np.diff(a_arr).max(), 1.0)
+        self.assertLess(np.diff(t_arr).max(), 10.0)
+
+
+class BoundaryCoincidenceTieBreak(unittest.TestCase):
+    """When a_max is requested to sit essentially exactly at a genuine
+    turning point, floating-point noise in how a_turn is independently
+    bisected must never flip the reported stop_reason away from
+    'turnaround' -- the physical event is the same regardless of which
+    side of a_turn a_max's last bit happens to round to."""
+
+    def test_a_max_one_ulp_below_analytic_turnaround(self):
+        # Pure matter+curvature (no radiation, no dark energy): the
+        # turning point is the exact closed-form a_turn = Om/(Om-1),
+        # from E(a)^2 = Om*a^-3 + (1-Om)*a^-2 = 0.
+        for omega_m in (1.5, 2.5, 3.0, 7.0):
+            a_turn_analytic = omega_m / (omega_m - 1.0)
+            a_max = np.nextafter(a_turn_analytic, -np.inf)
+            with self.subTest(omega_m=omega_m):
+                r = phys.integrate_evolution(
+                    H0=70.0, omega_m=omega_m, omega_r=0.0, omega_de=0.0,
+                    w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=a_max,
+                    step_frac=0.005)
+                s = r["summary"]
+                self.assertEqual(s["stop_reason"], "turnaround")
+                self.assertAlmostEqual(r["a"][-1], a_turn_analytic,
+                                        places=9)
+
+    def test_a_max_meaningfully_below_turnaround_still_stops_at_a_max(self):
+        # A guard against over-correction: a_max that is genuinely,
+        # non-trivially short of the turning point (far looser than the
+        # tie-break's relative tolerance) must still be respected as
+        # the stopping point, not swallowed into "turnaround".
+        omega_m = 3.0
+        a_turn_analytic = omega_m / (omega_m - 1.0)
+        a_max = a_turn_analytic * 0.999
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=omega_m, omega_r=0.0, omega_de=0.0,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=a_max, step_frac=0.005)
+        s = r["summary"]
+        self.assertEqual(s["stop_reason"], "a_max")
+        self.assertAlmostEqual(r["a"][-1], a_max, places=9)
 
 
 class ExtremeCPLRejection(unittest.TestCase):
