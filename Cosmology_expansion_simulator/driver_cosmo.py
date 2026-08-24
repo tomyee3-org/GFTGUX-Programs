@@ -106,7 +106,8 @@ def _provenance(mode, kw, results=None):
     and are kept visually distinct from the parameter list above them.
     """
     lines = [
-        f"Cosmology_expansion_simulator version {phys.MODEL_VERSION}",
+        f"Cosmology_expansion_simulator version {phys.MODEL_VERSION} "
+        f"(build {phys.BUILD_ID})",
         f"mode = {mode}",
         f"run at {datetime.now().isoformat(timespec='seconds')}",
         "parameters used by this run:",
@@ -118,6 +119,27 @@ def _provenance(mode, kw, results=None):
         for name, value in results.items():
             lines.append(f"    {name} = {value}")
     return lines
+
+
+def _crossing_provenance_fields(prefix, crossings):
+    """
+    Serialize a milestone crossings list (a_eq_mde_crossings or
+    a_accel_crossings) as numbered, machine-readable provenance fields
+    (Codex Audit 8 P1-2C): the underlying data already existed in the
+    summary dict, but never reached the CSV a script would actually
+    parse -- only the first-crossing scalar columns did. Returns {} for
+    0 or 1 crossings (the existing scalar columns already say
+    everything); {prefix_crossing_count, prefix_crossing_1_a,
+    prefix_crossing_1_z, prefix_crossing_1_direction, ...} otherwise.
+    """
+    if not crossings or len(crossings) < 2:
+        return {}
+    fields = {f"{prefix}_crossing_count": len(crossings)}
+    for i, c in enumerate(crossings, start=1):
+        fields[f"{prefix}_crossing_{i}_a"] = c["a"]
+        fields[f"{prefix}_crossing_{i}_z"] = c["z"]
+        fields[f"{prefix}_crossing_{i}_direction"] = c["direction"]
+    return fields
 
 
 EVOLVE_HEADER = ["t_Gyr", "a", "z", "H_km_s_Mpc", "Omega_m", "Omega_r",
@@ -177,6 +199,25 @@ def _print_warnings(warnings_list):
             print(f"    * {w}")
 
 
+def _extra_crossings_suffix(crossings):
+    """
+    "" if there is 0 or 1 crossing (the scalar field printed alongside
+    this already says everything); otherwise a compact listing of every
+    ADDITIONAL crossing, so a non-monotonic CPL history's full picture
+    is visible in the ordinary terminal summary, not only in the
+    summary dict's a_eq_mde_crossings/a_accel_crossings list fields that
+    a plain terminal user would otherwise never see (Codex Audit 8
+    P1-2C: the underlying data already existed, but never reached
+    student-facing output).
+    """
+    if not crossings or len(crossings) < 2:
+        return ""
+    extra = ", ".join(
+        f"a={c['a']:.4g} ({c['direction']})" for c in crossings[1:]
+    )
+    return f"  [{len(crossings)} crossings total; also: {extra}]"
+
+
 def _print_evolve_summary(s):
     _head("evolve")
     print(f"  H0                    : {s['H0_kms_mpc']:.3f}  km/s/Mpc "
@@ -186,27 +227,42 @@ def _print_evolve_summary(s):
     print(f"  Omega_DE0             : {s['omega_de']:.5f}   (w0={s['w0']:.3f}, wa={s['wa']:.3f})")
     print(f"  Early-time regime     : {s['early_regime']}  (a_i={s['a_i']:.2g})")
     print(SEP)
-    print(f"  Age today (a=1)       : {_fmt(s['age_today_gyr'])}  Gyr")
+    if s.get("past_status") == "past_eternal":
+        print("  Age today (a=1)       : UNDEFINED -- this model is "
+              "PAST-ETERNAL, not a finite-age Big Bang (see warnings)")
+        print(f"  Elapsed a_i -> today  : {_fmt(s.get('elapsed_ai_to_today_gyr'))}"
+              "  Gyr  (a_i-dependent bookkeeping only, NOT a physical age)")
+    else:
+        print(f"  Age today (a=1)       : {_fmt(s['age_today_gyr'])}  Gyr")
     print(f"  q0 (deceleration)     : {_fmt(s['q0'])}")
     print(f"  Matter-radiation eq.  : a_eq={_fmt(s['a_eq_rm'])}, z_eq={_fmt(s['z_eq_rm'])}")
-    print(f"  Matter-DE equality    : a_eq={_fmt(s['a_eq_mde'])}, z_eq={_fmt(s['z_eq_mde'])}")
-    print(f"  Decel/accel transition: a={_fmt(s['a_accel'])}, z={_fmt(s['z_accel'])}")
+    print(f"  Matter-DE equality    : a_eq={_fmt(s['a_eq_mde'])}, z_eq={_fmt(s['z_eq_mde'])}"
+          + _extra_crossings_suffix(s.get("a_eq_mde_crossings")))
+    print(f"  Decel/accel transition: a={_fmt(s['a_accel'])}, z={_fmt(s['z_accel'])}"
+          + _extra_crossings_suffix(s.get("a_accel_crossings")))
     if s["turnaround"] is not None:
         ta = s["turnaround"]
         print(f"  TURNAROUND (recollapse): a_turn={ta['a_turn']:.5g}, "
               f"t_turn={ta['t_turn_gyr']:.4g} Gyr")
         if s["total_lifetime_gyr"] is not None:
-            print(f"  Total lifetime (Big Bang to Big Crunch): "
-                  f"{s['total_lifetime_gyr']:.4g} Gyr (by time-reversal symmetry)")
+            print(f"  Estimated total lifetime (Big Bang to Big Crunch): "
+                  f"{s['total_lifetime_gyr']:.4g} Gyr (the factor of two is "
+                  "exact by time-reversal symmetry; t_turn itself is a "
+                  "numerical estimate)")
     if s["big_rip_gyr"] is not None:
         print(f"  Estimated Big Rip time: {s['big_rip_gyr']:.4g} Gyr "
               f"(i.e. {s['big_rip_gyr'] - (s['age_today_gyr'] or 0):.4g} Gyr from today)")
+    elif s.get("big_rip_remaining_gyr") is not None:
+        print(f"  Estimated time to Big Rip (from today): "
+              f"{s['big_rip_remaining_gyr']:.4g} Gyr (no absolute Big-Rip "
+              "time is reported since age_today_gyr is undefined -- see "
+              "past_status)")
     if s.get("fate_status") == "future_recollapse":
         print(f"  Fate (beyond this run): future recollapse near "
               f"a~{_fmt(s.get('future_turnaround_a'))}")
     elif s.get("fate_status") == "unresolved":
         print("  Fate (beyond this run): unresolved (see warnings)")
-    print(f"  Integration steps     : {s['n_forward_iterations']:,}")
+    print(f"  Forward-loop iterations: {s['n_forward_iterations']:,}")
     print(f"  Output samples        : {s['n_output_samples']:,}")
     print(f"  Run stopped because   : {s.get('stop_reason') or 'n/a'} "
           "(a_max reached / t_max reached / genuine turnaround)")
@@ -241,6 +297,13 @@ def _run_evolve(kw, outdir, csvdir, dpi, lw):
             "omega_de0_resolved": s.get("omega_de"),
             "omega_k0_derived": s.get("omega_k"),
             "age_today_gyr": s.get("age_today_gyr"),
+            # past_status distinguishes a genuine finite-age Big Bang
+            # from a past-eternal model, for which age_today_gyr above
+            # is deliberately None; elapsed_ai_to_today_gyr recovers the
+            # raw (a_i-dependent, non-physical-age) elapsed-time value
+            # in that case (Codex Audit 8 P0-1).
+            "past_status": s.get("past_status"),
+            "elapsed_ai_to_today_gyr": s.get("elapsed_ai_to_today_gyr"),
             # Serialized as separate scalar keys, not a nested Python
             # dict string, so a machine reading this header does not
             # need to parse Python literal syntax to recover them.
@@ -248,11 +311,14 @@ def _run_evolve(kw, outdir, csvdir, dpi, lw):
             "t_turn_gyr": ta["t_turn_gyr"] if ta is not None else None,
             "total_lifetime_gyr": s.get("total_lifetime_gyr"),
             "big_rip_gyr": s.get("big_rip_gyr"),
+            "big_rip_remaining_gyr": s.get("big_rip_remaining_gyr"),
             "fate_status": s.get("fate_status"),
             "future_turnaround_a": s.get("future_turnaround_a"),
             "fate_search_limit_a": s.get("fate_search_limit_a"),
             "n_forward_iterations": s.get("n_forward_iterations"),
             "n_output_samples": s.get("n_output_samples"),
+            **_crossing_provenance_fields("a_eq_mde", s.get("a_eq_mde_crossings")),
+            **_crossing_provenance_fields("a_accel", s.get("a_accel_crossings")),
         })
         _write_csv(csvdir, "cosmo_evolve", EVOLVE_HEADER,
                   _evolve_rows(result), comments=prov)
@@ -295,6 +361,12 @@ def _fate_note(s):
     indistinguishable from "no fate question applies here at all"
     (Codex Audit 6 P1-2 / Copilot Audit 6 P2-2).
     """
+    # past_status is checked first (Codex Audit 8 P0-1): a past-eternal
+    # model's missing age_today_gyr is a DIFFERENT, more fundamental
+    # fact than any fate_status value below, and must not be reported
+    # with a blank or misleading note.
+    if s.get("past_status") == "past_eternal":
+        return "past-eternal (no finite age)"
     status = s.get("fate_status")
     if status == "recollapse":
         return "recollapses"
@@ -309,7 +381,14 @@ def _fate_note(s):
 
 def _print_compare_summary(names, results):
     _head("compare")
-    hdr = f"  {'name':<14}{'age_Gyr':>10}{'H0*t0':>9}{'q0':>9}{'z_accel':>10}{'note':>14}"
+    # note is left-aligned in a wide, fixed field with an explicit
+    # leading space before it, rather than right-justified flush
+    # against z_accel: "past-eternal (no finite age)" and "future
+    # recollapse" are both longer than the old 14-character column, and
+    # a right-justified "n/a" + note previously ran together with no
+    # separator at all (Codex Audit 8 P2-3, e.g. "n/afuture recollapse").
+    hdr = (f"  {'name':<14}{'age_Gyr':>10}{'H0*t0':>9}{'q0':>9}"
+           f"{'z_accel':>10}  {'note':<28}")
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
     for name, r in zip(names, results):
@@ -318,7 +397,7 @@ def _print_compare_summary(names, results):
         note = _fate_note(s)
         print(f"  {name:<14}{_cell(s['age_today_gyr'], 10)}"
               f"{_cell(h0t0, 9)}{_cell(s['q0'], 9, 3)}"
-              f"{_cell(s['z_accel'], 10)}{note:>14}")
+              f"{_cell(s['z_accel'], 10)}  {note:<28}")
     print(SEP)
 
 
@@ -345,24 +424,50 @@ def _run_compare(kw, outdir, csvdir, dpi, lw):
                                        "t_max": kw["t_max"],
                                        "step_frac": kw["step_frac"],
                                        "continue_collapse": kw["continue_collapse"]})
+        # Every structured fate field physics_cosmo.py now produces is
+        # written here under its own machine-readable name (never as a
+        # human phrase under a generic "note" column -- Codex Audit 7
+        # P1-4), plus the raw turnaround/big-rip values a downstream
+        # reader needs to interpret fate_status without re-deriving
+        # them: a "future_recollapse" row is otherwise unable to say
+        # WHERE that certified turnaround is, and an "unresolved" row
+        # cannot reveal its own search horizon.
+        def _opt(x, fmt="{:.6g}"):
+            return "" if x is None else fmt.format(x)
+
         age_rows = []
         for name, r in zip(names, results):
             s = r["summary"]
-            h0t0 = (s["age_today_gyr"] / s["H0_inv_gyr"]) if s["age_today_gyr"] else ""
+            h0t0 = (s["age_today_gyr"] / s["H0_inv_gyr"]) if s["age_today_gyr"] else None
+            ta = s.get("turnaround")
             age_rows.append([
                 name, r["label"], f"{s['H0_kms_mpc']:.4f}", f"{s['omega_m']:.6g}",
                 f"{s['omega_r']:.6g}", f"{s['omega_k']:.6g}", f"{s['omega_de']:.6g}",
                 f"{s['w0']:.4f}", f"{s['wa']:.4f}",
-                s["age_today_gyr"] if s["age_today_gyr"] is None else f"{s['age_today_gyr']:.6g}",
-                h0t0 if h0t0 == "" else f"{h0t0:.6g}",
-                s["q0"] if s["q0"] is None else f"{s['q0']:.6g}",
-                "" if s["z_accel"] is None else f"{s['z_accel']:.6g}",
+                _opt(s["age_today_gyr"]), _opt(h0t0), _opt(s["q0"]),
+                _opt(s["z_accel"]),
+                s.get("stop_reason") or "",
+                s.get("past_status") or "",
+                _opt(s.get("elapsed_ai_to_today_gyr")),
                 s.get("fate_status") or "",
+                _opt(ta["a_turn"] if ta is not None else None),
+                _opt(ta["t_turn_gyr"] if ta is not None else None),
+                _opt(s.get("total_lifetime_gyr")),
+                _opt(s.get("big_rip_gyr")),
+                _opt(s.get("big_rip_remaining_gyr")),
+                _opt(s.get("future_turnaround_a")),
+                _opt(s.get("fate_search_limit_a")),
+                _fate_note(s),
             ])
         _write_csv(csvdir, "cosmo_compare_ages",
                   ["preset", "label", "H0", "omega_m", "omega_r", "omega_k",
                    "omega_de", "w0", "wa", "age_today_Gyr", "H0_t0", "q0",
-                   "z_accel", "note"],
+                   "z_accel", "stop_reason", "past_status",
+                   "elapsed_ai_to_today_Gyr", "fate_status", "a_turn",
+                   "t_turn_gyr", "total_lifetime_gyr", "big_rip_gyr",
+                   "big_rip_remaining_gyr",
+                   "future_turnaround_a", "fate_search_limit_a",
+                   "fate_note"],
                   age_rows, comments=prov)
 
         curve_rows = []
@@ -407,6 +512,7 @@ def _run_age(kw, outdir, csvdir, dpi, lw):
     z_accel = np.full(n, np.nan)
     recollapsed = np.zeros(n, dtype=bool)
     recollapsed_before_today = np.zeros(n, dtype=bool)
+    past_eternal = np.zeros(n, dtype=bool)
     failures = {}
 
     base_H0, base_om, base_or = kw["H0"], kw["omega_m"], kw["omega_r"]
@@ -434,10 +540,19 @@ def _run_age(kw, outdir, csvdir, dpi, lw):
             failures[i] = str(exc)
             continue
         s = r["summary"]
-        if s["age_today_gyr"] is not None:
+        # A past-eternal point (Codex Audit 8 P0-1) genuinely completed
+        # and, in general, DID reach a=1 -- age_today_gyr is None there
+        # by deliberate design, not because the run failed to get that
+        # far, so it must not be lumped in with the "never reached a=1"
+        # failure note below (checked via elapsed_ai_to_today_gyr, which
+        # stays defined for a past-eternal point whenever a=1 was
+        # actually reached, unlike age_today_gyr itself).
+        if s.get("past_status") == "past_eternal":
+            past_eternal[i] = True
+        elif s["age_today_gyr"] is not None:
             ages[i] = s["age_today_gyr"]
             h0t0[i] = s["age_today_gyr"] / s["H0_inv_gyr"]
-        elif s["turnaround"] is None:
+        elif s["turnaround"] is None and s.get("elapsed_ai_to_today_gyr") is None:
             failures[i] = (
                 f"run completed but never reached a=1 within a_max="
                 f"{_AGE_SCAN_A_MAX:g}"
@@ -481,6 +596,11 @@ def _run_age(kw, outdir, csvdir, dpi, lw):
     if failures:
         print(f"  {len(failures)} of {n} scan points failed and are "
               "omitted (see the 'note' column in the CSV, if requested).")
+    if np.any(past_eternal):
+        print(f"  {int(past_eternal.sum())} of {n} scan points are "
+              "PAST-ETERNAL (no finite Big-Bang age; see past_status in "
+              "--mode evolve for that point) -- reported as no age here, "
+              "not as a failure.")
     print(SEP)
 
     if csvdir is not None:
@@ -499,12 +619,13 @@ def _run_age(kw, outdir, csvdir, dpi, lw):
                 "" if not np.isfinite(z_accel[i]) else f"{z_accel[i]:.6g}",
                 "yes" if recollapsed[i] else "no",
                 "yes" if recollapsed_before_today[i] else "no",
+                "yes" if past_eternal[i] else "no",
                 note,
             ])
         _write_csv(csvdir, f"cosmo_age_scan_{scan_param}",
                   [scan_param, "age_today_Gyr", "H0_t0", "z_accel",
                    f"recollapses_by_a{_AGE_SCAN_A_MAX:g}",
-                   "recollapses_before_a1", "note"],
+                   "recollapses_before_a1", "past_eternal", "note"],
                   rows, comments=[
                       f"recollapses_by_a{_AGE_SCAN_A_MAX:g}: 'yes' means a "
                       f"turning point was found at or before a={_AGE_SCAN_A_MAX:g} "
@@ -516,6 +637,7 @@ def _run_age(kw, outdir, csvdir, dpi, lw):
     scan_result = dict(scan_param=scan_param, values=values, ages=ages, h0t0=h0t0,
                        z_accel=z_accel, recollapsed=recollapsed,
                        recollapsed_before_today=recollapsed_before_today,
+                       past_eternal=past_eternal,
                        age_ref_gyr=kw["age_ref_gyr"])
     if not kw["no_plot"]:
         viz.plot_age_scan(scan_result, outdir=outdir, dpi=dpi, lw=lw)

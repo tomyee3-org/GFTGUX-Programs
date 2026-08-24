@@ -30,7 +30,70 @@ returned in the same student-facing units.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.5.0"
+
+
+#: The exact source files this build identifier covers (Copilot Audit 8
+#: P1-2): a documentation-only change, a sample-output file, or an edit
+#: to the test suite does NOT change this value -- only the four
+#: modules listed here do. Exposed so both the help documentation and
+#: any code that needs to know precisely what BUILD_ID does and does
+#: not cover can refer to one source of truth instead of duplicating
+#: this list.
+BUILD_ID_COVERS = ("physics_cosmo.py", "driver_cosmo.py", "main.py", "plot_cosmo.py")
+
+
+def _compute_build_id():
+    """A short, content-derived build identifier (Copilot Audit 7 P1-2).
+
+    This project has no external version-control system available at
+    build time, so MODEL_VERSION alone cannot distinguish two builds
+    that share the same version string but differ in source content
+    (e.g. a local patch applied without remembering to bump
+    MODEL_VERSION). This hashes the actual on-disk source of the core
+    computational modules listed in BUILD_ID_COVERS, giving CSV
+    provenance and --version output a machine-checkable answer to "did
+    these two runs use byte-identical code?" without requiring git or
+    any other source-control tooling. It degrades to "unknown" (never
+    raises) if the source files cannot be located or read -- e.g.
+    inside a frozen/zipped distribution -- since a missing build id
+    should never prevent the program from running.
+
+    Two robustness fixes over an earlier version, both catching real
+    ways two semantically identical checkouts could otherwise hash
+    differently or collide:
+
+    - Read in TEXT mode (universal-newline translation) and re-encoded
+      to UTF-8 before hashing, not raw bytes: a checkout with CRLF line
+      endings (e.g. from Windows) would otherwise hash differently from
+      the exact same source checked out with LF endings (Gemini Audit
+      8).
+    - Each file's name and byte length are hashed immediately before
+      its own content, not just all four files' bytes concatenated back
+      to back: without that framing, moving a shared byte sequence
+      across a file boundary (e.g. content shifted from the end of one
+      file to the start of the next) can reproduce the exact same
+      concatenated byte stream and therefore the same hash, even though
+      the two files individually differ (Codex Audit 8 P2-4).
+    """
+    import hashlib
+    import os
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        h = hashlib.sha256()
+        for name in BUILD_ID_COVERS:
+            with open(os.path.join(here, name), "r", encoding="utf-8",
+                      newline=None) as f:
+                content = f.read().encode("utf-8")
+            h.update(name.encode("utf-8"))
+            h.update(len(content).to_bytes(8, "big"))
+            h.update(content)
+        return h.hexdigest()[:12]
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+
+
+BUILD_ID = _compute_build_id()
 
 # ----------------------------------------------------------------------
 # Constants (SI, used only for the km/s/Mpc <-> Gyr^-1 conversion)
@@ -98,6 +161,21 @@ def resolve_omega_de(omega_m, omega_r, omega_de):
     else:
         omega_de = _finite("omega_de", omega_de)
         omega_k = 1.0 - omega_m - omega_r - omega_de
+    # omega_m and omega_r (and omega_de, when given) were already checked
+    # finite above, but the closure ARITHMETIC combining them can still
+    # overflow to +-inf even when every input operand is finite (e.g.
+    # omega_m=omega_r=1e308) -- check the DERIVED values too, rather
+    # than letting a non-finite omega_de/omega_k propagate silently into
+    # E(a)^2 and surface later as an unrelated NumPy warning or a
+    # misleading _IndeterminateRootSearch (Codex Audit 7 P2-1).
+    if not (math.isfinite(omega_de) and math.isfinite(omega_k)):
+        raise ValueError(
+            "The closure relation Omega_k = 1 - Omega_m - Omega_r - "
+            "Omega_DE produced a non-finite value from these inputs "
+            "(overflow), even though each input was individually "
+            "finite; this parameter combination is outside this "
+            "program's supported numerical range."
+        )
     return omega_de, omega_k
 
 
@@ -305,10 +383,11 @@ def early_time_offset_Gyr(a_i, H0_pgyr, omega_m, omega_r, omega_k,
                     omega_eff * a_i ** (-3.0 * (1.0 + w_eff))))
 
     if not terms:
-        # No matter, radiation, positive curvature, or early-time-
-        # dominant dark energy at all: there is no standard early-time
-        # limit. Fall back to t=0 at a=a_i itself and flag this clearly
-        # rather than pretending to know the offset.
+        # No matter, radiation, a positive Omega_k contribution (open
+        # geometry), or early-time-dominant dark energy at all: there is
+        # no standard early-time limit. Fall back to t=0 at a=a_i itself
+        # and flag this clearly rather than pretending to know the
+        # offset.
         return 0.0, ("undetermined (no matter, radiation, open curvature, "
                       "or early-time-dominant dark energy)"), None
 
@@ -758,25 +837,142 @@ def _first_root_ahead(a_lo, a_max, args):
     return None
 
 
+def _cpl_asymptotic_coefficient(omega_de, wa):
+    """
+    The CPL dark-energy density shape's a->0 behavior factors exactly as
+
+        g(a) = exp(-3*wa*(1-a)) * a^n_de = exp(-3*wa) * exp(3*wa*a) * a^n_de
+
+    with n_de = -3*(1+w0+wa). The first exponential is a CONSTANT (a
+    genuine part of the leading-order coefficient); the second tends to
+    1 as a->0 and is kept separate wherever it matters (see
+    _leading_order_terms and _big_bang_asymptotic_bound below), since it
+    is a-dependent. Returns omega_de*exp(-3*wa), the coefficient that
+    must be used whenever this term's exponent TIES another component's
+    -- omitting exp(-3*wa) there previously understated or overstated
+    the true tied-leading-order coefficient (Codex Audit 7 P0-2), even
+    though it never affects the SIGN of an UNTIED CPL leading term
+    (exp(-3*wa) > 0 always).
+
+    For an extreme wa, exp(-3*wa) itself can overflow float64's range
+    (wa very negative) or underflow to exactly 0.0 (wa very positive) --
+    Codex Audit 8 P1-1 gave exact examples of both. This function
+    degrades GRACEFULLY rather than raising: it returns a signed
+    infinity (omega_de's sign) on overflow, and Python's IEEE-754
+    default of exactly 0.0 on underflow is left as-is. Neither is wrong
+    as a MAGNITUDE bound (the true value really is unboundedly large, or
+    negligibly close to zero, relative to float64's representable
+    range) -- the caller-visible bug this was causing was elsewhere:
+    _dominant_leading_term_exponent_and_sign no longer determines this
+    term's SIGN from this (possibly non-finite or exactly-zero) returned
+    value at all when it is not tied with another component (see
+    _cpl_de_sign_and_log_magnitude below), so an untied extreme-wa DE
+    term is never again mistaken for an exact cancellation (magnitude
+    0) or rejected outright (magnitude overflow) when its sign alone
+    already fully determines the answer.
+    """
+    try:
+        factor = math.exp(-3.0 * wa)
+    except OverflowError:
+        factor = math.inf
+    return omega_de * factor
+
+
+def _signed_log_magnitude(x):
+    """(sign, log|x|) for a float x -- (0.0, -inf) if x is exactly 0."""
+    if x == 0.0:
+        return 0.0, -math.inf
+    return (1.0 if x > 0.0 else -1.0), math.log(abs(x))
+
+
+def _cpl_de_sign_and_log_magnitude(omega_de, wa):
+    """
+    (sign, log|coefficient|) for the CPL dark-energy leading-order
+    coefficient omega_de*exp(-3*wa), computed ENTIRELY in log space so
+    it is exact for every finite wa and never needs exp(-3*wa) itself to
+    be a representable float64 (Codex Audit 8 P1-1: wa=+-250 already
+    makes exp(-3*wa) alone overflow or underflow, even for an otherwise
+    perfectly ordinary, representable model). The sign is always exactly
+    sign(omega_de), since exp(...) > 0 for every finite wa -- this is
+    what lets an UNTIED extreme-wa DE term be classified correctly
+    without ever forming its (possibly non-representable) magnitude.
+    """
+    if omega_de == 0.0:
+        return 0.0, -math.inf
+    return (1.0 if omega_de > 0.0 else -1.0), math.log(abs(omega_de)) - 3.0 * wa
+
+
+def _combine_signed_log_magnitudes(pairs):
+    """
+    The (sign, log|sum|) of a list of (sign, log|term|) pairs (see
+    _signed_log_magnitude/_cpl_de_sign_and_log_magnitude), computed via
+    running log-sum-exp / log-difference-of-exp updates so the actual
+    (possibly non-representable) magnitude of any individual term is
+    never formed as an ordinary float (Codex Audit 8 P1-1). Used to find
+    the TRUE SIGN of a tied leading-order group that may include a CPL
+    term whose own magnitude overflows or underflows float64, when more
+    than one term shares the group (the untied case needs none of this
+    -- see _dominant_leading_term_exponent_and_sign).
+    """
+    sign, log_abs = 0.0, -math.inf
+    for s, la in pairs:
+        if s == 0.0:
+            continue
+        if sign == 0.0:
+            sign, log_abs = s, la
+            continue
+        if s == sign:
+            hi, lo = max(log_abs, la), min(log_abs, la)
+            log_abs = hi + math.log1p(math.exp(lo - hi))
+        elif log_abs == la:
+            sign, log_abs = 0.0, -math.inf  # exact cancellation
+        elif log_abs > la:
+            log_abs = log_abs + math.log1p(-math.exp(la - log_abs))
+        else:
+            sign = s
+            log_abs = la + math.log1p(-math.exp(log_abs - la))
+    return sign, log_abs
+
+
+def _leading_order_terms(omega_m, omega_r, omega_k, omega_de, w0, wa):
+    """
+    (exponent, coefficient, is_de) for every nonzero density component's
+    exact power-law behavior as a -> 0+: matter ~ a^-3, radiation ~
+    a^-4, curvature ~ a^-2, and CPL dark energy ~ a^n_de (the coefficient
+    already includes the constant exp(-3*wa) prefactor from
+    _cpl_asymptotic_coefficient, needed for correct tied-exponent
+    comparisons; the residual a-dependent factor exp(3*wa*a) -> 1 as
+    a->0 is NOT included here since callers that need it (the rigorous
+    asymptotic bound below) must track it explicitly against a).
+    """
+    terms = []
+    if omega_m != 0.0:
+        terms.append((-3.0, omega_m, False))
+    if omega_r != 0.0:
+        terms.append((-4.0, omega_r, False))
+    if omega_k != 0.0:
+        terms.append((-2.0, omega_k, False))
+    if omega_de != 0.0:
+        n_de = -3.0 * (1.0 + w0 + wa)
+        terms.append((n_de, _cpl_asymptotic_coefficient(omega_de, wa), True))
+    return terms
+
+
 def _dominant_leading_term_exponent_and_sign(omega_m, omega_r, omega_k,
                                               omega_de, w0, wa):
     """
-    As a -> 0+, E(a)^2 = Om*a^-3 + Or*a^-4 + Ok*a^-2 + Ode*g(a), where
-    the CPL dark-energy shape g(a) behaves as a^n_de with n_de =
-    -3*(1+w0+wa) in that limit: ln g(a) = -3(1+w0+wa)*ln(a) - 3*wa*(1-a),
-    and the second term tends to the FINITE constant -3*wa as a->0, so
-    it only contributes a bounded multiplicative factor exp(-3*wa) and
-    never changes which power of a dominates. Whichever single term has
-    the most negative exponent (steepest divergence) therefore fixes
-    the a->0 SIGN of E(a)^2 itself -- a purely algebraic fact about the
-    model's parameters, independent of a_i and of the integrated
-    trajectory. This is a fundamentally different, wider question than
-    early_time_offset_Gyr's "which term dominates AT a_i" check just
-    below: that one compares magnitudes at a specific a_i and can be
-    satisfied even when a different term is the true a->0 asymptote;
-    this one is exact in the strict limit (see Codex Audit 6 P0-1).
+    As a -> 0+, E(a)^2 = Om*a^-3 + Or*a^-4 + Ok*a^-2 + Ode*g(a). Whichever
+    single term (or group of tied terms, using the corrected CPL
+    coefficient from _leading_order_terms) has the most negative
+    exponent (steepest divergence) fixes the a->0 SIGN of E(a)^2 itself
+    -- a purely algebraic fact about the model's parameters, independent
+    of a_i and of the integrated trajectory. This is a fundamentally
+    different, wider question than early_time_offset_Gyr's "which term
+    dominates AT a_i" check just below: that one compares magnitudes at
+    a specific a_i and can be satisfied even when a different term is
+    the true a->0 asymptote; this one is exact in the strict limit.
 
-    Returns (p_min, sign, tied):
+    Returns (p_min, sign, tied, terms):
       p_min  -- the most negative exponent among components with a
                 nonzero coefficient (None if every coefficient is
                 exactly zero).
@@ -786,70 +982,191 @@ def _dominant_leading_term_exponent_and_sign(omega_m, omega_r, omega_k,
                 exactly zero (an exact leading-order cancellation,
                 genuinely indeterminate from this term alone).
       tied   -- True if more than one component shares p_min.
+      terms  -- the full (exponent, coefficient, is_de) list, passed
+                through so a caller that needs the rigorous asymptotic
+                bound (_big_bang_asymptotic_bound) does not have to
+                recompute it.
     """
-    terms = []
-    if omega_m != 0.0:
-        terms.append((-3.0, omega_m))
-    if omega_r != 0.0:
-        terms.append((-4.0, omega_r))
-    if omega_k != 0.0:
-        terms.append((-2.0, omega_k))
-    if omega_de != 0.0:
-        n_de = -3.0 * (1.0 + w0 + wa)
-        terms.append((n_de, omega_de))
+    terms = _leading_order_terms(omega_m, omega_r, omega_k, omega_de, w0, wa)
     if not terms:
-        return None, 0.0, False
-    p_min = min(p for p, _c in terms)
-    coeffs_at_min = [c for p, c in terms if p == p_min]
-    tied = len(coeffs_at_min) > 1
-    s = sum(coeffs_at_min)
-    sign = 1.0 if s > 0.0 else (-1.0 if s < 0.0 else 0.0)
-    return p_min, sign, tied
+        return None, 0.0, False, terms
+    p_min = min(p for p, _c, _d in terms)
+    at_min = [(c, is_de) for p, c, is_de in terms if p == p_min]
+    tied = len(at_min) > 1
+    # The sign of the leading group's coefficient sum is determined via
+    # signed-log-magnitude arithmetic (Codex Audit 8 P1-1), NOT by
+    # summing the raw `terms` coefficients directly: a CPL term's own
+    # stored coefficient (omega_de*exp(-3*wa)) can overflow to +-inf or
+    # underflow to exactly 0.0 for an extreme wa even when the true sign
+    # of the sum is perfectly well defined -- most simply in the common
+    # UNTIED case, where the DE term's sign is just sign(omega_de),
+    # needing no magnitude at all.
+    if tied:
+        pairs = [
+            (_cpl_de_sign_and_log_magnitude(omega_de, wa) if is_de
+             else _signed_log_magnitude(c))
+            for c, is_de in at_min
+        ]
+        sign, _log_abs = _combine_signed_log_magnitudes(pairs)
+    else:
+        c, is_de = at_min[0]
+        sign = (1.0 if omega_de > 0.0 else (-1.0 if omega_de < 0.0 else 0.0)) \
+            if is_de else (1.0 if c > 0.0 else (-1.0 if c < 0.0 else 0.0))
+    return p_min, sign, tied, terms
 
 
-def _big_bang_connectivity_anchor(a_i, omega_m, omega_r, omega_k, omega_de,
-                                   w0, wa, expected_sign):
+def _big_bang_asymptotic_bound(a_i, terms, p_min, wa, omega_de):
     """
-    Find a small anchor scale factor a_anchor << a_i at which the
-    NUMERICALLY evaluated sign of E(a)^2 agrees with the analytically
-    predicted a->0 limiting sign (expected_sign, from
-    _dominant_leading_term_exponent_and_sign), by shrinking a_anchor
-    geometrically (by factors of 1e-3) until they agree or a hard
-    iteration limit / de_density_shape's own conservative policy floor
-    is hit. This anchor then serves as a verified non-negative starting
-    point for _first_root_ahead's certified search up to a_i, which is
-    what actually certifies (or refutes) that a_i sits on a branch
-    continuously connected back toward a=0, with no hidden forbidden
-    interval in between.
+    Rigorously establish a scale factor a_asym in (0, a_i) such that
+    E(a)^2 > 0 is PROVEN for every a in (0, a_asym] -- not merely
+    observed at one sampled point. An earlier version picked an anchor
+    and accepted it as soon as E(a)^2 happened to test the right sign
+    there, then searched only [a_anchor, a_i]; that leaves (0, a_anchor)
+    completely unchecked, and Codex Audit 7 P0-1 gave an exact
+    construction (two roots of E(a)^2=0 both strictly below such an
+    anchor) that this program would have silently accepted.
 
-    Raises _IndeterminateRootSearch if no anchor small enough to agree
-    with the predicted sign can be reached -- an honest failure, never
-    a silent guess. Shrinking a_anchor further after de_density_shape's
-    own |ln g(a)| policy floor is hit cannot help (it only makes
-    |ln g(a)| larger, not smaller), so that case stops immediately
-    rather than looping to the iteration limit.
+    The construction: group every term sharing p_min (the "leading
+    group," whose coefficients sum to C_lead > 0 -- checked by the
+    caller before this is called). For any candidate a_asym:
+
+    - Every OTHER (subleading) term has exponent p_j > p_min, so its
+      magnitude a^(p_j-p_min) is strictly INCREASING in a; its value AT
+      a=a_asym is therefore a valid upper bound on its magnitude for
+      EVERY a in (0, a_asym] -- not just at a_asym. Summing these
+      (using exact rational monotonicity, no sampling) gives a proven
+      upper bound "subleading_bound" on everything not in the leading
+      group, valid throughout (0, a_asym].
+    - If a CPL term is itself IN the leading group, its exact value is
+      c_de * exp(3*wa*a), not the constant c_de: exp(3*wa*a) is
+      monotonic in a, so its range over [0, a_asym] is exactly
+      [min(1, exp(3*wa*a_asym)), max(1, exp(3*wa*a_asym))] (both
+      endpoints, by monotonicity) -- again a proven bound, not a
+      sample. The leading group's worst-case (smallest) value over the
+      whole interval, "worst_leading", uses whichever endpoint of that
+      range makes c_de's contribution smallest.
+
+    If worst_leading exceeds twice subleading_bound (a comfortable,
+    non-tight safety factor -- this is a genuine analytic margin across
+    possibly many decades of magnitude, not float64 rounding noise), then
+    E(a)^2 = a^p_min * (leading group value - subleading contributions)
+    is PROVEN positive throughout (0, a_asym], in exact arithmetic.
+
+    a_asym starts at a_i*1e-3 and shrinks geometrically (by 1e-3) when
+    the bound does not yet hold: shrinking a_asym can only help (every
+    subleading bound shrinks toward 0, and the CPL residual factor's
+    range shrinks toward 1), so for any genuinely positive C_lead this
+    is mathematically guaranteed to succeed for small enough a_asym --
+    modulo this program's iteration budget and float64's own underflow
+    floor. Raises _IndeterminateRootSearch if neither is reached within
+    that budget -- an honest failure, never a silent guess.
     """
-    a_anchor = a_i * 1.0e-3
-    for _ in range(80):
-        if a_anchor <= 0.0 or not math.isfinite(a_anchor):
+    lead_terms = [(c, is_de) for p, c, is_de in terms if p == p_min]
+    other_terms = [(p, c, is_de) for p, c, is_de in terms if p != p_min]
+    lead_non_de = sum(c for c, is_de in lead_terms if not is_de)
+    de_leads = [c for c, is_de in lead_terms if is_de]
+    c_de_lead = de_leads[0] if de_leads else None
+    # Codex Audit 8 P1-1: when the CPL term is the SOLE leading-group
+    # member (untied with matter/radiation/curvature), its naive
+    # coefficient c_de_lead can be a non-representable magnitude (+-inf
+    # from exp(-3*wa) overflowing, or exactly 0.0 from it underflowing)
+    # even though the caller has already established the true sign is
+    # positive (this function is only ever invoked once that is known).
+    # This case is handled entirely in log-space below, so an extreme
+    # wa's non-representable exp(-3*wa) never has to be formed as an
+    # ordinary float at all -- unlike the tied-group or subleading-DE
+    # cases (unchanged below), which remain conservative (raising
+    # _IndeterminateRootSearch rather than silently guessing) if their
+    # own float64 arithmetic is not representable; that is an honest
+    # search-budget limitation, not a wrong answer.
+    de_untied_leading = c_de_lead is not None and len(lead_terms) == 1
+    de_log_abs = (_cpl_de_sign_and_log_magnitude(omega_de, wa)[1]
+                  if de_untied_leading else None)
+
+    a_asym = a_i * 1.0e-3
+    for _ in range(200):
+        if not (0.0 < a_asym < a_i) or not math.isfinite(a_asym):
             break
-        try:
-            e2_anchor = float(E2(a_anchor, omega_m, omega_r, omega_k,
-                                  omega_de, w0, wa))
-        except ValueError:
-            break
-        if math.isfinite(e2_anchor) and e2_anchor != 0.0:
-            observed_sign = 1.0 if e2_anchor > 0.0 else -1.0
-            if observed_sign == expected_sign:
-                return a_anchor, e2_anchor
-        a_anchor *= 1.0e-3
+
+        log_worst_leading = None
+        if de_untied_leading:
+            try:
+                f_asym = math.exp(3.0 * wa * a_asym)
+            except OverflowError:
+                f_asym = math.inf if wa > 0.0 else 0.0
+            # sign is guaranteed positive here (checked by the caller
+            # before this function is ever invoked), so the worst case
+            # over [0, a_asym] always uses the SMALLER endpoint of the
+            # residual factor's range.
+            f_lo = min(1.0, f_asym)
+            log_worst_leading = de_log_abs + (math.log(f_lo) if f_lo > 0.0 else -math.inf)
+            leading_ok = True
+        elif c_de_lead is not None:
+            try:
+                f_asym = math.exp(3.0 * wa * a_asym)
+            except OverflowError:
+                f_asym = math.inf if wa > 0.0 else 0.0
+            f_lo, f_hi = min(1.0, f_asym), max(1.0, f_asym)
+            worst_de = c_de_lead * (f_lo if c_de_lead >= 0.0 else f_hi)
+            worst_leading = lead_non_de + worst_de
+            leading_ok = math.isfinite(worst_leading) and worst_leading > 0.0
+            if leading_ok:
+                log_worst_leading = math.log(worst_leading)
+        else:
+            worst_leading = lead_non_de
+            leading_ok = math.isfinite(worst_leading) and worst_leading > 0.0
+            if leading_ok:
+                log_worst_leading = math.log(worst_leading)
+
+        subleading_bound = 0.0
+        finite = leading_ok
+        for p_j, c_j, is_de_j in other_terms:
+            if not finite:
+                break
+            try:
+                power_bound = a_asym ** (p_j - p_min)
+            except OverflowError:
+                finite = False
+                break
+            factor = 1.0
+            if is_de_j:
+                try:
+                    f_here = math.exp(3.0 * wa * a_asym)
+                except OverflowError:
+                    f_here = math.inf if wa > 0.0 else 0.0
+                factor = max(1.0, f_here,
+                             (1.0 / f_here if f_here > 0.0 else math.inf))
+            term_bound = abs(c_j) * power_bound * factor
+            if not math.isfinite(term_bound):
+                finite = False
+                break
+            subleading_bound += term_bound
+
+        # subleading_bound<=0 (only possible when there are no
+        # subleading terms at all, or -- Codex Audit 8 P1-1 -- an
+        # astronomically tiny but genuinely nonzero subleading bound has
+        # underflowed to exactly 0.0 in float64) means there is nothing
+        # left to outweigh: ANY positive worst_leading already suffices,
+        # with no arbitrary epsilon floor needed. A FIXED absolute
+        # floor here (an earlier version used 1e-300) is wrong in
+        # general: for a sufficiently extreme wa, the TRUE leading
+        # coefficient itself can be smaller in magnitude than 1e-300
+        # (as in Codex's wa=250 example, where it is of order 1e-326),
+        # so a fixed floor of that size would reject a genuinely
+        # positive, correctly-bounded case.
+        if finite and log_worst_leading is not None:
+            if subleading_bound <= 0.0:
+                return a_asym
+            if log_worst_leading > math.log(2.0) + math.log(subleading_bound):
+                return a_asym
+        a_asym *= 1.0e-3
+
     raise _IndeterminateRootSearch(
-        "Could not find an anchor scale factor close enough to a=0 whose "
-        "numerically evaluated E(a)^2 sign agrees with the analytically "
-        "predicted Big-Bang-limit sign, needed to certify that a_i is "
-        "connected to the true Big Bang along a continuous expanding "
-        "branch. This is an honest limitation of this program's "
-        "float64 search, not evidence that no such branch exists."
+        "Could not establish a rigorous asymptotic scale factor below "
+        "which E(a)^2 is provably positive all the way to the true Big "
+        "Bang at a=0, within this program's search budget. This is an "
+        "honest limitation of this program's float64 search, not "
+        "evidence that no such branch exists."
     )
 
 
@@ -1283,7 +1600,24 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
 
     H0_pgyr = H0_per_Gyr(H0)
 
-    e2_i = float(E2(a_i, omega_m, omega_r, omega_k, omega_de, w0, wa))
+    # A pathological a_i/omega combination (e.g. an astronomically large
+    # omega_m at an astronomically small a_i) can overflow the ordinary
+    # power-law arithmetic inside E2 itself, before this program's own
+    # explicit isfinite check below ever gets a chance to raise a clear
+    # domain error -- NumPy's default behavior is to print a raw
+    # RuntimeWarning to stderr in that case (Codex Audit 8 P2-2), which
+    # a CLI user would see ahead of, and instead of, this program's own
+    # intended error message. Suppressed HERE ONLY (not globally) since
+    # the very next lines already turn any non-finite result into an
+    # explicit, clear ValueError; a genuinely unexpected numeric warning
+    # anywhere else in the program is deliberately left visible.
+    with np.errstate(over="ignore", invalid="ignore"):
+        e2_i = float(E2(a_i, omega_m, omega_r, omega_k, omega_de, w0, wa))
+    if not math.isfinite(e2_i):
+        raise ValueError(
+            "E(a)^2 is not finite at a_i; this parameter combination is "
+            "outside this program's supported numerical range."
+        )
     if e2_i <= 0.0:
         raise ValueError(
             "E(a)^2 <= 0 at a_i: this parameter combination has no "
@@ -1296,12 +1630,17 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
     # forbidden interval (E(a)^2 < 0 between two nearby roots) strictly
     # between a=0 and a_i, or E(a)^2 itself can tend to a NEGATIVE value
     # as a->0 for this parameter combination even though it happens to
-    # be positive at a_i. Both are certified against here, reusing the
-    # same certified search machinery _first_root_ahead already uses to
-    # look for a FUTURE turning point, pointed instead at the interval
-    # behind the starting point (see Codex Audit 6 P0-1).
+    # be positive at a_i. This is checked in two stages: first a
+    # RIGOROUS analytic bound (_big_bang_asymptotic_bound) establishes a
+    # scale a_asym below which E(a)^2 is PROVEN positive all the way to
+    # a=0 -- not merely sampled at one anchor point, which an earlier
+    # version did and which Codex Audit 7 P0-1 showed can miss a
+    # forbidden interval (two nearby roots) sitting entirely below such
+    # an anchor. Then the existing certified search machinery
+    # (_first_root_ahead, otherwise used to look for a FUTURE turning
+    # point) checks the remaining FINITE interval [a_asym, a_i].
     args0 = (H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa)
-    p_min, expected_sign, _tied = _dominant_leading_term_exponent_and_sign(
+    p_min, expected_sign, _tied, _terms = _dominant_leading_term_exponent_and_sign(
         omega_m, omega_r, omega_k, omega_de, w0, wa)
     if p_min is not None:
         if expected_sign == 0.0:
@@ -1310,21 +1649,28 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
                 "among the components that jointly dominate as a->0 "
                 "(their coefficients sum to zero at the leading power "
                 "of a), so the sign of E(a)^2 in the Big-Bang limit "
-                "cannot be determined from the leading term alone, and "
-                "whether a_i is connected to a genuine Big Bang cannot "
-                "be certified. Adjust the density parameters slightly "
-                "to break the tie."
+                "cannot be determined from the leading term alone. This "
+                "exact-cancellation regime is outside this program's "
+                "supported numerical domain (the direct float64 "
+                "evaluation of two huge, nearly-cancelling terms would "
+                "itself be numerically unstable); choose parameters "
+                "that do not exactly cancel at leading order."
             )
         if expected_sign < 0.0:
             raise ValueError(
                 f"E(a)^2 tends to a negative value as a->0 for this "
                 "parameter combination (the component that dominates "
                 "in that limit has a negative coefficient), even though "
-                f"E(a_i={a_i:.3g})^2 > 0: a_i sits on an isolated "
-                "expanding branch with no continuous path back to the "
-                "true Big Bang at a=0. This model has no valid history "
-                "before some earlier turning point; increase a_i past "
-                "that point, or change the density parameters."
+                f"E(a_i={a_i:.3g})^2 > 0: a_i sits on an isolated branch "
+                "with no continuous path back to the true Big Bang at "
+                "a=0 -- some earlier turning point necessarily lies "
+                "between them. Since a_i is already on the far side of "
+                "that turning point, no LARGER a_i can reconnect it to "
+                "a=0; choose different density parameters instead (or, "
+                "if this disconnected/bounce-like branch is the actual "
+                "model of interest, note that this program always "
+                "measures cosmic time from an a=0 Big Bang, which does "
+                "not apply here)."
             )
         # _IndeterminateRootSearch is deliberately let through UNCHANGED
         # here (not wrapped in a ValueError) -- it already carries a
@@ -1332,10 +1678,29 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         # search used elsewhere in this module (e.g. for a future
         # turnaround), which callers and tests already distinguish by
         # exception type rather than by parsing a wrapped message.
-        a_anchor, _e2_anchor = _big_bang_connectivity_anchor(
-            a_i, omega_m, omega_r, omega_k, omega_de, w0, wa,
-            expected_sign)
-        bracket = _first_root_ahead(a_anchor, a_i, args0)
+        a_asym = _big_bang_asymptotic_bound(a_i, _terms, p_min, wa, omega_de)
+        try:
+            bracket = _first_root_ahead(a_asym, a_i, args0)
+        except ValueError as exc:
+            # This numeric search's own interval [a_asym, a_i] can, for
+            # an extreme wa, dip into a scale factor far below a_i where
+            # this program's de_density_shape POLICY (not a hardware
+            # limit -- see _LOG_G_LIMIT) refuses to evaluate g(a) at all
+            # (Codex Audit 8 P1-1). That underlying ValueError is
+            # accurate on its own terms but, read in isolation, looks
+            # like the user's OWN requested a_i triggered it; re-raise
+            # with the missing context connecting it back to the deep
+            # Big-Bang connectivity search that actually reached there.
+            raise ValueError(
+                "This program could not FINISH certifying Big-Bang "
+                f"connectivity for a_i={a_i:.3g}: doing so required "
+                f"checking for a hidden root down to a scale factor as "
+                f"small as a~{a_asym:.3g} (set by how tiny this model's "
+                "dark-energy leading-order coefficient genuinely is for "
+                "this w0/wa), and evaluating the dark-energy density "
+                "there hit this program's own representability policy "
+                f"limit. Underlying error: {exc}"
+            ) from exc
         if bracket is not None:
             lo_b, hi_b = bracket
             raise ValueError(
@@ -1344,9 +1709,36 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
                 f"and a={hi_b:.6g}) strictly between the true Big Bang "
                 f"(a=0) and a_i={a_i:.3g}: E(a_i)^2 > 0 does not by "
                 "itself mean a_i is on a branch continuously connected "
-                "back to a=0. Increase a_i to sit past this forbidden "
-                "interval, or change the density parameters."
+                "back to a=0. Since a_i sits beyond this forbidden "
+                "interval, no LARGER a_i can reconnect it to a=0; if an "
+                "a_i strictly below the interval's lower edge "
+                f"(a<{lo_b:.6g}) would still describe the physics you "
+                "want, use that instead, or change the density "
+                "parameters so the forbidden interval does not occur."
             )
+
+    # Continuous connectivity to a=0 (just certified above) is NECESSARY
+    # but NOT SUFFICIENT for a finite-age Big Bang (Codex Audit 8 P0-1).
+    # Cosmic time is dt/da = 1/(a H0 E(a)); if E(a)^2 ~ C*a^p_min as
+    # a->0 (C>0, already established), then dt/da ~ a^(-1-p_min/2), and
+    # the integral from a=0 to any a_i>0 converges iff p_min<0 (p_min=0
+    # diverges logarithmically; p_min>0 diverges as a power). matter
+    # (p=-3), radiation (p=-4), and any Omega_k contribution (p=-2) all
+    # give p_min<0 automatically whenever one of them is the leading
+    # term. The only way p_min>=0 can occur is a FLAT model (no matter,
+    # radiation, or curvature at all) whose dark-energy component's own
+    # leading exponent n_de=-3(1+w0+wa) is itself >=0 -- i.e. an
+    # effective equation of state at a->0 no more negative than w=-1: a
+    # cosmological constant (n_de=0, e.g. flat de Sitter) or phantom DE
+    # (n_de>0). Such a branch is continuously connected to a=0 in the
+    # sense just certified, but a=0 itself lies at t=-infinity: it is a
+    # past-eternal coordinate limit, not a finite-age Big Bang, and
+    # age_today_gyr/big_rip_gyr (ABSOLUTE times measured from a genuine
+    # t=0 at a=0) are physically undefined for it -- see where
+    # age_today_gyr is finalized, below, for how this is reported.
+    past_status = None
+    if p_min is not None:
+        past_status = "finite_big_bang" if p_min < 0.0 else "past_eternal"
 
     t_i, early_regime, dominance = early_time_offset_Gyr(
         a_i, H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa)
@@ -1698,13 +2090,69 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
     q_arr = deceleration_q(a_arr, omega_m, omega_r, omega_k, omega_de, w0, wa)
     wde_arr = w_de(a_arr, w0, wa)
 
+    if turnaround is not None:
+        # The turnaround is a known EXACT algebraic event (H=0 by
+        # construction: it is located by root-bisection on E(a)^2=0,
+        # independent of the RK4 trajectory -- see above), not an
+        # ordinary sampled point. _bisect_root_a's final float bracket
+        # can still leave a tiny nonzero (positive OR negative)
+        # residual E(a)^2 at that exact scale factor; omega_fractions'
+        # correct "mask only E(a)^2<=0" policy (Audit 6) then leaves a
+        # residual that happens to round positive looking like an
+        # ORDINARY point with enormous but finite H, Omega_i, and q,
+        # rather than the true H=0/undefined values. Codex Audit 7 P1-1
+        # gave a reproducer (Omega_m0=1.1) with exactly this symptom.
+        # Event IDENTITY, not the bisection's last rounding direction,
+        # must control this one row's representation.
+        turn_idx = np.nonzero(a_arr == turnaround["a_turn"])[0]
+        H_pgyr_arr[turn_idx] = 0.0
+        H_kms_mpc_arr[turn_idx] = 0.0
+        om_arr[turn_idx] = np.nan
+        or_arr[turn_idx] = np.nan
+        ok_arr[turn_idx] = np.nan
+        ode_arr[turn_idx] = np.nan
+        q_arr[turn_idx] = np.nan
+
     age_today_gyr = checkpoint_times.get(1.0)
-    if age_today_gyr is None and a_max <= 1.0 and turnaround is None:
+    # elapsed_ai_to_today_gyr keeps the raw elapsed-time value regardless
+    # of past_status: for a finite_big_bang model it equals
+    # age_today_gyr exactly (t=0 is already anchored to the true a=0 via
+    # early_time_offset_Gyr, or is a documented lower bound when no
+    # analytic offset applies), but for a past_eternal model it is an
+    # a_i-dependent bookkeeping value ONLY -- the elapsed time between an
+    # arbitrarily chosen a_i and today, not a physical age (Codex Audit 8
+    # P0-1: this model's true age, measured from a=0, is infinite).
+    elapsed_ai_to_today_gyr = age_today_gyr
+    if past_status == "past_eternal" and age_today_gyr is not None:
+        warnings.append(
+            f"This model is PAST-ETERNAL, not a finite-age Big Bang: as "
+            f"a->0, E(a)^2's leading term has exponent p_min={p_min:.3g} "
+            ">= 0 (a flat model with no matter, radiation, or curvature, "
+            "whose dark-energy component's own early-time equation of "
+            "state is no more negative than w=-1 -- a cosmological "
+            "constant or phantom DE dominating all the way down), so the "
+            "cosmic-time integral dt/da ~ a^(-1-p_min/2) DIVERGES as "
+            "a->0: a=0 is reached only as t->-infinity, a coordinate "
+            "limit, not a finite-age singularity at a finite past time. "
+            "age_today_gyr is therefore left undefined (None) rather "
+            "than reporting the arbitrary, a_i-dependent elapsed time "
+            "since this run's numerical starting point as if it were "
+            "the universe's actual age; that elapsed time is still "
+            "available as elapsed_ai_to_today_gyr, but it grows without "
+            "bound as a_i is reduced and is not a physical age."
+        )
+        age_today_gyr = None
+    # These two diagnose "a=1 was never reached at all" -- checked
+    # against elapsed_ai_to_today_gyr (the raw checkpoint lookup), not
+    # the possibly-just-nulled age_today_gyr, so the past-eternal
+    # message above (a different reason for age_today_gyr being None)
+    # doesn't also trigger these unrelated ones.
+    if elapsed_ai_to_today_gyr is None and a_max <= 1.0 and turnaround is None:
         warnings.append(
             "a_max <= 1: the run stopped before reaching the present "
             "scale factor a=1, so no age-today is available."
         )
-    if age_today_gyr is None and a_max > 1.0 and turnaround is None \
+    if elapsed_ai_to_today_gyr is None and a_max > 1.0 and turnaround is None \
             and stop_reason == "t_max":
         warnings.append(
             "--t_max stopped this run before it reached a=1, so no "
@@ -1753,16 +2201,58 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         if _a_eq_rm_candidate <= a_reached:
             a_eq_rm = _a_eq_rm_candidate
 
-    a_eq_mde = _find_sign_change(
+    # For a constant-w standard model, matter-DE equality and the
+    # deceleration/acceleration transition each have exactly one
+    # physically expected crossing -- but the accepted CPL domain
+    # (time-varying w(a)) permits non-monotonic density ratios and
+    # multiple such crossings (Codex Audit 7 P1-2: e.g. a model can
+    # accelerate, then later decelerate again). a_eq_mde/a_accel below
+    # remain the FIRST-crossing scalar fields other code and CSV columns
+    # already depend on; a_eq_mde_crossings/a_accel_crossings expose
+    # every crossing this scan detects, each tagged with its direction,
+    # for a caller or exercise that needs the full picture.
+    # Scanned from a_i itself (Codex Audit 8 P1-2 P1-2B), not a
+    # hard-coded 1e-6: the default a_i=1e-8 is already below that fixed
+    # floor, so a real, in-range crossing between a_i and 1e-6 was
+    # previously invisible to BOTH the scalar field and its crossings
+    # list, with no warning that anything had been skipped.
+    mde_crossings = _find_all_sign_changes(
         lambda aa: (omega_fractions(aa, omega_m, omega_r, omega_k, omega_de, w0, wa)[0]
                     - omega_fractions(aa, omega_m, omega_r, omega_k, omega_de, w0, wa)[3]),
-        1.0e-6, a_reached)
+        a_i, a_reached)
+    # direction>0 means Om(a)-Ode(a) crosses from NEGATIVE (DE-dominant)
+    # to POSITIVE (matter-dominant) as a increases -- a de_to_matter
+    # transition -- and direction<0 the reverse (matter_to_de).
+    a_eq_mde_crossings = [
+        dict(a=aa, z=float(redshift(aa)),
+             direction=("de_to_matter" if d > 0 else "matter_to_de"))
+        for aa, d in mde_crossings
+    ]
+    a_eq_mde = mde_crossings[0][0] if mde_crossings else None
 
-    a_accel = _find_sign_change(
+    accel_crossings = _find_all_sign_changes(
         lambda aa: deceleration_q(aa, omega_m, omega_r, omega_k, omega_de, w0, wa),
-        1.0e-6, a_reached)
+        a_i, a_reached)
+    # q(a) going from POSITIVE (decelerating) to NEGATIVE (accelerating)
+    # is a decel_to_accel crossing, i.e. func going - to + in
+    # _find_all_sign_changes' own (negative-to-positive => direction>0)
+    # convention is the ACCEL-to-decel case for q -- q's sign meaning is
+    # the OPPOSITE of the raw crossing direction, so it is inverted here.
+    a_accel_crossings = [
+        dict(a=aa, z=float(redshift(aa)),
+             direction=("decel_to_accel" if d < 0 else "accel_to_decel"))
+        for aa, d in accel_crossings
+    ]
+    a_accel = accel_crossings[0][0] if accel_crossings else None
 
     big_rip_gyr = None
+    # big_rip_remaining_gyr is the invariant quantity the analytic Big-
+    # Rip formula actually computes: it depends only on H0, w0, and
+    # omega_de, NOT on a_i or on whether age_today_gyr is even defined
+    # (Codex Audit 8 P0-1). big_rip_gyr (an ABSOLUTE time) additionally
+    # requires an absolute time origin, which only exists when
+    # age_today_gyr does -- see where each is set below.
+    big_rip_remaining_gyr = None
     # fate_status/future_turnaround_a/fate_search_limit_a are structured,
     # machine-readable fields distinguishing the model's ultimate
     # PHYSICAL FATE from stop_reason (why the RETURNED trajectory
@@ -1780,36 +2270,49 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
     fate_status = "recollapse" if turnaround is not None else None
     future_turnaround_a = None
     fate_search_limit_a = None
-    if wa == 0.0 and w0 < -1.0 and omega_de > 0.0 and turnaround is None and age_today_gyr is not None:
+    if wa == 0.0 and w0 < -1.0 and omega_de > 0.0 and turnaround is None:
+        # Deliberately NOT gated on "age_today_gyr is not None" (Codex
+        # Audit 8 P0-1): this fate search is a purely analytic/algebraic
+        # question about E(a)^2 for a>=1, independent of whether the
+        # requested run has actually reached a=1 yet or of whether an
+        # absolute time origin (age_today_gyr) is even defined for this
+        # model (see the past-eternal case below). Only the ABSOLUTE
+        # big_rip_gyr, not fate_status/big_rip_remaining_gyr themselves,
+        # actually needs age_today_gyr.
+        #
         # turnaround is None here means only that the REQUESTED run (up
         # to a_max/t_max) did not encounter a turning point before
         # stopping -- NOT that no root of E(a)^2=0 exists at all beyond
-        # that point. A closed (or otherwise negative-curvature-
-        # dominated) phantom model can still recollapse at some a
-        # beyond the requested boundary, before the growing phantom
-        # term ever takes over; reporting a Big Rip for such a model
-        # would state a fate its expanding branch can never actually
-        # reach. This is certified, not assumed: the phantom term
-        # omega_de*a^p (p=-3(1+w0)>0 since w0<-1 and wa=0, so g(a) is a
-        # pure power law) grows without bound, while every OTHER
-        # component's magnitude is non-increasing for a>=1 -- so a
-        # cheap, closed-form upper bound on all of them gives a finite
-        # scale a_dom beyond which the phantom term is guaranteed to
-        # dominate, and hence E(a)^2>0, for every larger a as well. The
-        # same certified search used for ordinary turnaround detection
-        # then only has to resolve the finite stretch from here to
-        # a_dom.
+        # that point. A closed (or otherwise Omega_k0<0-dominated)
+        # phantom model can still recollapse at some a beyond the
+        # requested boundary, before the growing phantom term ever
+        # takes over; reporting a Big Rip for such a model would state
+        # a fate its expanding branch can never actually reach.
         #
-        # Only NEGATIVE curvature can ever drive E(a)^2 negative for
-        # a>=1: matter and radiation have non-negative coefficients and
-        # their a^-3/a^-4 contributions are non-increasing there, so
-        # they can never overcome a growing phantom term. An earlier
-        # version summed in abs(omega_m)+abs(omega_r)+abs(omega_k) as
-        # "hazards" here, which was not merely numerically unsafe but
-        # substantively wrong: including non-negative components that
-        # can never cause a future recollapse. The dominance-scale
-        # exponent below is 1/(p_phantom+2), not 1/p_phantom: the "+2"
-        # covers curvature's own a^-2 falloff directly (rather than
+        # Only a NEGATIVE Omega_k0 contribution (Omega_k0<0 --
+        # positively-curved, i.e. CLOSED, spatial geometry; the
+        # opposite of the "negative curvature" phrase this might
+        # suggest) can ever drive E(a)^2 negative for a>=1: matter and
+        # radiation have non-negative coefficients and their
+        # a^-3/a^-4 contributions are non-increasing there, so they can
+        # never overcome a growing phantom term, and a non-negative
+        # Omega_k0 term is no threat either. So the ONLY thing that
+        # needs to be outweighed is |Omega_k0| itself (when Omega_k0<0)
+        # -- not "every other component," which an earlier version of
+        # this warning's wording overstated. a_dom below is the scale
+        # beyond which the phantom term's growth is analytically proven
+        # to exceed that one possibly-negative contribution; the actual
+        # confirmation that E(a)^2 stays positive throughout
+        # [a_probe, a_dom] still uses the certified search on the FULL
+        # E(a)^2 (every component together), not just this pairwise
+        # comparison -- the pairwise bound only picks a_dom, it is not
+        # itself the positivity proof. An earlier version summed in
+        # abs(omega_m)+abs(omega_r)+abs(omega_k) as "hazards" here,
+        # which was not merely numerically unsafe but substantively
+        # wrong: including non-negative components that can never cause
+        # a future recollapse. The dominance-scale exponent below is
+        # 1/(p_phantom+2), not 1/p_phantom: the "+2" covers the
+        # Omega_k0 term's own a^-2 falloff directly (rather than
         # bounding it by its value at a=1 the way the old formula
         # effectively did), and it stays bounded (<=0.5) even as
         # w0->-1+ (p_phantom->0+) -- unlike 1/p_phantom, which diverges
@@ -1843,19 +2346,28 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         fate_search_limit_a = a_dom
         if future_bracket is None and dominance_certain:
             m = -1.5 * (1.0 + w0)
-            big_rip_gyr = age_today_gyr + 1.0 / (m * H0_pgyr * math.sqrt(omega_de))
+            big_rip_remaining_gyr = 1.0 / (m * H0_pgyr * math.sqrt(omega_de))
             fate_status = "big_rip"
+            if age_today_gyr is not None:
+                big_rip_gyr = age_today_gyr + big_rip_remaining_gyr
             warnings.append(
-                "w0 < -1 (phantom dark energy): checked, out to the "
-                "scale factor beyond which the phantom term is "
-                "guaranteed to permanently dominate every other "
-                "component, that the expanding branch does not "
+                "w0 < -1 (phantom dark energy): checked, out to a scale "
+                "factor beyond which the growing phantom term is "
+                "analytically proven to outweigh the only component "
+                "that could ever drive E(a)^2 negative (a negative "
+                "Omega_k0 contribution, i.e. closed spatial geometry, "
+                "if present), that the expanding branch does not "
                 "recollapse first. The DE density grows without bound, "
                 "driving a's expansion rate to infinity at a finite "
-                "future time (a 'Big Rip'). The quoted t_rip is an "
-                "analytic estimate that neglects the (by then "
-                "negligible) matter and radiation contributions and "
-                "assumes wa=0."
+                "future time (a 'Big Rip'). big_rip_remaining_gyr (the "
+                "time from TODAY to the Rip) is an analytic estimate "
+                "that neglects the (by then negligible) matter, "
+                "radiation, and curvature contributions, and is only "
+                "computed at all when wa=0; it does not depend on a_i. "
+                "big_rip_gyr (an ABSOLUTE time) additionally requires "
+                "age_today_gyr, and is left undefined for a past-eternal "
+                "model (see past_status) since no absolute time origin "
+                "exists there."
             )
         elif isinstance(future_bracket, tuple):
             a_lo_f, a_hi_f = future_bracket
@@ -1901,15 +2413,26 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         omega_de=omega_de, w0=w0, wa=wa, a_i=a_i, a_max=a_max,
         step_frac=step_frac, early_regime=early_regime,
         age_today_gyr=age_today_gyr,
+        # past_status ("finite_big_bang"/"past_eternal"/None) and
+        # elapsed_ai_to_today_gyr (Codex Audit 8 P0-1) let a CSV/compare
+        # consumer distinguish a genuine absence of age_today_gyr from a
+        # past-eternal model's DELIBERATE absence of one, and still
+        # recover the raw (a_i-dependent, non-physical-age) elapsed-time
+        # bookkeeping value in the latter case.
+        past_status=past_status,
+        elapsed_ai_to_today_gyr=elapsed_ai_to_today_gyr,
         H0_inv_gyr=1.0 / H0_pgyr,
         a_eq_rm=a_eq_rm, z_eq_rm=(redshift(a_eq_rm) if a_eq_rm else None),
         a_eq_mde=a_eq_mde, z_eq_mde=(redshift(a_eq_mde) if a_eq_mde else None),
+        a_eq_mde_crossings=a_eq_mde_crossings,
         a_accel=a_accel, z_accel=(redshift(a_accel) if a_accel else None),
+        a_accel_crossings=a_accel_crossings,
         q0=float(deceleration_q(1.0, omega_m, omega_r, omega_k, omega_de, w0, wa)),
         turnaround=turnaround,
         stop_reason=stop_reason,
         total_lifetime_gyr=total_lifetime_gyr,
         big_rip_gyr=big_rip_gyr,
+        big_rip_remaining_gyr=big_rip_remaining_gyr,
         # Structured fate fields -- see the comment where fate_status is
         # first initialized, above, for the full description of each
         # value. These let --compare mode and CSV consumers report the
@@ -1919,20 +2442,29 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         fate_search_limit_a=fate_search_limit_a,
         # These are two different counts, kept distinct rather than
         # conflated under one ambiguous "n_steps": n_forward_iterations
-        # is the actual RK4 loop counter (how many times the ODE was
-        # advanced) -- renamed from n_integration_steps (Codex Audit 6
-        # P2-4) because "integration steps" read as though it might
-        # also cover the quadrature-based turning-point/handoff work
-        # elsewhere in this function, which it never did -- while
-        # n_output_samples is the length of the returned arrays, which
-        # also includes inserted checkpoints (e.g. a=1) and, with a
-        # genuine turning-point handoff, the fine-grained interior
-        # samples generated across it, and, with --continue_collapse,
-        # the mirrored contracting-branch points that were never
-        # independently integrated at all.
+        # is the number of iterations of the main forward while-loop
+        # above (each either an accepted ordinary RK4 step, an RK4
+        # attempt subsequently rejected as an overshoot near a turning
+        # point, or a boundary-handling iteration that hands off to the
+        # quadrature/bisection machinery) -- it is a loop-iteration
+        # count, not literally "how many times the ODE was advanced" or
+        # "how many quadrature evaluations occurred," either of which
+        # would overstate its precision -- while n_output_samples is the
+        # length of the returned arrays, which also includes inserted
+        # checkpoints (e.g. a=1) and, with a genuine turning-point
+        # handoff, the fine-grained interior samples generated across
+        # it, and, with --continue_collapse, the mirrored contracting-
+        # branch points that were never independently integrated at all.
         n_forward_iterations=steps,
         n_output_samples=len(a_arr),
         model_version=MODEL_VERSION,
+        # Also available as physics_cosmo.BUILD_ID at the module level;
+        # included here too (Copilot Audit 8 P1-2 / Codex Audit 8 P2-4)
+        # since this summary dict, not the module namespace, is this
+        # program's actual machine-readable API (e.g. what a CSV
+        # consumer or a script calling integrate_evolution() directly
+        # sees).
+        build_id=BUILD_ID,
         warnings=warnings,
     )
 
@@ -1944,37 +2476,82 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
     )
 
 
-def _find_sign_change(func, a_lo, a_hi, n_scan=800):
+def _find_all_sign_changes(func, a_lo, a_hi, n_scan=800):
     """
-    Generic bisection root finder used for the matter/dark-energy
-    equality epoch and the deceleration/acceleration transition. Scans
-    a log-spaced grid for the first sign change of func(a), then
-    bisects it to high precision. Returns None if no crossing is found.
+    Scan a log-spaced grid of [a_lo, a_hi] for EVERY sign change of
+    func(a) (not just the first), bisecting each one to high precision.
+    Returns a list of (a, direction) pairs in increasing-a order, where
+    direction is +1 if func goes from negative to positive there, or -1
+    if it goes from positive to negative -- the caller attaches the
+    physical meaning (e.g. "matter_to_de" vs "de_to_matter").
+
+    A sign-change GRID SCAN, by construction, can only find crossings
+    that actually cross (func changes sign between two sampled points);
+    it cannot detect a root where func merely touches zero tangentially
+    without changing sign, nor can it guarantee finding two crossings
+    closer together than the grid spacing (Codex Audit 7 P1-2). For the
+    smooth, slowly-varying functions this is used for (Omega_m(a)-
+    Omega_DE(a) and q(a) across the range this program targets), a
+    grid of n_scan=800 log-spaced points is generous, but this is a
+    practical, not formally exhaustive, search -- consistent with this
+    module's general practice of stating what a numerical method
+    actually guarantees rather than overclaiming.
+
+    An earlier version detected crossings via np.diff(np.sign(vals)) !=
+    0: if a sampled value landed EXACTLY on zero, the sign sequence
+    [..., -1, 0, +1, ...] registered as TWO separate sign changes (-1 to
+    0, then 0 to +1) instead of the one genuine crossing they actually
+    are, duplicating a real, physically single event (Codex Audit 8
+    P1-2A). This version instead walks only the NONZERO samples and
+    tests f_lo*f_hi < 0 for a genuine bracket, handling any exact-zero
+    samples (vanishingly rare on a real geomspace grid, but exercised
+    directly by Codex's exact reproducer) as belonging to whichever
+    single bracket they fall inside, never as their own extra event; a
+    zero sample that touches but does not change sign (both neighbors
+    the same sign) is correctly reported as no crossing at all.
     """
     a_lo = max(a_lo, 1.0e-8)
     if a_hi <= a_lo:
-        return None
+        return []
     grid = np.geomspace(a_lo, a_hi, n_scan)
     vals = np.array([func(x) for x in grid])
     finite = np.isfinite(vals)
     if not np.any(finite):
-        return None
-    sign = np.sign(vals)
-    idx = np.where(np.diff(sign[finite]) != 0)[0]
-    if idx.size == 0:
-        return None
+        return []
     grid_f = grid[finite]
-    i = idx[0]
-    lo, hi = grid_f[i], grid_f[i + 1]
-    f_lo = func(lo)
-    for _ in range(80):
-        mid = 0.5 * (lo + hi)
-        f_mid = func(mid)
-        if np.sign(f_mid) == np.sign(f_lo):
-            lo, f_lo = mid, f_mid
-        else:
-            hi = mid
-    return 0.5 * (lo + hi)
+    vals_f = vals[finite]
+    n = len(grid_f)
+
+    results = []
+    last_nz = None  # index of the most recent NONZERO sample seen
+    for i in range(n):
+        vi = vals_f[i]
+        if vi == 0.0:
+            continue
+        if last_nz is not None and vals_f[last_nz] * vi < 0.0:
+            if last_nz == i - 1:
+                # The ordinary case: a genuine sign-changing bracket
+                # with no exact zero in between -- bisect it as before.
+                lo, hi = grid_f[last_nz], grid_f[i]
+                f_lo = vals_f[last_nz]
+                direction = 1.0 if f_lo < 0.0 else -1.0
+                for _ in range(80):
+                    mid = 0.5 * (lo + hi)
+                    f_mid = func(mid)
+                    if np.sign(f_mid) == np.sign(f_lo):
+                        lo, f_lo = mid, f_mid
+                    else:
+                        hi = mid
+                results.append((0.5 * (lo + hi), direction))
+            else:
+                # One or more exact-zero samples lie strictly between
+                # these two opposite-signed nonzero samples: the first
+                # such zero already IS the crossing (to this grid's
+                # float precision), reported once rather than as two.
+                direction = 1.0 if vals_f[last_nz] < 0.0 else -1.0
+                results.append((float(grid_f[last_nz + 1]), direction))
+        last_nz = i
+    return results
 
 
 # ----------------------------------------------------------------------

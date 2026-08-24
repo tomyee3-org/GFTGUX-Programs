@@ -90,6 +90,24 @@ Coverage, by category:
     without requiring --continue_collapse; and the NaN policy in
     omega_fractions masking only non-positive E(a)^2, never a small-but-
     finite value near a loitering dip.
+  * Audit 7 additions: a rigorous, closed-form (non-sampling) Big-Bang
+    asymptotic positivity bound replacing the old single-anchor-point
+    heuristic, exercised against the exact Codex Audit 7 P0-1
+    two-hidden-root reproducer and a control case that must still be
+    accepted; the corrected CPL tied-leading-order coefficient
+    (folding the constant exp(-3*wa) factor into the comparison),
+    exercised against the exact Codex Audit 7 P0-2 reproducer for both
+    the accepted (positive corrected sum) and rejected (negative
+    corrected sum) cases; event-identity-based forcing of the
+    turnaround row's H/Omega_i/q values to their exact known values
+    (H=0, Omega_i/q=NaN) regardless of the bisection bracket's residual
+    E(a)^2 sign, across several closed-universe density values; the new
+    a_eq_mde_crossings/a_accel_crossings list fields alongside their
+    existing first-crossing scalar aliases, including direction labels,
+    for a genuinely non-monotonic CPL history and a standard
+    single-crossing model; and rejection of closure-relation arithmetic
+    that overflows to a non-finite Omega_DE/Omega_k even though every
+    individual input density was finite.
 
 Independent cross-checks in this file (the turnaround-time and
 two-root benchmarks below) are computed by methods coded independently
@@ -1400,12 +1418,13 @@ class StructuredFateFields(unittest.TestCase):
 
 
 class ModelVersionBump(unittest.TestCase):
-    """Copilot Audit 6 P1-3 / Codex Audit 6 P1-5: MODEL_VERSION must
-    distinguish this materially changed build from the prior release
-    that lacked the Audit-6 fixes."""
+    """MODEL_VERSION must distinguish each materially changed build from
+    every prior release that lacked its fixes -- most recently, the
+    rigorous Big-Bang asymptotic bound and the returned milestone-
+    crossing schema changes."""
 
-    def test_version_differs_from_prior_release(self):
-        self.assertNotEqual(phys.MODEL_VERSION, "1.2.0")
+    def test_version_differs_from_prior_releases(self):
+        self.assertNotIn(phys.MODEL_VERSION, ("1.2.0", "1.3.0", "1.4.0"))
 
 
 class MatterRadiationEqualityReachability(unittest.TestCase):
@@ -1482,6 +1501,321 @@ class NaNPolicyNearDoubleRoot(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(om_arr[tiny_positive])))
 
 
+class BigBangAsymptoticBoundRigor(unittest.TestCase):
+    """Codex Audit 7 P0-1/P0-2: the Big-Bang connectivity check must
+    rigorously establish positivity all the way to a=0, not merely
+    sample one anchor point -- and a CPL dark-energy term tying another
+    component's leading exponent must use its corrected asymptotic
+    coefficient (including the exp(-3*wa) prefactor)."""
+
+    def test_two_roots_strictly_below_the_old_anchor_are_still_caught(self):
+        # Codex's exact construction: a^4 E(a)^2 = Omega_k0*(a-r1)(a-r2)
+        # with both roots well below what the OLD anchor heuristic
+        # (a_i*1e-3) would have checked, so E(a)^2 is positive at that
+        # old anchor and at a_i even though a genuine forbidden interval
+        # sits entirely beneath it.
+        r1, r2 = 1.0e-8, 2.0e-8
+        omega_k = 1.0 / ((1.0 - r1) * (1.0 - r2))
+        omega_r = omega_k * r1 * r2
+        omega_de = -omega_k * (r1 + r2)
+        with self.assertRaises(ValueError) as ctx:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=0.0, omega_r=omega_r, omega_de=omega_de,
+                w0=0.0, wa=0.0, a_i=1.0e-3, a_max=1.1, step_frac=0.01)
+        self.assertIn("forbidden interval", str(ctx.exception))
+
+    def test_connected_model_below_two_roots_is_accepted(self):
+        # Control: an a_i strictly BELOW the forbidden interval (still
+        # on the true Big-Bang-connected branch) must be accepted, not
+        # merely rejected by an over-eager check.
+        r1, r2 = 1.0e-8, 2.0e-8
+        omega_k = 1.0 / ((1.0 - r1) * (1.0 - r2))
+        omega_r = omega_k * r1 * r2
+        omega_de = -omega_k * (r1 + r2)
+        try:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=0.0, omega_r=omega_r, omega_de=omega_de,
+                w0=0.0, wa=0.0, a_i=1.0e-9, a_max=1.0e-8 * 0.99,
+                step_frac=0.01)
+        except ValueError as exc:
+            self.fail(f"a genuinely connected a_i was rejected: {exc}")
+
+    def test_tied_cpl_radiation_leading_order_uses_corrected_coefficient(self):
+        # Codex's exact reproducer: CPL ties radiation's -4 exponent.
+        # The naive (uncorrected) coefficient sum is 1-2=-1 (negative,
+        # would wrongly reject); the true leading coefficient with the
+        # exp(-3*wa) prefactor is 1-2*exp(-3) ~ +0.9004 (positive, must
+        # be accepted).
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=0.0, omega_r=1.0, omega_de=-2.0, w0=-2.0/3.0,
+            wa=1.0, a_i=1.0e-8, a_max=1.1, step_frac=0.01)
+        self.assertIsNotNone(r["summary"]["age_today_gyr"])
+
+    def test_tied_cpl_negative_true_sum_is_still_rejected(self):
+        # Same tie structure as the acceptance test above (radiation
+        # ties CPL's leading power at -4), but with omega_r small and
+        # omega_de large enough and negative that the CORRECTED sum
+        # (radiation's 0.05 plus omega_de*exp(-3*wa) = -2.0*exp(-3) ~
+        # -0.0996) is genuinely negative -- must still be rejected,
+        # confirming the fix does not simply flip to always-accept.
+        with self.assertRaises(ValueError) as ctx:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=0.0, omega_r=0.05, omega_de=-2.0,
+                w0=-2.0/3.0, wa=1.0, a_i=0.3, a_max=1.1, step_frac=0.01)
+        self.assertIn("negative", str(ctx.exception))
+
+
+class TurnaroundRowEventAware(unittest.TestCase):
+    """Codex Audit 7 P1-1: a row explicitly reported as the turnaround
+    must show the exact, known-by-construction H=0 and undefined
+    (NaN) Omega_i/q -- independent of which side of zero
+    _bisect_root_a's final floating-point bracket happens to round the
+    residual E(a)^2 to."""
+
+    def test_h_and_omega_are_exact_at_turnaround_row(self):
+        for omega_m in (1.1, 1.5, 2.0, 3.0, 7.0):
+            with self.subTest(omega_m=omega_m):
+                r = phys.integrate_evolution(
+                    H0=70.0, omega_m=omega_m, omega_r=0.0, omega_de=0.0,
+                    w0=-1.0, wa=0.0, a_i=1.0e-6, a_max=12.0,
+                    step_frac=0.01)
+                s = r["summary"]
+                self.assertIsNotNone(s["turnaround"])
+                a_arr = np.asarray(r["a"])
+                idx = np.nonzero(a_arr == s["turnaround"]["a_turn"])[0]
+                self.assertEqual(idx.size, 1)
+                i = idx[0]
+                self.assertEqual(float(r["H_kms_mpc"][i]), 0.0)
+                self.assertTrue(np.isnan(r["Om"][i]))
+                self.assertTrue(np.isnan(r["Ok"][i]))
+                self.assertTrue(np.isnan(r["q"][i]))
+
+
+class MultipleMilestoneCrossings(unittest.TestCase):
+    """Codex Audit 7 P1-2: CPL histories can have more than one
+    matter-DE-equality or acceleration/deceleration crossing; the
+    scalar a_eq_mde/a_accel fields remain documented first-crossing
+    aliases, while a_eq_mde_crossings/a_accel_crossings expose every
+    crossing this program's grid scan detects."""
+
+    def test_both_matter_de_equality_roots_are_reported(self):
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=0.3, omega_r=0.0, omega_de=0.7, w0=-1.0,
+            wa=2.0, a_i=1.0e-8, a_max=2.0, step_frac=0.005)
+        crossings = r["summary"]["a_eq_mde_crossings"]
+        self.assertEqual(len(crossings), 2)
+        self.assertAlmostEqual(crossings[0]["a"], 0.3974863601378, places=6)
+        self.assertAlmostEqual(crossings[1]["a"], 0.6187849448558, places=6)
+        self.assertEqual(r["summary"]["a_eq_mde"], crossings[0]["a"])
+
+    def test_both_acceleration_transitions_are_reported(self):
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=0.26244328076369106, omega_r=0.0,
+            omega_de=0.7375567192363089, w0=-2.587335863077137,
+            wa=-0.8315340591145519, a_i=1.0e-8, a_max=5.0,
+            step_frac=0.005)
+        crossings = r["summary"]["a_accel_crossings"]
+        self.assertEqual(len(crossings), 2)
+        self.assertAlmostEqual(crossings[0]["a"], 0.6883095344, places=6)
+        self.assertAlmostEqual(crossings[1]["a"], 3.7104777285, places=5)
+        self.assertEqual(crossings[0]["direction"], "decel_to_accel")
+        self.assertEqual(crossings[1]["direction"], "accel_to_decel")
+
+    def test_single_crossing_standard_model_still_matches_scalar(self):
+        r = phys.integrate_evolution(
+            H0=67.4, omega_m=0.315, omega_r=9.24e-5, omega_de=None,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=2.0, step_frac=0.005)
+        s = r["summary"]
+        self.assertEqual(len(s["a_accel_crossings"]), 1)
+        self.assertEqual(s["a_accel_crossings"][0]["a"], s["a_accel"])
+
+
+class NonFiniteClosureRejection(unittest.TestCase):
+    """Codex Audit 7 P2-1: finite omega_m/omega_r inputs can still
+    combine, via the closure relation, to a non-finite derived
+    Omega_DE0/Omega_k0 (overflow); this must be rejected directly with
+    a clear message rather than surfacing later as an unrelated NumPy
+    warning or _IndeterminateRootSearch."""
+
+    def test_overflowing_closure_is_rejected(self):
+        with self.assertRaises(ValueError):
+            phys.integrate_evolution(
+                H0=70.0, omega_m=1.0e308, omega_r=1.0e308, omega_de=None,
+                w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=2.0, step_frac=0.005)
+
+    def test_non_finite_e2_at_a_i_is_rejected_directly(self):
+        with self.assertRaises(ValueError) as ctx:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=1.0e308, omega_r=0.0, omega_de=0.0,
+                w0=-1.0, wa=0.0, a_i=1.0e-300, a_max=2.0,
+                step_frac=0.005)
+        # Whichever check fires first (closure or E(a_i)^2), it must be
+        # a clear ValueError, never an uncaught OverflowError or a
+        # downstream _IndeterminateRootSearch standing in for it.
+        self.assertIsInstance(ctx.exception, ValueError)
+
+
+class PastEternalClassification(unittest.TestCase):
+    """Codex Audit 8 P0-1: continuous connectivity to a=0 (already
+    certified by BigBangAsymptoticBoundRigor) is NECESSARY but NOT
+    SUFFICIENT for a finite-age Big Bang. dt/da ~ a^(-1-p_min/2) as
+    a->0, and its integral to a=0 converges only if p_min<0; a flat
+    model with no matter/radiation/curvature whose dark-energy
+    component's own leading exponent is >=0 (a cosmological constant or
+    phantom DE dominating all the way down) is instead PAST-ETERNAL: a=0
+    lies at t=-infinity, not at a finite past time, and age_today_gyr
+    must not be populated as if it were an ordinary finite age."""
+
+    def test_pure_flat_de_sitter_has_no_finite_age(self):
+        for a_i in (1.0e-6, 1.0e-8, 1.0e-10):
+            with self.subTest(a_i=a_i):
+                r = phys.integrate_evolution(
+                    H0=70.0, omega_m=0.0, omega_r=0.0, omega_de=1.0,
+                    w0=-1.0, wa=0.0, a_i=a_i, a_max=1.01, step_frac=0.01)
+                s = r["summary"]
+                self.assertEqual(s["past_status"], "past_eternal")
+                self.assertIsNone(s["age_today_gyr"])
+                self.assertIsNotNone(s["elapsed_ai_to_today_gyr"])
+
+    def test_pure_flat_phantom_has_invariant_remaining_time_not_absolute_age(self):
+        remainings = []
+        for a_i in (1.0e-6, 1.0e-8, 1.0e-10):
+            r = phys.integrate_evolution(
+                H0=70.0, omega_m=0.0, omega_r=0.0, omega_de=1.0,
+                w0=-1.2, wa=0.0, a_i=a_i, a_max=5.0, step_frac=0.005)
+            s = r["summary"]
+            self.assertEqual(s["past_status"], "past_eternal")
+            self.assertIsNone(s["age_today_gyr"])
+            self.assertIsNone(s["big_rip_gyr"])
+            self.assertEqual(s["fate_status"], "big_rip")
+            self.assertIsNotNone(s["big_rip_remaining_gyr"])
+            remainings.append(s["big_rip_remaining_gyr"])
+        # The remaining time to the Rip depends only on H0/w0/omega_de,
+        # NOT on a_i -- unlike the (undefined-here) absolute age/Rip
+        # time, which an earlier version computed FROM an arbitrary,
+        # a_i-dependent elapsed time as if it were a real age.
+        for x in remainings[1:]:
+            self.assertAlmostEqual(x, remainings[0], places=6)
+
+    def test_tiny_matter_component_restores_finite_big_bang(self):
+        # A positive control: adding even a minuscule matter density
+        # gives matter (exponent -3) a more negative leading exponent
+        # than the flat cosmological constant's own (exponent 0), so
+        # p_min<0 and the model is a genuine finite-age Big Bang again.
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=1.0e-6, omega_r=0.0, omega_de=1.0 - 1.0e-6,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=1.01, step_frac=0.01)
+        s = r["summary"]
+        self.assertEqual(s["past_status"], "finite_big_bang")
+        self.assertIsNotNone(s["age_today_gyr"])
+
+
+class CPLExtremeCoefficientRepresentability(unittest.TestCase):
+    """Codex Audit 8 P1-1: the CPL leading-order coefficient
+    omega_de*exp(-3*wa) can itself overflow or underflow float64 for an
+    extreme wa even when the term's SIGN (all that matters when it is
+    not tied with another component's exponent) is perfectly well
+    defined -- an earlier version mistook underflow-to-zero for an
+    exact cancellation, and overflow for an immediate domain error,
+    both incorrectly, for an otherwise unremarkable untied leading DE
+    term."""
+
+    def test_underflowing_untied_coefficient_is_not_a_false_cancellation(self):
+        with self.assertRaises(Exception) as ctx:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=0.3, omega_r=0.0, omega_de=0.1,
+                w0=-249.0, wa=250.0, a_i=0.7, a_max=1.1, step_frac=0.01)
+        # Whatever this ultimately raises (this model's true leading DE
+        # coefficient is astronomically tiny, ~1e-326, well outside even
+        # this program's deliberately conservative g(a) policy range --
+        # see de_density_shape), it must NOT be the old false-diagnosis
+        # message claiming an exact leading-order cancellation, since
+        # there is only one term at the leading order here at all.
+        self.assertNotIn("exact cancellation", str(ctx.exception))
+
+    def test_overflowing_untied_coefficient_is_not_rejected_immediately(self):
+        with self.assertRaises(Exception) as ctx:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=0.3, omega_r=0.0, omega_de=0.1,
+                w0=251.0, wa=-250.0, a_i=0.7, a_max=1.1, step_frac=0.01)
+        # Must not be the old immediate "wa=... is too extreme ...
+        # exp(-3*wa) overflows" rejection, which fired before ever
+        # examining whether this term's sign alone already settled the
+        # question (it does, for an untied term).
+        self.assertNotIn("overflows float64's range", str(ctx.exception))
+
+    def test_cpl_de_sign_and_log_magnitude_is_exact_for_extreme_wa(self):
+        # Direct unit check of the log-space primitive itself: the sign
+        # must be exactly sign(omega_de), and the log-magnitude must
+        # equal log(omega_de) - 3*wa to high precision, for a wa where
+        # exp(-3*wa) itself is not representable as a float64 at all.
+        sign, log_abs = phys._cpl_de_sign_and_log_magnitude(0.1, 250.0)
+        self.assertEqual(sign, 1.0)
+        self.assertAlmostEqual(log_abs, math.log(0.1) - 3.0 * 250.0, places=6)
+        sign2, log_abs2 = phys._cpl_de_sign_and_log_magnitude(-0.1, -250.0)
+        self.assertEqual(sign2, -1.0)
+        self.assertAlmostEqual(log_abs2, math.log(0.1) - 3.0 * (-250.0), places=6)
+
+    def test_moderate_extreme_wa_untied_leading_term_still_succeeds(self):
+        # A less astronomically extreme case than the two above, whose
+        # true leading coefficient remains within this program's g(a)
+        # policy range throughout the connectivity search: this must
+        # actually SUCCEED end-to-end now, not merely fail for a better
+        # reason, demonstrating the fix does real positive work and not
+        # only improved error messages.
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=0.3, omega_r=0.0, omega_de=0.1,
+            w0=-25.0, wa=26.0, a_i=0.9, a_max=1.1, step_frac=0.01)
+        self.assertIsNotNone(r["summary"]["age_today_gyr"])
+
+
+class MilestoneCrossingDedupAndFloor(unittest.TestCase):
+    """Codex Audit 8 P1-2: an exact grid-node root must be reported as
+    ONE crossing, not two, and a crossing strictly between a_i and the
+    previously hard-coded 1e-6 floor must not be silently dropped."""
+
+    def test_exact_grid_node_root_is_one_crossing_not_two(self):
+        a_star = np.geomspace(1.0e-6, 5.0, 800)[600]
+        x = a_star ** 3
+        omega_m0 = x / (1.0 + x)
+        omega_de0 = 1.0 / (1.0 + x)
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=omega_m0, omega_r=0.0, omega_de=omega_de0,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=5.0, step_frac=0.005)
+        crossings = r["summary"]["a_eq_mde_crossings"]
+        self.assertEqual(len(crossings), 1)
+        self.assertAlmostEqual(crossings[0]["a"], a_star, places=9)
+
+    def test_crossing_between_a_i_and_old_1e_minus_6_floor_is_retained(self):
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=1.0e-21, omega_r=0.0, omega_de=1.0 - 1.0e-21,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=1.1, step_frac=0.005)
+        s = r["summary"]
+        self.assertIsNotNone(s["a_eq_mde"])
+        self.assertLess(s["a_eq_mde"], 1.0e-6)
+        self.assertEqual(len(s["a_eq_mde_crossings"]), 1)
+        self.assertAlmostEqual(s["a_eq_mde_crossings"][0]["a"], s["a_eq_mde"])
+
+
+class CrossingListsSurfacedInDriverOutput(unittest.TestCase):
+    """Codex Audit 8 P1-2C: a multiple-crossing history's full list must
+    reach the CSV a script would actually parse, not only the summary
+    dict's own crossings fields."""
+
+    def test_multiple_crossings_reach_evolve_csv_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drv.run(mode="evolve", H0=70.0, omega_m=0.3, omega_r=0.0,
+                    omega_de=0.7, w0=-1.0, wa=2.0, a_i=1.0e-8, a_max=2.0,
+                    t_max=None, step_frac=0.005, continue_collapse=False,
+                    no_plot=True, csvdir=tmp)
+            files = [f for f in os.listdir(tmp) if f.endswith(".csv")]
+            with open(os.path.join(tmp, files[0])) as fh:
+                text = fh.read()
+            self.assertIn("a_eq_mde_crossing_count = 2", text)
+            self.assertIn("a_eq_mde_crossing_1_direction", text)
+            self.assertIn("a_eq_mde_crossing_2_direction", text)
+
+
 @unittest.skipIf(REPO_ROOT is None,
                  "main.py could not be located near this test file in any "
                  "supported layout (normal repo/tests/ or a flattened "
@@ -1544,6 +1878,76 @@ class CSVFieldAssertions(unittest.TestCase):
             # This configuration genuinely recollapses, so a_turn must
             # be a real resolved number, not a None placeholder.
             self.assertNotIn("a_turn = None", text)
+            # Copilot Audit 7 P1-2: a machine-readable build identifier
+            # (there is no source-control system in this environment to
+            # provide one) must be present in every CSV's provenance
+            # header, so two CSVs can be checked for byte-identical
+            # source without re-running the program.
+            self.assertIn(f"build {phys.BUILD_ID}", text)
+            self.assertNotEqual(phys.BUILD_ID, "unknown")
+
+
+class BuildIdentifier(unittest.TestCase):
+    """Copilot Audit 7 P1-2: a content-derived build id, exposed via
+    --version, distinguishes builds that share MODEL_VERSION but differ
+    in source (e.g. an unreleased local patch)."""
+
+    def test_build_id_is_a_stable_nonempty_hash(self):
+        self.assertIsInstance(phys.BUILD_ID, str)
+        self.assertNotEqual(phys.BUILD_ID, "unknown")
+        self.assertEqual(len(phys.BUILD_ID), 12)
+        # Recomputing it (same on-disk source) must be deterministic.
+        self.assertEqual(phys.BUILD_ID, phys._compute_build_id())
+
+    def test_version_flag_reports_both_version_and_build_id(self):
+        main_dir = _find_main_py()
+        if main_dir is None:
+            self.skipTest("main.py not found in repo/tests or flattened layout")
+        result = subprocess.run(
+            [sys.executable, os.path.join(main_dir, "main.py"), "--version"],
+            cwd=main_dir, capture_output=True, text=True, timeout=30)
+        out = result.stdout + result.stderr
+        self.assertIn(phys.MODEL_VERSION, out)
+        self.assertIn(phys.BUILD_ID, out)
+
+    def test_build_id_and_version_are_in_the_summary_dict(self):
+        # Codex Audit 8 P2-4: the summary dict, not just --version and
+        # the CSV header, is this program's machine-readable API.
+        r = phys.integrate_evolution(H0=70.0, omega_m=0.3, omega_de=0.7,
+                                      a_i=1.0e-8, a_max=2.0, step_frac=0.01)
+        self.assertEqual(r["summary"]["build_id"], phys.BUILD_ID)
+        self.assertEqual(r["summary"]["model_version"], phys.MODEL_VERSION)
+
+    def test_covers_list_matches_documented_scope(self):
+        # Copilot Audit 8 P1-2: BUILD_ID_COVERS is the one source of
+        # truth for exactly which files change the build id; a
+        # documentation-only or test-only edit outside this list must
+        # not be mistaken for something that would.
+        self.assertEqual(
+            set(phys.BUILD_ID_COVERS),
+            {"physics_cosmo.py", "driver_cosmo.py", "main.py", "plot_cosmo.py"})
+
+    def test_line_ending_normalization_matches_across_crlf_and_lf(self):
+        # Gemini Audit 8: the exact same semantic source checked out
+        # with CRLF line endings (e.g. on Windows) must hash identically
+        # to an LF checkout -- verified here against the same
+        # text-mode-read-then-UTF-8-encode approach _compute_build_id
+        # itself uses, since that function's own file list is fixed to
+        # this program's real source files rather than parameterizable.
+        content_lf = "line one\nline two\nline three\n"
+        content_crlf = content_lf.replace("\n", "\r\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            path_lf = os.path.join(tmp, "a.py")
+            path_crlf = os.path.join(tmp, "b.py")
+            with open(path_lf, "w", newline="") as f:
+                f.write(content_lf)
+            with open(path_crlf, "w", newline="") as f:
+                f.write(content_crlf)
+            with open(path_lf, "r", encoding="utf-8", newline=None) as f:
+                read_lf = f.read()
+            with open(path_crlf, "r", encoding="utf-8", newline=None) as f:
+                read_crlf = f.read()
+            self.assertEqual(read_lf, read_crlf)
 
 
 if __name__ == "__main__":

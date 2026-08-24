@@ -112,8 +112,12 @@ def plot_evolve(result, outdir=None, dpi=150, lw=1.6, figsize=(13, 10)):
              label=r"sum (=1 identically, except NaN at a turnaround)")
     if s["a_eq_rm"] is not None:
         ax3.axvline(s["a_eq_rm"], color=C_R, lw=0.8, ls="--", alpha=0.7)
-    if s["a_eq_mde"] is not None:
-        ax3.axvline(s["a_eq_mde"], color=C_DE, lw=0.8, ls="--", alpha=0.7)
+    # Every detected matter-DE-equality crossing is marked, not just the
+    # first (Codex Audit 8 P1-2C): a non-monotonic CPL history can have
+    # more than one, and a plot showing only the first would visually
+    # imply there is only one to see.
+    for c in (s.get("a_eq_mde_crossings") or []):
+        ax3.axvline(c["a"], color=C_DE, lw=0.8, ls="--", alpha=0.7)
     ax3.axvline(1.0, color="k", lw=0.6, ls=":")
     ax3.set_xscale("log")
     ax3.set_xlabel("Scale factor $a$")

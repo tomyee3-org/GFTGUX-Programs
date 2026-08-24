@@ -86,7 +86,9 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--version", action="version",
-                   version=f"Cosmology_expansion_simulator {physics_cosmo.MODEL_VERSION}")
+                   version=(f"Cosmology_expansion_simulator "
+                            f"{physics_cosmo.MODEL_VERSION} "
+                            f"(build {physics_cosmo.BUILD_ID})"))
     p.add_argument("--mode", choices=driver_cosmo.MODES, default="evolve",
                    help="which calculation to run")
 
