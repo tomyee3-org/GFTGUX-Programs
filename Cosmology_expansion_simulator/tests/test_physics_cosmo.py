@@ -21,20 +21,75 @@ Coverage, by category:
     fixed-grid scan could ever see, and the complementary "confirmed no
     root" case just past the critical separation (a loitering model)
     integrating cleanly to a_max with no discarded trajectory gap.
-  * Boundary coincidence: a_max requested one ULP below an exact
-    analytic turning point must still report 'turnaround', not flip to
-    'a_max' from floating-point noise in the independently bisected
-    a_turn -- while an a_max genuinely, non-trivially short of the
-    turning point must still be respected as the stopping point.
+  * Boundary coincidence: a_max is a HARD numeric bound (max(a) <=
+    a_max) at every offset from an exact analytic turning point,
+    without exception. At a genuine (non-trivial) offset the label is
+    deterministically 'a_max'; at literally one ULP below the turning
+    point, which label results depends on which side of the true root
+    the independent bisection for a_turn happens to converge -- an
+    implementation detail this program does not promise to control --
+    so only the hard numeric bound is asserted there, not a specific
+    label. (An earlier revision instead reclassified a coincidental
+    a_max/a_turn tie as 'turnaround' using a floating-point tolerance,
+    which could return an a_next slightly PAST the literal a_max the
+    caller supplied -- a strictly worse defect than the label
+    inconsistency it was meant to smooth over; the tolerance was
+    removed for exactly this reason.)
   * Extreme/pathological CPL (w0, wa) parameters, which must raise a
     clear domain error rather than silently overflow to NaN/inf and
     have that non-finite value mistaken for a physical turning point.
   * The H(t) sign flip on the mirrored contracting branch.
   * Input validation (t_max <= t_i, excessive step counts, non-positive
     age_ref_gyr) and CSV output (headers, rows, and provenance/result
-    metadata).
+    metadata, including the resolved-parameter fields and model version
+    added for Audit 5).
   * That the module's internal _Overshoot control-flow exception never
     escapes the public API.
+  * Tri-state root-search semantics added for Audit 5: the certified
+    search must raise _IndeterminateRootSearch (never silently return
+    "no root") both when its evaluation budget is exhausted and when a
+    sub-interval is bisected down to float64's own subdivision limit,
+    and that raise must propagate as a genuine failure -- not a
+    quietly-assumed "safe" or "no recollapse" result -- through evolve,
+    compare, and age-scan mode alike.
+  * Randomized/property-based verification that the analytic Lipschitz
+    bound on |dE(a)^2/da| actually dominates dense sampling of the
+    exact derivative, including nonzero wa with an interior CPL
+    extremum, and a direct check that every bracket the certified
+    search returns satisfies E(a_lo)^2>=0, E(a_hi)^2<0.
+  * A Big-Rip-vs-recollapse precedence regression using the exact
+    reproducer from Codex Audit 5 (a recollapse beyond the requested
+    a_max must suppress a reported Big Rip), alongside a genuine flat-
+    phantom case confirming the stricter check still reports a real
+    Big Rip when one is actually present.
+  * Interior-trajectory accuracy (not just gap size) for the exact
+    matter-only closed-universe cycloid at several times approaching
+    the turnaround, and a dedicated large-time-gap check for a TRUE
+    near-double-root turnaround.
+  * A general sweep asserting the a_max/t_max hard-bound invariant
+    across many configurations, and a dedicated continue_collapse case
+    where --t_max falls strictly on the mirrored contracting branch.
+  * A CLI subprocess smoke test (--version, a successful run, and a
+    deliberately invalid run), robust to both the normal repo/tests/
+    layout and a flattened upload directory (skipped, never failed,
+    if main.py cannot be located in either), and CSV assertions for
+    the exact model version and the resolved-parameter provenance
+    fields.
+  * Audit 6 additions: Big-Bang branch connectivity certification
+    (a hidden forbidden interval below a_i, and a CPL dark-energy term
+    that dominates E(a)^2 NEGATIVELY as a->0, both rejected; a standard
+    connected model and a genuinely closed recollapsing model are not
+    false-positively rejected); Big-Rip dominance-scale overflow safety
+    for w0 immediately below -1 across flat/open/closed curvature;
+    structured fate_status/future_turnaround_a/fate_search_limit_a
+    fields covering every fate outcome (recollapse, big_rip,
+    future_recollapse, unresolved, and no-fate-question-applies); the
+    MODEL_VERSION bump off "1.2.0"; a_eq_rm's reachability gate (an
+    algebraically-derived milestone must not be reported when the model
+    recollapses before ever reaching it); total_lifetime_gyr reported
+    without requiring --continue_collapse; and the NaN policy in
+    omega_fractions masking only non-positive E(a)^2, never a small-but-
+    finite value near a loitering dip.
 
 Independent cross-checks in this file (the turnaround-time and
 two-root benchmarks below) are computed by methods coded independently
@@ -51,7 +106,9 @@ Run with:   python -m pytest tests/test_physics_cosmo.py -v
 
 import math
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -60,6 +117,36 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import physics_cosmo as phys
 import driver_cosmo as drv
+
+def _find_main_py():
+    """
+    Locate the directory containing main.py relative to THIS test file,
+    trying a short list of candidate directories rather than assuming a
+    single fixed layout. The normal repository layout is
+    repo/tests/test_physics_cosmo.py with repo/main.py, but an upload or
+    packaging step can flatten everything (main.py and
+    test_physics_cosmo.py side by side in one directory), and
+    REPO_ROOT = dirname(dirname(__file__)) is only correct for the
+    former. Returns the directory containing main.py, or None if it
+    cannot be found in any candidate location -- callers should skip
+    (never fail) the CLI subprocess tests in that case, since it may be
+    an artifact of how the files were uploaded/flattened for review
+    rather than a defect in the actual release layout (Copilot Audit 6
+    P1-1).
+    """
+    here = os.path.abspath(os.path.dirname(__file__))
+    candidates = [
+        os.path.dirname(here),  # repo/tests/ -> repo/ (normal layout)
+        here,                   # flattened: main.py beside this file
+        os.path.dirname(os.path.dirname(here)),
+    ]
+    for cand in candidates:
+        if os.path.isfile(os.path.join(cand, "main.py")):
+            return cand
+    return None
+
+
+REPO_ROOT = _find_main_py()
 
 
 def H0_pgyr(H0_kms_mpc):
@@ -451,44 +538,71 @@ class NearDoubleRootRegression(unittest.TestCase):
         self.assertLess(np.diff(t_arr).max(), 10.0)
 
 
-class BoundaryCoincidenceTieBreak(unittest.TestCase):
-    """When a_max is requested to sit essentially exactly at a genuine
-    turning point, floating-point noise in how a_turn is independently
-    bisected must never flip the reported stop_reason away from
-    'turnaround' -- the physical event is the same regardless of which
-    side of a_turn a_max's last bit happens to round to."""
+class AMaxHardBoundInvariant(unittest.TestCase):
+    """a_max is documented as a HARD bound: the returned trajectory must
+    never contain a point past it, however close a_max sits to a
+    genuine turning point. An earlier revision reclassified a
+    coincidental a_max/a_turn tie as 'turnaround' using a floating-
+    point tolerance -- which could return an a_next slightly PAST the
+    literal a_max the caller supplied, a strictly worse defect than
+    the label inconsistency it was meant to smooth over. The corrected
+    behavior compares a_max and a_turn with a plain, tolerance-free
+    "<": a user who sets a_max a hair below a genuine turning point
+    gets exactly that a_max back, labeled 'a_max', not a substituted
+    a_turn that would violate the bound."""
 
-    def test_a_max_one_ulp_below_analytic_turnaround(self):
+    def test_a_max_hard_bound_across_offsets_from_turnaround(self):
         # Pure matter+curvature (no radiation, no dark energy): the
         # turning point is the exact closed-form a_turn = Om/(Om-1),
         # from E(a)^2 = Om*a^-3 + (1-Om)*a^-2 = 0.
+        #
+        # At a genuine offset (1e-9 relative and wider), the margin is
+        # many orders of magnitude larger than _bisect_root_a's own
+        # ~1e-15-relative convergence noise, so the label is expected
+        # to be deterministically 'a_max'. At literally one ULP, which
+        # of a_max/computed-a_turn ends up numerically larger depends
+        # on which side of the true root the bisection happens to
+        # converge -- an implementation detail this program does not
+        # promise to control -- so only the HARD NUMERIC bound
+        # (max(a) <= a_max) is asserted there, not a specific label;
+        # that bound must hold at every offset without exception.
         for omega_m in (1.5, 2.5, 3.0, 7.0):
             a_turn_analytic = omega_m / (omega_m - 1.0)
-            a_max = np.nextafter(a_turn_analytic, -np.inf)
-            with self.subTest(omega_m=omega_m):
+            offsets = {
+                "one ULP below": np.nextafter(a_turn_analytic, -np.inf),
+                "1e-9 relative below": a_turn_analytic * (1.0 - 1.0e-9),
+                "0.1% below": a_turn_analytic * 0.999,
+                "1% below": a_turn_analytic * 0.99,
+            }
+            for label, a_max in offsets.items():
+                with self.subTest(omega_m=omega_m, offset=label):
+                    r = phys.integrate_evolution(
+                        H0=70.0, omega_m=omega_m, omega_r=0.0,
+                        omega_de=0.0, w0=-1.0, wa=0.0, a_i=1.0e-8,
+                        a_max=a_max, step_frac=0.005)
+                    s = r["summary"]
+                    # The hard bound: no returned sample may exceed the
+                    # literal a_max supplied, at any offset, however
+                    # close to the true turning point.
+                    self.assertLessEqual(max(r["a"]), a_max)
+                    if label != "one ULP below":
+                        self.assertEqual(s["stop_reason"], "a_max")
+                        self.assertAlmostEqual(r["a"][-1], a_max, places=9)
+                    else:
+                        self.assertIn(s["stop_reason"], ("a_max", "turnaround"))
+
+    def test_a_max_at_or_beyond_turnaround_reports_turnaround(self):
+        omega_m = 3.0
+        a_turn_analytic = omega_m / (omega_m - 1.0)
+        for a_max in (a_turn_analytic, a_turn_analytic * 1.001):
+            with self.subTest(a_max=a_max):
                 r = phys.integrate_evolution(
                     H0=70.0, omega_m=omega_m, omega_r=0.0, omega_de=0.0,
                     w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=a_max,
                     step_frac=0.005)
                 s = r["summary"]
                 self.assertEqual(s["stop_reason"], "turnaround")
-                self.assertAlmostEqual(r["a"][-1], a_turn_analytic,
-                                        places=9)
-
-    def test_a_max_meaningfully_below_turnaround_still_stops_at_a_max(self):
-        # A guard against over-correction: a_max that is genuinely,
-        # non-trivially short of the turning point (far looser than the
-        # tie-break's relative tolerance) must still be respected as
-        # the stopping point, not swallowed into "turnaround".
-        omega_m = 3.0
-        a_turn_analytic = omega_m / (omega_m - 1.0)
-        a_max = a_turn_analytic * 0.999
-        r = phys.integrate_evolution(
-            H0=70.0, omega_m=omega_m, omega_r=0.0, omega_de=0.0,
-            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=a_max, step_frac=0.005)
-        s = r["summary"]
-        self.assertEqual(s["stop_reason"], "a_max")
-        self.assertAlmostEqual(r["a"][-1], a_max, places=9)
+                self.assertLessEqual(max(r["a"]), a_max + 1.0e-9)
 
 
 class ExtremeCPLRejection(unittest.TestCase):
@@ -688,6 +802,748 @@ class CSVProvenance(unittest.TestCase):
             with open(os.path.join(tmp, files[0])) as fh:
                 text = fh.read()
             self.assertIn("stop_reason = turnaround", text)
+
+
+class IndeterminateRootSearchSemantics(unittest.TestCase):
+    """Audit 5 (Copilot P0-2/P1-2, Codex P1-2): the certified search must
+    raise _IndeterminateRootSearch -- never silently return None ("no
+    root") -- both when its evaluation budget runs out and when a
+    sub-interval has been bisected down to float64's own subdivision
+    limit without resolving either way. Both paths are forced directly
+    here via temporary monkeypatches, restored in `finally`, rather than
+    hoping to stumble onto a naturally occurring pathological case."""
+
+    def test_budget_exhaustion_raises_indeterminate(self):
+        # A genuine near-double-root case (root separation ~1e-9) needs
+        # more than a handful of bisections to resolve; capping the
+        # budget at 3 evaluations forces exhaustion long before the
+        # depth/width floor (60 levels) could ever be reached.
+        ode_crit = NearDoubleRootRegression._find_critical_omega_de()
+        omega_de = ode_crit - 1.0e-9
+        omega_m = NearDoubleRootRegression.OMEGA_M
+        omega_k = 1.0 - omega_m - omega_de
+        args = (H0_pgyr(70.0), omega_m, 0.0, omega_k, omega_de, -1.0, 0.0)
+        orig_budget = phys._CERT_MAX_EVALUATIONS
+        try:
+            phys._CERT_MAX_EVALUATIONS = 3
+            with self.assertRaises(phys._IndeterminateRootSearch) as ctx:
+                phys._first_root_ahead(1.0e-8, 20.0, args)
+            self.assertIn("search budget", str(ctx.exception))
+        finally:
+            phys._CERT_MAX_EVALUATIONS = orig_budget
+
+    def test_depth_and_width_floor_raises_indeterminate(self):
+        # Force every certification attempt to fail by making the
+        # Lipschitz bound artificially enormous (so B is always deeply
+        # negative), on an interval already close to a single ULP wide;
+        # this must bottom out at the float64 subdivision limit (or the
+        # depth cap) and raise, not silently return "safe".
+        orig_bound = phys._e2_derivative_lipschitz_bound
+
+        def huge_bound(*a, **k):
+            return 1.0e18
+
+        try:
+            phys._e2_derivative_lipschitz_bound = huge_bound
+            args = (H0_pgyr(70.0), 0.3, 9.24e-5,
+                    1.0 - 0.3 - 9.24e-5 - 0.7, 0.7, -1.0, 0.0)
+            with self.assertRaises(phys._IndeterminateRootSearch) as ctx:
+                phys._first_root_ahead(1.0, 1.000001, args)
+            self.assertIn("narrow", str(ctx.exception))
+        finally:
+            phys._e2_derivative_lipschitz_bound = orig_bound
+
+    def test_indeterminate_propagates_through_evolve_not_silently(self):
+        # With _first_root_ahead forced to always raise, an ordinary
+        # closed-universe run whose proximity check fires (so the
+        # certified search is actually invoked) must see the exception
+        # propagate to the caller -- never a plausible-looking
+        # completed result.
+        orig = phys._first_root_ahead
+
+        def always_raise(*a, **k):
+            raise phys._IndeterminateRootSearch("forced for test")
+
+        try:
+            phys._first_root_ahead = always_raise
+            with self.assertRaises(phys._IndeterminateRootSearch):
+                phys.integrate_evolution(
+                    H0=70.0, omega_m=1.5, omega_r=0.0, omega_de=0.0,
+                    a_i=1.0e-8, a_max=5.0, step_frac=0.005)
+        finally:
+            phys._first_root_ahead = orig
+
+    def test_indeterminate_recorded_not_treated_as_no_recollapse_in_age_scan(self):
+        # The age scan isolates one bad point's exception per-point (so
+        # one pathological parameter value does not abort the whole
+        # scan), but it must record that point as a FAILURE -- never as
+        # recollapsed=False/age=nan silently standing in for a confirmed
+        # "no recollapse, ordinary point" result. With _first_root_ahead
+        # forced to always raise, every point whose proximity check
+        # fires must show up in the CSV's 'note' column instead of
+        # blending in as an anonymous ordinary point.
+        orig = phys._first_root_ahead
+
+        def always_raise(*a, **k):
+            raise phys._IndeterminateRootSearch("forced for test")
+
+        try:
+            phys._first_root_ahead = always_raise
+            with tempfile.TemporaryDirectory() as tmp:
+                kw = dict(H0=70.0, omega_m=0.3, omega_r=9.24e-5,
+                          omega_de=None, w0=-1.0, wa=0.0, a_i=1.0e-8,
+                          a_max=5.0, t_max=None, step_frac=0.01,
+                          continue_collapse=False,
+                          presets="EdS,lambdaCDM,closed,phantom",
+                          scan_param="omega_m", scan_lo=1.5, scan_hi=3.0,
+                          scan_n=4, force_flat=True, age_ref_gyr=13.0,
+                          no_plot=True)
+                # scan_lo/scan_hi > 1 with force_flat means every scanned
+                # point recollapses, so the proximity check -- and hence
+                # the forced-raising _first_root_ahead -- fires for all
+                # of them; this must raise (all points failed) rather
+                # than return a scan result with a full column of
+                # ordinary-looking recollapsed=False/age=nan points.
+                with self.assertRaises(RuntimeError):
+                    drv._run_age(kw, outdir=None, csvdir=tmp, dpi=150, lw=1.6)
+        finally:
+            phys._first_root_ahead = orig
+
+
+class LipschitzBoundPropertyTests(unittest.TestCase):
+    """Copilot Audit 5 P1-3: randomized/property-based verification that
+    _e2_derivative_lipschitz_bound is a genuine upper bound on
+    |dE(a)^2/da| everywhere in [a_lo, a_hi] -- checked by dense sampling
+    of the exact analytic derivative _dE2_da, across positive AND
+    negative omega_de, nonzero wa, and a case constructed so the CPL
+    shape's own interior extremum falls strictly inside the interval."""
+
+    def test_bound_dominates_dense_sampling_across_random_parameters(self):
+        rng = np.random.RandomState(20260823)
+        n_trials = 150
+        n_checked = 0
+        for _ in range(n_trials):
+            omega_m = rng.uniform(0.0, 2.0)
+            omega_r = rng.uniform(0.0, 1.0e-3)
+            omega_de = rng.uniform(-1.0, 2.0)
+            omega_k = 1.0 - omega_m - omega_r - omega_de
+            w0 = rng.uniform(-2.0, -0.2)
+            wa = rng.uniform(-3.0, 3.0)
+            a_lo = 10.0 ** rng.uniform(-3.0, 0.3)
+            a_hi = a_lo * 10.0 ** rng.uniform(0.05, 1.0)
+            try:
+                bound = phys._e2_derivative_lipschitz_bound(
+                    a_lo, a_hi, omega_m, omega_r, omega_k, omega_de, w0, wa)
+                a_grid = np.linspace(a_lo, a_hi, 400)
+                deriv_max = max(
+                    abs(phys._dE2_da(float(aa), omega_m, omega_r, omega_k,
+                                      omega_de, w0, wa))
+                    for aa in a_grid)
+            except ValueError:
+                continue  # outside this program's supported policy range
+            n_checked += 1
+            self.assertGreaterEqual(
+                bound, deriv_max * (1.0 - 1.0e-9),
+                f"bound {bound:.6g} < sampled max |dE2/da| {deriv_max:.6g} "
+                f"for om={omega_m:.4g}, or={omega_r:.4g}, ok={omega_k:.4g}, "
+                f"ode={omega_de:.4g}, w0={w0:.4g}, wa={wa:.4g}, "
+                f"a in [{a_lo:.4g},{a_hi:.4g}]")
+        self.assertGreater(n_checked, n_trials // 2,
+                            "too many random trials were rejected as "
+                            "outside the policy range for this to be a "
+                            "meaningful property check")
+
+    def test_bound_dominates_when_cpl_extremum_is_interior(self):
+        w0, wa = -0.5, 0.8
+        n = -3.0 * (1.0 + w0 + wa)
+        a_crit = -n / (3.0 * wa)
+        self.assertGreater(a_crit, 0.0,
+                            "test setup error: expected a positive "
+                            "interior extremum")
+        a_lo, a_hi = a_crit * 0.5, a_crit * 1.7
+        omega_m, omega_r, omega_de = 0.3, 9.24e-5, 0.6
+        omega_k = 1.0 - omega_m - omega_r - omega_de
+        bound = phys._e2_derivative_lipschitz_bound(
+            a_lo, a_hi, omega_m, omega_r, omega_k, omega_de, w0, wa)
+        a_grid = np.linspace(a_lo, a_hi, 2000)
+        deriv_max = max(
+            abs(phys._dE2_da(float(aa), omega_m, omega_r, omega_k,
+                              omega_de, w0, wa))
+            for aa in a_grid)
+        self.assertGreaterEqual(bound, deriv_max * (1.0 - 1.0e-9))
+
+
+class RootBracketInvariant(unittest.TestCase):
+    """Copilot Audit 5 P1-4: every bracket _first_root_ahead returns
+    must satisfy E(a_lo)^2 >= 0 and E(a_hi)^2 < 0 -- directly asserted
+    here rather than only inferred from downstream behavior."""
+
+    def test_bracket_endpoints_satisfy_sign_condition(self):
+        cases = [
+            dict(omega_m=1.5, omega_r=0.0, omega_de=0.005, w0=-1.0, wa=0.0),
+            dict(omega_m=2.0, omega_r=0.0, omega_de=0.0, w0=-1.0, wa=0.0),
+            dict(omega_m=0.3, omega_r=9.24e-5, omega_de=0.6999076,
+                 w0=-1.0, wa=0.0),
+            dict(omega_m=1.2, omega_r=0.0, omega_de=0.001, w0=-1.2, wa=0.0),
+        ]
+        H0p = H0_pgyr(70.0)
+        for kw in cases:
+            omega_k = 1.0 - kw["omega_m"] - kw["omega_r"] - kw["omega_de"]
+            args = (H0p, kw["omega_m"], kw["omega_r"], omega_k,
+                    kw["omega_de"], kw["w0"], kw["wa"])
+            with self.subTest(**kw):
+                try:
+                    bracket = phys._first_root_ahead(1.0e-6, 50.0, args)
+                except phys._IndeterminateRootSearch:
+                    continue
+                if bracket is None:
+                    continue
+                lo, hi = bracket
+                e2_lo = float(phys.E2(lo, kw["omega_m"], kw["omega_r"],
+                                       omega_k, kw["omega_de"], kw["w0"],
+                                       kw["wa"]))
+                e2_hi = float(phys.E2(hi, kw["omega_m"], kw["omega_r"],
+                                       omega_k, kw["omega_de"], kw["w0"],
+                                       kw["wa"]))
+                self.assertGreaterEqual(e2_lo, 0.0)
+                self.assertLess(e2_hi, 0.0)
+
+
+class BigRipPrecedenceRegression(unittest.TestCase):
+    """Codex Audit 5 P0-1: a Big Rip must never be reported when the
+    physical expanding branch actually recollapses first, even if that
+    turnaround lies beyond the requested a_max/t_max -- 'turnaround is
+    None' for the requested run must not be conflated with 'no root
+    exists at all'. Uses Codex's own exact reproducer, with independent
+    roots at a~3.113 and a~9.432."""
+
+    def test_recollapse_beyond_a_max_suppresses_big_rip(self):
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=1.5, omega_r=0.0, omega_de=0.001, w0=-1.2,
+            wa=0.0, a_i=1.0e-8, a_max=1.5, step_frac=0.005)
+        s = r["summary"]
+        self.assertIsNone(s["big_rip_gyr"])
+        self.assertTrue(
+            any("recollapses" in w for w in s["warnings"]),
+            "expected a warning citing the found future recollapse")
+
+    def test_flat_phantom_still_reports_genuine_big_rip(self):
+        # Regression guard: the stricter recollapse-precedence check
+        # must not break the ordinary case where the phantom term truly
+        # does dominate forever (flat, generous a_max).
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=0.3, omega_r=9.24e-5,
+            omega_de=0.7 - 9.24e-5, w0=-1.2, wa=0.0, a_i=1.0e-8,
+            a_max=60.0, step_frac=0.005)
+        s = r["summary"]
+        self.assertIsNotNone(s["big_rip_gyr"])
+        self.assertGreater(s["big_rip_gyr"], s["age_today_gyr"])
+
+
+class CycloidInteriorAccuracy(unittest.TestCase):
+    """Codex Audit 5 P0-2: the fine interior sampling generated across a
+    turning-point handoff must be ACCURATE at multiple interior times
+    approaching the singularity, not merely present (gap size alone is
+    covered by NearDoubleRootGapCoverage/NearDoubleRootRegression
+    below). Cross-checked against the exact closed-form cycloid for the
+    matter-only closed universe (Omega_m0=2)."""
+
+    OMEGA_M = 2.0
+    H0 = 70.0
+
+    @classmethod
+    def _exact(cls, eta):
+        om = cls.OMEGA_M
+        a = om / (2.0 * (om - 1.0)) * (1.0 - math.cos(eta))
+        h0_t = om / (2.0 * (om - 1.0) ** 1.5) * (eta - math.sin(eta))
+        return a, h0_t / H0_pgyr(cls.H0)
+
+    def test_interior_samples_match_exact_cycloid_at_several_times(self):
+        r = phys.integrate_evolution(H0=self.H0, omega_m=self.OMEGA_M,
+                                      omega_r=0.0, omega_de=0.0,
+                                      a_i=1.0e-5, a_max=5.0,
+                                      step_frac=0.005)
+        s = r["summary"]
+        self.assertEqual(s["stop_reason"], "turnaround")
+        t_arr = np.asarray(r["t_gyr"])
+        a_arr = np.asarray(r["a"])
+        # eta values spanning well before turnaround (pi) up to just
+        # short of it, where the interior time-quantile sampling is
+        # exercised most heavily.
+        for eta in (2.5, 2.8, 3.0, 3.1, 3.13, 3.14):
+            with self.subTest(eta=eta):
+                a_exact, t_exact = self._exact(eta)
+                idx = int(np.argmin(np.abs(t_arr - t_exact)))
+                self.assertLess(
+                    abs(t_arr[idx] - t_exact), 0.1,
+                    f"no returned sample within 0.1 Gyr of exact "
+                    f"t={t_exact:.6g} Gyr (eta={eta})")
+                rel_err = abs(a_arr[idx] - a_exact) / a_exact
+                self.assertLess(
+                    rel_err, 1.0e-3,
+                    f"eta={eta}: nearest-sample a={a_arr[idx]:.8g} vs "
+                    f"exact a={a_exact:.8g} (rel err {rel_err:.3g})")
+
+
+class NearDoubleRootGapCoverage(unittest.TestCase):
+    """Codex Audit 5 P0-2, gap-size aspect: for a TRUE near-double-root
+    turnaround (not just the loitering/no-root case already covered by
+    NearDoubleRootRegression.test_confirmed_no_root_reaches_a_max_
+    without_large_gaps), the fine interior sampling across the handoff
+    must leave no large unrepresented time gap -- this is the exact
+    shape of case Codex's original finding demonstrated (a proactive
+    handoff firing far from the true turnaround)."""
+
+    def test_no_large_time_gap_near_true_double_root(self):
+        omega_m = NearDoubleRootRegression.OMEGA_M
+        ode_crit = NearDoubleRootRegression._find_critical_omega_de()
+        omega_de = ode_crit - 1.0e-7  # just below critical: a real,
+                                       # narrowly-separated root pair
+        r = phys.integrate_evolution(
+            H0=NearDoubleRootRegression.H0, omega_m=omega_m, omega_r=0.0,
+            omega_de=omega_de, w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=20.0,
+            step_frac=0.005)
+        s = r["summary"]
+        self.assertEqual(s["stop_reason"], "turnaround")
+        t_arr = np.asarray(r["t_gyr"])
+        max_gap = float(np.diff(t_arr).max())
+        self.assertLess(
+            max_gap, 20.0,
+            f"max time gap {max_gap:.4g} Gyr across the turnaround "
+            "handoff is too large; interior samples may not be covering "
+            "the approach to the true near-double root")
+
+
+class HardBoundInvariantSweep(unittest.TestCase):
+    """A general sweep, beyond the single-family AMaxHardBoundInvariant
+    case above, asserting max(a)<=a_max and max(t)<=t_max_gyr across a
+    variety of configurations and scales -- the literal, tolerance-free
+    contract Codex Audit 5 P1-1 identified as being at risk."""
+
+    def test_a_and_t_never_exceed_requested_bounds(self):
+        configs = [
+            dict(H0=70.0, omega_m=0.3, omega_r=9.24e-5, omega_de=None,
+                 w0=-1.0, wa=0.0, a_max=5.0, t_max=None),
+            dict(H0=70.0, omega_m=1.5, omega_r=0.0, omega_de=0.0,
+                 w0=-1.0, wa=0.0, a_max=3.0, t_max=None),
+            dict(H0=70.0, omega_m=2.0, omega_r=0.0, omega_de=0.0,
+                 w0=-1.0, wa=0.0, a_max=5.0, t_max=10.0),
+            dict(H0=67.4, omega_m=0.315, omega_r=9.24e-5, omega_de=None,
+                 w0=-1.2, wa=0.3, a_max=10.0, t_max=None),
+            dict(H0=70.0, omega_m=1.5, omega_r=0.0, omega_de=0.005,
+                 w0=-1.0, wa=0.0, a_max=20.0, t_max=None),
+        ]
+        for kw in configs:
+            with self.subTest(**kw):
+                r = phys.integrate_evolution(
+                    H0=kw["H0"], omega_m=kw["omega_m"],
+                    omega_r=kw["omega_r"], omega_de=kw["omega_de"],
+                    w0=kw["w0"], wa=kw["wa"], a_i=1.0e-8,
+                    a_max=kw["a_max"], t_max_gyr=kw["t_max"],
+                    step_frac=0.005)
+                self.assertLessEqual(max(r["a"]), kw["a_max"] + 1.0e-9)
+                if kw["t_max"] is not None:
+                    self.assertLessEqual(max(r["t_gyr"]),
+                                          kw["t_max"] + 1.0e-9)
+
+
+class ContinueCollapseTMaxTruncation(unittest.TestCase):
+    """Gemini Audit 5 finding #2: mirroring the contracting branch for
+    --continue_collapse must not silently extend the RETURNED trajectory
+    past a --t_max that falls strictly on the CONTRACTING branch
+    (t_turn < t_max_gyr < 2*t_turn), even though the forward pass itself
+    correctly reports a genuine turnaround rather than a t_max stop."""
+
+    H0 = 70.0
+    OMEGA_M = 2.0
+
+    @classmethod
+    def _exact_cycloid(cls, eta):
+        # Same closed-form cycloid as CycloidInteriorAccuracy, valid for
+        # eta in [0, 2*pi] (turnaround at eta=pi, Big Crunch at
+        # eta=2*pi by the same time-reversal symmetry as the mirrored
+        # branch itself): a(eta) and t(eta) in Gyr, computed
+        # independently of physics_cosmo.py's own quadrature/bisection.
+        om = cls.OMEGA_M
+        a = om / (2.0 * (om - 1.0)) * (1.0 - math.cos(eta))
+        h0_t = om / (2.0 * (om - 1.0) ** 1.5) * (eta - math.sin(eta))
+        return a, h0_t / H0_pgyr(cls.H0)
+
+    @classmethod
+    def _eta_at_time(cls, t_target, n_iter=200):
+        # t(eta) is monotonically increasing on [pi, 2*pi] (the
+        # contracting branch), so invert it by plain bisection -- an
+        # independent check, never calling back into physics_cosmo.py.
+        lo, hi = math.pi, 2.0 * math.pi
+        for _ in range(n_iter):
+            mid = 0.5 * (lo + hi)
+            if cls._exact_cycloid(mid)[1] < t_target:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi)
+
+    def test_t_max_on_contracting_branch_truncates_the_mirror(self):
+        # Copilot Audit 6 P0-1 / Codex Audit 6 P1-1 (independently):
+        # an earlier version merely filtered the mirrored samples to
+        # t <= t_max without inserting the actual state AT t_max, so
+        # the returned trajectory silently stopped materially earlier
+        # than the requested (and claimed) stop_reason="t_max" time.
+        # This strengthens the original (upper-bound-only) assertion to
+        # equality at t_max, the exact cycloid value of a there, and the
+        # sign of H at that endpoint -- per both audits' explicit ask.
+        t_turn = math.pi / H0_pgyr(self.H0)
+        t_max = 1.5 * t_turn  # strictly between t_turn and 2*t_turn
+        r = phys.integrate_evolution(
+            H0=self.H0, omega_m=self.OMEGA_M, omega_r=0.0, omega_de=0.0,
+            a_i=1.0e-5, a_max=5.0, t_max_gyr=t_max, step_frac=0.005,
+            continue_collapse=True)
+        s = r["summary"]
+        t_arr = np.asarray(r["t_gyr"])
+        a_arr = np.asarray(r["a"])
+        H_arr = np.asarray(r["H_kms_mpc"])
+        self.assertIsNotNone(s["turnaround"])
+        self.assertEqual(s["stop_reason"], "t_max")
+        # Hard bound: no returned sample may exceed t_max.
+        self.assertLessEqual(float(t_arr.max()), t_max + 1.0e-9)
+        # Equality, not merely non-exceedance: the final sample must
+        # land exactly (to numerical tolerance) at t_max.
+        self.assertAlmostEqual(float(t_arr[-1]), t_max, delta=1.0e-8)
+        # The final scale factor must match the mirrored forward
+        # solution -- the exact cycloid value at t_max, computed here
+        # independently of physics_cosmo.py's own quadrature/bisection.
+        eta_at_tmax = self._eta_at_time(t_max)
+        a_exact, _t_exact = self._exact_cycloid(eta_at_tmax)
+        self.assertAlmostEqual(float(a_arr[-1]), a_exact, delta=1.0e-6)
+        # Strictly increasing time throughout, and monotone-decreasing a
+        # over the final stretch of the mirrored (contracting) tail --
+        # deliberately just the last handful of samples rather than the
+        # whole array's second half, since the turning-point handoff's
+        # own fine interior sampling can still be expanding-branch data
+        # well past the midpoint of the array by index.
+        self.assertTrue(np.all(np.diff(t_arr) > 0))
+        self.assertTrue(np.all(np.diff(a_arr[-20:]) <= 0))
+        # H < 0 at the returned endpoint: it is genuinely on the
+        # contracting branch, not an expanding-branch value reattached
+        # with the wrong sign.
+        self.assertLess(float(H_arr[-1]), 0.0)
+        # total_lifetime_gyr still reports the FULL mirrored lifetime;
+        # only the RETURNED array is truncated at t_max.
+        self.assertAlmostEqual(s["total_lifetime_gyr"], 2.0 * t_turn,
+                                delta=1.0e-6)
+
+    def test_t_max_at_several_fractions_between_turnaround_and_full_lifetime(self):
+        # Additional fractions between t_turn and 2*t_turn (Copilot
+        # Audit 6 P0-1's explicit ask), including one deliberately
+        # between two ordinary mirrored samples and one very close to
+        # the full lifetime.
+        t_turn = math.pi / H0_pgyr(self.H0)
+        for frac in (1.05, 1.3, 1.5, 1.7, 1.95, 1.999):
+            with self.subTest(frac=frac):
+                t_max = frac * t_turn
+                r = phys.integrate_evolution(
+                    H0=self.H0, omega_m=self.OMEGA_M, omega_r=0.0,
+                    omega_de=0.0, a_i=1.0e-5, a_max=5.0,
+                    t_max_gyr=t_max, step_frac=0.005,
+                    continue_collapse=True)
+                t_arr = np.asarray(r["t_gyr"])
+                a_arr = np.asarray(r["a"])
+                self.assertLessEqual(float(t_arr.max()), t_max + 1.0e-9)
+                self.assertAlmostEqual(float(t_arr[-1]), t_max, delta=1.0e-7)
+                eta_at_tmax = self._eta_at_time(t_max)
+                a_exact, _ = self._exact_cycloid(eta_at_tmax)
+                self.assertAlmostEqual(float(a_arr[-1]), a_exact,
+                                        delta=1.0e-5)
+
+    def test_t_max_past_full_mirror_reports_full_lifetime_untruncated(self):
+        t_turn = math.pi / H0_pgyr(self.H0)
+        r = phys.integrate_evolution(
+            H0=self.H0, omega_m=self.OMEGA_M, omega_r=0.0, omega_de=0.0,
+            a_i=1.0e-5, a_max=5.0, t_max_gyr=3.0 * t_turn,
+            step_frac=0.005, continue_collapse=True)
+        s = r["summary"]
+        self.assertEqual(s["stop_reason"], "turnaround")
+        self.assertAlmostEqual(float(max(r["t_gyr"])), 2.0 * t_turn,
+                                delta=1.0e-5)
+
+
+class BigBangConnectivity(unittest.TestCase):
+    """Codex Audit 6 P0-1: E(a_i)^2 > 0 alone does not certify that a_i
+    lies on a branch continuously connected back to the true Big Bang
+    at a=0 -- there can be a hidden forbidden interval strictly between
+    them, or E(a)^2 itself can tend to a NEGATIVE value as a->0 even
+    though it is positive at a_i. Both reproducers below are Codex's
+    own exact cases (a hidden two-root forbidden interval below a_i
+    where matter still dominates asymptotically, and a CPL dark-energy
+    term whose negative-coefficient leading power dominates negatively
+    as a->0), plus a standard-connected-model control that must NOT
+    raise."""
+
+    def test_hidden_forbidden_interval_below_a_i_is_rejected(self):
+        # Large negative curvature creates a genuine forbidden interval
+        # (E(a)^2 < 0) between a~1e-6 and a~0.6, even though matter
+        # dominates (positively) as a->0 and DE dominates (positively)
+        # again near a_i=0.99: E(a_i)^2 > 0 by itself hides this.
+        om_m, om_r = 1.0e-6, 0.0
+        om_k = -0.5
+        om_de = 1.0 - om_m - om_r - om_k
+        with self.assertRaises(ValueError) as ctx:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=om_m, omega_r=om_r, omega_de=om_de,
+                w0=-1.0, wa=0.0, a_i=0.99, a_max=1.5, step_frac=0.01)
+        self.assertIn("forbidden interval", str(ctx.exception))
+
+    def test_negative_asymptotic_de_dominance_is_rejected(self):
+        # w0=1, wa=0 gives a CPL leading power n_de=-6, more negative
+        # than radiation's -4, so a small-magnitude negative omega_de
+        # dominates E(a)^2 NEGATIVELY as a->0 even though radiation
+        # keeps E(a_i)^2 > 0 at the requested a_i=1e-8.
+        om_m, om_r = 0.3, 9.24e-5
+        om_de, w0, wa = -1.0e-25, 1.0, 0.0
+        with self.assertRaises(ValueError) as ctx:
+            phys.integrate_evolution(
+                H0=70.0, omega_m=om_m, omega_r=om_r, omega_de=om_de,
+                w0=w0, wa=wa, a_i=1.0e-8, a_max=2.0, step_frac=0.01)
+        self.assertIn("negative", str(ctx.exception))
+
+    def test_standard_connected_model_is_not_rejected(self):
+        # Control: an ordinary flat LambdaCDM-like model must integrate
+        # cleanly -- the connectivity certification must not be a
+        # false-positive trap for the common case.
+        r = phys.integrate_evolution(
+            H0=67.4, omega_m=0.315, omega_r=9.24e-5, omega_de=None,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=2.0, step_frac=0.005)
+        self.assertIsNotNone(r["summary"]["age_today_gyr"])
+
+    def test_recollapsing_closed_model_is_not_rejected(self):
+        # A genuinely closed, positive-curvature model (no hidden
+        # forbidden interval, matter dominates as a->0) must not be
+        # rejected by the connectivity check even though it recollapses
+        # later in its own history.
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=2.0, omega_r=0.0, omega_de=0.0, w0=-1.0,
+            wa=0.0, a_i=1.0e-5, a_max=5.0, step_frac=0.005)
+        self.assertIsNotNone(r["summary"]["turnaround"])
+
+
+class BigRipOverflowSafety(unittest.TestCase):
+    """Codex Audit 6 P0-2: the Big-Rip dominance-scale computation must
+    never overflow, even for w0 immediately below -1 (where the OLD
+    1/p_phantom exponent diverges), and must not count non-negative
+    matter/radiation as hazards that could cause a future recollapse --
+    only negative curvature can. Exercises exactly the w0 regime Codex's
+    reproducer targeted, across flat/open/closed curvature."""
+
+    def test_w0_immediately_below_minus_one_never_overflows(self):
+        w0_values = (-1.000001, -1.0 - 1.0e-12,
+                     math.nextafter(-1.0, -math.inf))
+        omega_k_values = (0.0, 0.01, -0.01)  # flat, open, closed
+        for w0 in w0_values:
+            for omega_k in omega_k_values:
+                with self.subTest(w0=w0, omega_k=omega_k):
+                    om_m, om_r = 0.3, 9.24e-5
+                    om_de = 1.0 - om_m - om_r - omega_k
+                    try:
+                        r = phys.integrate_evolution(
+                            H0=70.0, omega_m=om_m, omega_r=om_r,
+                            omega_de=om_de, w0=w0, wa=0.0, a_i=1.0e-8,
+                            a_max=5.0, step_frac=0.01)
+                    except OverflowError:
+                        self.fail(
+                            f"OverflowError for w0={w0!r}, "
+                            f"omega_k={omega_k!r}")
+                    s = r["summary"]
+                    self.assertIn(
+                        s["fate_status"],
+                        ("big_rip", "future_recollapse", "unresolved"))
+
+
+class StructuredFateFields(unittest.TestCase):
+    """Codex Audit 6 P1-2 / Copilot Audit 6 P2-2: the model's ultimate
+    physical fate must be exposed as structured fields
+    (fate_status/future_turnaround_a/fate_search_limit_a), not only as
+    prose warnings that --compare mode and CSV consumers cannot parse."""
+
+    def test_big_rip_fate_status(self):
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=0.3, omega_r=9.24e-5,
+            omega_de=0.7 - 9.24e-5, w0=-1.2, wa=0.0, a_i=1.0e-8,
+            a_max=60.0, step_frac=0.005)
+        s = r["summary"]
+        self.assertEqual(s["fate_status"], "big_rip")
+        self.assertIsNotNone(s["big_rip_gyr"])
+
+    def test_future_recollapse_fate_status(self):
+        # Same closed-phantom-recollapse-beyond-a_max configuration as
+        # BigRipPrecedenceRegression.test_recollapse_beyond_a_max_suppresses_big_rip
+        # above (Codex Audit 5's exact reproducer, independent roots at
+        # a~3.113 and a~9.432).
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=1.5, omega_r=0.0, omega_de=0.001, w0=-1.2,
+            wa=0.0, a_i=1.0e-8, a_max=1.5, step_frac=0.005)
+        s = r["summary"]
+        self.assertIsNone(s["turnaround"])
+        self.assertEqual(s["fate_status"], "future_recollapse")
+        self.assertIsNotNone(s["future_turnaround_a"])
+
+    def test_recollapse_fate_status(self):
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=2.0, omega_r=0.0, omega_de=0.0, w0=-1.0,
+            wa=0.0, a_i=1.0e-5, a_max=5.0, step_frac=0.005)
+        self.assertEqual(r["summary"]["fate_status"], "recollapse")
+
+    def test_no_fate_question_is_none(self):
+        r = phys.integrate_evolution(
+            H0=67.4, omega_m=0.315, omega_r=9.24e-5, omega_de=None,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=2.0, step_frac=0.005)
+        self.assertIsNone(r["summary"]["fate_status"])
+
+
+class ModelVersionBump(unittest.TestCase):
+    """Copilot Audit 6 P1-3 / Codex Audit 6 P1-5: MODEL_VERSION must
+    distinguish this materially changed build from the prior release
+    that lacked the Audit-6 fixes."""
+
+    def test_version_differs_from_prior_release(self):
+        self.assertNotEqual(phys.MODEL_VERSION, "1.2.0")
+
+
+class MatterRadiationEqualityReachability(unittest.TestCase):
+    """Codex Audit 6 P1-3: a_eq_rm = omega_r/omega_m is a pure algebraic
+    identity, independent of the integrated trajectory -- unlike
+    a_eq_mde/a_accel (already gated by a_reached), it was reported even
+    when the model recollapsed long before ever reaching that scale
+    factor."""
+
+    def test_a_eq_rm_none_when_recollapse_precedes_it(self):
+        # Codex's exact reproducer: recollapses at a~1.005, far short
+        # of a_eq_rm = omega_r/omega_m = 100.
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=1.0, omega_r=100.0, omega_de=0.0, w0=-1.0,
+            wa=0.0, a_i=1.0e-8, a_max=5.0, step_frac=0.01)
+        s = r["summary"]
+        self.assertIsNotNone(s["turnaround"])
+        self.assertIsNone(s["a_eq_rm"])
+
+    def test_a_eq_rm_reported_when_reachable(self):
+        r = phys.integrate_evolution(
+            H0=67.4, omega_m=0.315, omega_r=9.24e-5, omega_de=None,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=2.0, step_frac=0.005)
+        s = r["summary"]
+        self.assertIsNotNone(s["a_eq_rm"])
+        self.assertAlmostEqual(s["a_eq_rm"], 9.24e-5 / 0.315, places=9)
+
+
+class TotalLifetimeUnnesting(unittest.TestCase):
+    """Gemini Audit 6: total_lifetime_gyr is knowable analytically the
+    instant a genuine turnaround is found, independent of whether the
+    optional --continue_collapse array-mirroring was requested."""
+
+    def test_total_lifetime_reported_without_continue_collapse(self):
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=2.0, omega_r=0.0, omega_de=0.0, w0=-1.0,
+            wa=0.0, a_i=1.0e-5, a_max=5.0, step_frac=0.005,
+            continue_collapse=False)
+        s = r["summary"]
+        self.assertIsNotNone(s["turnaround"])
+        self.assertIsNotNone(s["total_lifetime_gyr"])
+        self.assertAlmostEqual(
+            s["total_lifetime_gyr"], 2.0 * s["turnaround"]["t_turn_gyr"],
+            places=9)
+
+
+class NaNPolicyNearDoubleRoot(unittest.TestCase):
+    """Codex Audit 6 P2-1: only a point where E(a)^2 <= 0 exactly may be
+    masked to NaN in Omega_i(a) -- a small-but-strictly-positive E(a)^2
+    near a loitering near-double-root dip has large-but-finite,
+    physically meaningful Omega values that must NOT be masked."""
+
+    def test_only_non_positive_e2_points_are_nan(self):
+        # A loitering configuration with a near-double-root dip that
+        # stays strictly positive throughout (no actual turnaround).
+        om_m, om_r = 0.3, 9.24e-5
+        om_k = -1.0e-6
+        om_de = 1.0 - om_m - om_r - om_k
+        r = phys.integrate_evolution(
+            H0=70.0, omega_m=om_m, omega_r=om_r, omega_de=om_de,
+            w0=-1.0, wa=0.0, a_i=1.0e-8, a_max=5.0, step_frac=0.001)
+        a_arr = np.asarray(r["a"])
+        om_arr = np.asarray(r["Om"])
+        e2_arr = phys.E2(a_arr, om_m, om_r, om_k, om_de, -1.0, 0.0)
+        is_nan = np.isnan(om_arr)
+        # NaN exactly where, and only where, E(a)^2 <= 0.
+        self.assertTrue(np.array_equal(is_nan, e2_arr <= 0.0))
+        # If this configuration has any strictly-positive-but-tiny
+        # E(a)^2 point, it must be finite (not NaN) with a
+        # correspondingly large Omega value -- the actual physical
+        # scenario Codex Audit 6 P2-1 identified as wrongly masked.
+        tiny_positive = (e2_arr > 0.0) & (e2_arr < 1.0e-9)
+        if np.any(tiny_positive):
+            self.assertTrue(np.all(np.isfinite(om_arr[tiny_positive])))
+
+
+@unittest.skipIf(REPO_ROOT is None,
+                 "main.py could not be located near this test file in any "
+                 "supported layout (normal repo/tests/ or a flattened "
+                 "upload directory); skipping CLI subprocess tests rather "
+                 "than failing on what may be an upload artifact.")
+class CLISmokeTest(unittest.TestCase):
+    """A real CLI subprocess smoke test: --version, one successful run,
+    and one deliberately invalid run, each checked end-to-end through
+    main.py rather than only through the library API."""
+
+    def test_version_flag(self):
+        result = subprocess.run(
+            [sys.executable, "main.py", "--version"], cwd=REPO_ROOT,
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(phys.MODEL_VERSION, result.stdout + result.stderr)
+
+    def test_successful_run_exits_zero_and_writes_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, "main.py", "--mode", "evolve",
+                 "--omega_m", "0.3", "--no_plot", "--csvdir", tmp],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(
+                any(f.endswith(".csv") for f in os.listdir(tmp)),
+                "expected a CSV file to have been written")
+
+    def test_invalid_input_exits_nonzero_with_clear_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, "main.py", "--mode", "evolve",
+                 "--omega_m", "0.3", "--w0", "1000.0", "--wa", "1000.0",
+                 "--no_plot", "--csvdir", tmp],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Cosmology_expansion_simulator:", result.stderr)
+
+
+class CSVFieldAssertions(unittest.TestCase):
+    """Codex Audit 5 item 12: assert the exact model version and the
+    newly added resolved-parameter provenance fields actually appear in
+    the CSV, not merely that SOME header/rows exist (already covered by
+    CSVProvenance above)."""
+
+    def test_csv_provenance_contains_resolved_fields_and_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drv.run(mode="evolve", H0=70.0, omega_m=1.5, omega_r=0.0,
+                    omega_de=None, w0=-1.0, wa=0.0, a_i=1.0e-8,
+                    a_max=5.0, t_max=None, step_frac=0.005,
+                    continue_collapse=False, no_plot=True, csvdir=tmp)
+            files = [f for f in os.listdir(tmp) if f.endswith(".csv")]
+            self.assertEqual(len(files), 1)
+            with open(os.path.join(tmp, files[0])) as fh:
+                text = fh.read()
+            self.assertIn(f"version {phys.MODEL_VERSION}", text)
+            for key in ("omega_de0_resolved", "a_turn", "t_turn_gyr",
+                        "fate_status", "n_forward_iterations", "n_output_samples"):
+                self.assertIn(key, text)
+            # This configuration genuinely recollapses, so a_turn must
+            # be a real resolved number, not a None placeholder.
+            self.assertNotIn("a_turn = None", text)
 
 
 if __name__ == "__main__":

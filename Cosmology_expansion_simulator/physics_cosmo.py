@@ -30,7 +30,7 @@ returned in the same student-facing units.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 
 # ----------------------------------------------------------------------
 # Constants (SI, used only for the km/s/Mpc <-> Gyr^-1 conversion)
@@ -158,11 +158,14 @@ def de_density_shape(a, w0, wa):
         a_bad = float(np.asarray(a)[bad].flat[0])
         raise ValueError(
             "The dark-energy density ratio g(a) = rho_DE(a)/rho_DE(1) is "
-            f"not representable in finite arithmetic near a={a_bad:.6g} "
-            f"for w0={w0:.4g}, wa={wa:.4g}. This combination of the CPL "
-            "parameters and the requested a-range is too extreme for "
-            "this program's numerics; choose milder w0/wa or a narrower "
-            "a_i-to-a_max range."
+            f"outside this program's supported policy range near "
+            f"a={a_bad:.6g} for w0={w0:.4g}, wa={wa:.4g} (a deliberately "
+            "conservative cutoff, well inside where float64 itself would "
+            "actually overflow -- see the |ln g(a)| policy threshold "
+            "above). This combination of the CPL parameters and the "
+            "requested a-range is too extreme for this program's "
+            "numerics; choose milder w0/wa or a narrower a_i-to-a_max "
+            "range."
         )
     return np.exp(log_g)
 
@@ -187,9 +190,6 @@ def E2(a, omega_m, omega_r, omega_k, omega_de, w0, wa):
     return val
 
 
-_E2_FLOOR = 1.0e-12  # below this, H is numerically zero and Omega_i(a) formally diverges
-
-
 def omega_fractions(a, omega_m, omega_r, omega_k, omega_de, w0, wa):
     """
     Fractional contribution of each component to the total energy
@@ -199,11 +199,23 @@ def omega_fractions(a, omega_m, omega_r, omega_k, omega_de, w0, wa):
 
     Exactly at a turnaround, H(a) = 0 while the individual densities
     stay finite, so every Omega_i formally diverges there; that single
-    point is reported as NaN rather than +/-inf.
+    point (E(a)^2 <= 0, up to the round-off floor already applied
+    upstream) is reported as NaN rather than +/-inf. An earlier version
+    of this function additionally treated any E(a)^2 below a fixed
+    absolute floor (1e-12) as undefined, which is WRONG for a point
+    that is genuinely on the expanding branch with a small but positive
+    E(a)^2 -- e.g. a loitering model's near-double-root dip, where
+    E(a)^2 can be many orders of magnitude smaller than 1 without ever
+    reaching zero. Such a point has large but perfectly finite,
+    physically meaningful Omega_i values (the near-divergence IS the
+    physics there), and masking it to NaN discarded real data under a
+    label ("only NaN at a turnaround") that was not actually true (see
+    Codex Audit 6 P2-1). The only value masked to NaN now is one where
+    E(a)^2 itself is non-positive.
     """
     a = np.asarray(a, dtype=float)
     e2 = E2(a, omega_m, omega_r, omega_k, omega_de, w0, wa)
-    safe = np.where(e2 > _E2_FLOOR, e2, np.nan)
+    safe = np.where(e2 > 0.0, e2, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
         om = omega_m * a ** -3 / safe
         orr = omega_r * a ** -4 / safe
@@ -498,16 +510,23 @@ def _de_extremum_a(n, wa):
 def _e2_derivative_lipschitz_bound(a_lo, a_hi, omega_m, omega_r, omega_k,
                                     omega_de, w0, wa):
     """
-    A RIGOROUS upper bound L on |dE(a)^2/da| for EVERY a in [a_lo,a_hi],
-    derived in closed form -- not by sampling E(a)^2 or its derivative
-    on a grid, which cannot rule out a narrow forbidden interval
-    between two nearby roots falling entirely between sample points,
-    however fine the grid. Given such an L, E(a)^2 cannot change by
-    more than L*(a_hi-a_lo) anywhere in
-    the interval relative to either endpoint (mean value theorem), so
-    if min(E2(a_lo), E2(a_hi)) - L*(a_hi-a_lo) > 0, E(a)^2 is certified
-    positive throughout [a_lo,a_hi] -- a guarantee that cannot be
-    defeated by an arbitrarily narrow dip, unlike a fixed sample count.
+    An analytic upper bound L, in EXACT real arithmetic, on
+    |dE(a)^2/da| for every a in [a_lo,a_hi], derived in closed form --
+    not by sampling E(a)^2 or its derivative on a grid, which cannot
+    rule out a narrow forbidden interval between two nearby roots
+    falling entirely between sample points, however fine the grid.
+    Given such an L, E(a)^2 cannot change by more than L*(a_hi-a_lo)
+    anywhere in the interval relative to either endpoint (mean value
+    theorem), so if min(E2(a_lo), E2(a_hi)) - L*(a_hi-a_lo) > 0, E(a)^2
+    is positive throughout [a_lo,a_hi] in exact arithmetic. This
+    function's float64 evaluation of that exact-arithmetic expression
+    is then conservatively inflated (see _CERT_L_INFLATE_REL at the
+    call site) to absorb its own ordinary (non-outward-rounded)
+    rounding error -- a documented, conservative ENGINEERING margin,
+    not a formal directed-rounding or interval-arithmetic guarantee.
+    The combination is validated on the adversarial and randomized
+    cases in the test suite, which is evidence of correctness on those
+    cases, not a proof for every possible input.
 
     The matter, radiation, and curvature terms of dE2/da are each a
     single power of a (e.g. -3*Om*a^-4), and a pure power function has
@@ -544,17 +563,54 @@ def _e2_derivative_lipschitz_bound(a_lo, a_hi, omega_m, omega_r, omega_k,
 _CERT_MAX_DEPTH = 60          # a range this many bisections deep is well
                                # below any float64-representable width
 _CERT_MAX_EVALUATIONS = 200_000  # generous hard cap; see _first_root_ahead
-_CERT_SAFETY_REL = 1.0e-12    # relative slack in the positivity
-                               # certificate itself, so round-off in
-                               # computing L cannot falsely certify a
-                               # hair-thin negative dip as safe
+_CERT_L_INFLATE_REL = 1.0e-9  # conservative RELATIVE inflation applied to
+                               # the analytic Lipschitz bound before it is
+                               # used, so that ordinary float64 rounding
+                               # in computing L itself (which is evaluated
+                               # with plain arithmetic, not outward-
+                               # rounded interval arithmetic) cannot make
+                               # a rounded-down L understate the true
+                               # bound. This is a generous, documented
+                               # margin, not a formal directed-rounding
+                               # proof -- see _first_root_ahead.
+_CERT_POSITIVE_MARGIN_REL = 1.0e-9  # a sub-interval is accepted as
+                               # certified positive only when its
+                               # computed lower bound B exceeds this
+                               # SMALL POSITIVE fraction of the
+                               # interval's own E(a)^2 scale -- never a
+                               # negative or zero threshold. Requiring a
+                               # positive margin (rather than merely
+                               # B > 0, let alone B > a negative slack)
+                               # is what keeps this conservative under
+                               # ordinary floating-point rounding.
+
+
+class _IndeterminateRootSearch(RuntimeError):
+    """
+    Raised when the certified search can neither find a root nor
+    certify E(a)^2 positive throughout some sub-interval, whether
+    because its evaluation budget was exhausted or because the
+    sub-interval has been bisected down to float64's own subdivision
+    limit without resolving either way. This is a deliberate, LOUD
+    failure: an interval this search could not resolve is never
+    silently reported as root-free. It subclasses RuntimeError so
+    existing callers that catch RuntimeError still see it, while
+    letting tests and callers that need to distinguish it do so by
+    name.
+    """
 
 
 def _first_root_ahead(a_lo, a_max, args):
     """
     Find the FIRST root of E(a)^2=0 strictly ahead of a_lo, within
-    [a_lo, a_max], returning a bracketing pair, or None once E(a)^2 is
-    CERTIFIED positive and finite throughout the whole range.
+    [a_lo, a_max], returning a bracketing pair; return None once
+    E(a)^2 is certified positive and finite throughout the whole
+    range; or raise _IndeterminateRootSearch if neither can be
+    established. This is a genuinely three-way (tri-state) result --
+    root found, certified root-free, or unresolved -- and no caller in
+    this module ever treats "unresolved" as "root-free": the two are
+    kept strictly distinct, and an indeterminate result propagates
+    upward as a loud failure rather than a silent "no root ahead."
 
     An earlier version of this scanned a fixed number of evenly spaced
     grid points, which cannot detect a turning point (or, worse, a
@@ -564,25 +620,33 @@ def _first_root_ahead(a_lo, a_max, args):
     tuned closer together than its spacing. Checking only the sign of
     E(a_max)^2 has the same blind spot for the same reason.
 
-    This replaces that scan with recursive bisection guarded by a
-    provable per-interval certificate (_e2_derivative_lipschitz_bound):
-    a sub-interval is only accepted as root-free when a closed-form
+    This replaces that scan with recursive bisection guarded by an
+    analytic per-interval bound (_e2_derivative_lipschitz_bound): a
+    sub-interval is only accepted as root-free when a closed-form
     bound on how far E(a)^2 could possibly move across it -- derived
-    from its exact analytic derivative, never from sampling -- proves
-    it cannot reach zero anywhere inside. Wherever that certificate
-    cannot immediately succeed, the interval is bisected and the left
-    half is fully resolved before the right half is even examined
-    (so the FIRST root is always what gets returned), recursing as
-    deep as necessary -- all the way to a resolution set by floating-
-    point precision itself if that is genuinely what it takes. A
-    forbidden interval of any width down to that hardware-precision
-    floor cannot be skipped, unlike a search tied to an arbitrary
-    fixed point count.
+    from its exact analytic derivative, never from sampling -- shows
+    it cannot reach zero anywhere inside, WITH a strictly positive
+    safety margin (never a negative or zero one) to absorb ordinary
+    floating-point rounding in computing that bound itself. Wherever
+    that is not immediately established, the interval is bisected and
+    the left half is fully resolved before the right half is even
+    examined (so the FIRST root is always what gets returned),
+    recursing as deep as necessary -- all the way to float64's own
+    subdivision limit if that is genuinely what it takes, at which
+    point an unresolved interval raises rather than being guessed
+    safe. This is a conservative analytic-bound search validated by
+    adversarial and randomized tests (see the test suite), not a
+    formal interval-arithmetic proof: the bound L is computed with
+    ordinary (not outward-rounded) float64 arithmetic, inflated by a
+    documented conservative margin rather than a directed-rounding
+    guarantee.
 
-    Raises RuntimeError if a well-behaved certificate cannot be reached
-    within a generous evaluation budget -- this is a loud, honest
-    failure for a pathological parameter combination, never a silent
-    guess. Raises ValueError if E(a)^2 itself is ever found non-finite.
+    Raises _IndeterminateRootSearch if a well-behaved certificate
+    cannot be reached within a generous evaluation budget, or if the
+    search reaches float64's own subdivision limit without resolving
+    either way -- both are loud, honest failures for a pathological
+    parameter combination, never a silent guess. Raises ValueError if
+    E(a)^2 itself is ever found non-finite.
     """
     H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa = args
     budget = [_CERT_MAX_EVALUATIONS]
@@ -612,33 +676,49 @@ def _first_root_ahead(a_lo, a_max, args):
         # depth for no benefit -- this keeps refinement linear instead.
         if e2_hi < 0.0:
             return lo, hi
-        L = _e2_derivative_lipschitz_bound(lo, hi, omega_m, omega_r,
-                                            omega_k, omega_de, w0, wa)
+        L_raw = _e2_derivative_lipschitz_bound(lo, hi, omega_m, omega_r,
+                                                omega_k, omega_de, w0, wa)
+        L = L_raw * (1.0 + _CERT_L_INFLATE_REL) + 1.0e-300
         width = hi - lo
         scale = max(abs(e2_lo), abs(e2_hi), 1.0e-300)
-        if min(e2_lo, e2_hi) - L * width > -_CERT_SAFETY_REL * scale:
+        B = min(e2_lo, e2_hi) - L * width
+        if B > _CERT_POSITIVE_MARGIN_REL * scale:
             return None  # certified: E(a)^2 > 0 everywhere in [lo, hi]
         budget[0] -= 1
         if budget[0] <= 0:
-            raise RuntimeError(
-                f"Could not certify that E(a)^2 stays positive between "
-                f"a={lo:.6g} and a={hi:.6g} within this program's search "
-                "budget; this model's parameter combination may sit "
-                "pathologically close to a hidden recollapse. Try a "
-                "narrower --a_max or different parameters."
+            raise _IndeterminateRootSearch(
+                f"Could not certify that E(a)^2 stays positive, nor find "
+                f"a root, between a={lo:.6g} and a={hi:.6g} within this "
+                "program's search budget (minimum E(a)^2 observed at "
+                f"either endpoint so far: {min(e2_lo, e2_hi):.6g}); this "
+                "model's parameter combination may sit pathologically "
+                "close to a hidden recollapse. Try a narrower --a_max or "
+                "different parameters."
             )
-        if depth >= _CERT_MAX_DEPTH or width <= max(1.0e-14 * hi, 1.0e-300):
-            # Resolution floor: this sub-interval cannot be certified
-            # positive, but is also already as narrow as float64 itself
-            # can represent, and (since the e2_hi<0 case is already
-            # handled above) neither endpoint has actually been
-            # measured negative. A forbidden interval here would have
-            # to be narrower than any number this program (or any other
-            # finite-precision method) can resolve, so it is treated as
-            # safe -- an honest limitation tied to hardware precision,
-            # not to an arbitrary sample count.
-            return None
         mid = 0.5 * (lo + hi)
+        if depth >= _CERT_MAX_DEPTH or mid <= lo or mid >= hi:
+            # This sub-interval cannot be certified positive AND has
+            # been bisected down to (or past) float64's own inability
+            # to represent a strictly-between midpoint at all -- mid<=lo
+            # or mid>=hi means the interval is already narrower than
+            # one ULP at this scale, so no further bisection is even
+            # possible in this implementation's float64 arithmetic.
+            # This is an honest, loud failure, not a "safe" guess: the
+            # absence of an observed negative endpoint is not proof
+            # that no negative interior exists, and a method with more
+            # precision (interval arithmetic, arbitrary-precision, or
+            # exact polynomial analysis for the constant-w case) could
+            # in principle resolve an interval this narrow that this
+            # float64 implementation cannot.
+            raise _IndeterminateRootSearch(
+                f"Could not certify that E(a)^2 stays positive, nor find "
+                f"a root, between a={lo:.6g} and a={hi:.6g}; this "
+                "interval is already as narrow as this program's float64 "
+                "arithmetic can subdivide (minimum E(a)^2 observed at "
+                f"either endpoint: {min(e2_lo, e2_hi):.6g}). This is an "
+                "honest limitation of this specific implementation, not "
+                "evidence that no root exists here."
+            )
         e2_mid = e2(mid)
         left = scan(lo, mid, e2_lo, e2_mid, depth + 1)
         if left is not None:
@@ -657,8 +737,11 @@ def _first_root_ahead(a_lo, a_max, args):
     # linear grid, this partition only has to be coarse enough that each
     # cell's *certificate* converges quickly, never fine enough to
     # directly resolve a root itself: that job still belongs entirely to
-    # the certified recursion above, which is what actually guarantees
-    # no root of any width is skipped, however the outer cells are cut.
+    # the certified recursion above, which is designed so that a root's
+    # detection does not depend on how coarsely the outer cells are cut
+    # -- see _e2_derivative_lipschitz_bound's docstring for the precise
+    # sense (exact-arithmetic analytic bound, conservatively inflated in
+    # float64) in which that recursion's coverage is supported.
     n_coarse = 300
     if a_max > 2.0 * a_lo:
         edges = np.geomspace(a_lo, a_max, n_coarse + 1)
@@ -673,6 +756,121 @@ def _first_root_ahead(a_lo, a_max, args):
             return bracket
         e2_prev = e2_hi_i
     return None
+
+
+def _dominant_leading_term_exponent_and_sign(omega_m, omega_r, omega_k,
+                                              omega_de, w0, wa):
+    """
+    As a -> 0+, E(a)^2 = Om*a^-3 + Or*a^-4 + Ok*a^-2 + Ode*g(a), where
+    the CPL dark-energy shape g(a) behaves as a^n_de with n_de =
+    -3*(1+w0+wa) in that limit: ln g(a) = -3(1+w0+wa)*ln(a) - 3*wa*(1-a),
+    and the second term tends to the FINITE constant -3*wa as a->0, so
+    it only contributes a bounded multiplicative factor exp(-3*wa) and
+    never changes which power of a dominates. Whichever single term has
+    the most negative exponent (steepest divergence) therefore fixes
+    the a->0 SIGN of E(a)^2 itself -- a purely algebraic fact about the
+    model's parameters, independent of a_i and of the integrated
+    trajectory. This is a fundamentally different, wider question than
+    early_time_offset_Gyr's "which term dominates AT a_i" check just
+    below: that one compares magnitudes at a specific a_i and can be
+    satisfied even when a different term is the true a->0 asymptote;
+    this one is exact in the strict limit (see Codex Audit 6 P0-1).
+
+    Returns (p_min, sign, tied):
+      p_min  -- the most negative exponent among components with a
+                nonzero coefficient (None if every coefficient is
+                exactly zero).
+      sign   -- +1.0, -1.0, or 0.0: the sign of the SUM of coefficients
+                of every component sharing that most-negative exponent.
+                0.0 only in the knife-edge case where that sum is
+                exactly zero (an exact leading-order cancellation,
+                genuinely indeterminate from this term alone).
+      tied   -- True if more than one component shares p_min.
+    """
+    terms = []
+    if omega_m != 0.0:
+        terms.append((-3.0, omega_m))
+    if omega_r != 0.0:
+        terms.append((-4.0, omega_r))
+    if omega_k != 0.0:
+        terms.append((-2.0, omega_k))
+    if omega_de != 0.0:
+        n_de = -3.0 * (1.0 + w0 + wa)
+        terms.append((n_de, omega_de))
+    if not terms:
+        return None, 0.0, False
+    p_min = min(p for p, _c in terms)
+    coeffs_at_min = [c for p, c in terms if p == p_min]
+    tied = len(coeffs_at_min) > 1
+    s = sum(coeffs_at_min)
+    sign = 1.0 if s > 0.0 else (-1.0 if s < 0.0 else 0.0)
+    return p_min, sign, tied
+
+
+def _big_bang_connectivity_anchor(a_i, omega_m, omega_r, omega_k, omega_de,
+                                   w0, wa, expected_sign):
+    """
+    Find a small anchor scale factor a_anchor << a_i at which the
+    NUMERICALLY evaluated sign of E(a)^2 agrees with the analytically
+    predicted a->0 limiting sign (expected_sign, from
+    _dominant_leading_term_exponent_and_sign), by shrinking a_anchor
+    geometrically (by factors of 1e-3) until they agree or a hard
+    iteration limit / de_density_shape's own conservative policy floor
+    is hit. This anchor then serves as a verified non-negative starting
+    point for _first_root_ahead's certified search up to a_i, which is
+    what actually certifies (or refutes) that a_i sits on a branch
+    continuously connected back toward a=0, with no hidden forbidden
+    interval in between.
+
+    Raises _IndeterminateRootSearch if no anchor small enough to agree
+    with the predicted sign can be reached -- an honest failure, never
+    a silent guess. Shrinking a_anchor further after de_density_shape's
+    own |ln g(a)| policy floor is hit cannot help (it only makes
+    |ln g(a)| larger, not smaller), so that case stops immediately
+    rather than looping to the iteration limit.
+    """
+    a_anchor = a_i * 1.0e-3
+    for _ in range(80):
+        if a_anchor <= 0.0 or not math.isfinite(a_anchor):
+            break
+        try:
+            e2_anchor = float(E2(a_anchor, omega_m, omega_r, omega_k,
+                                  omega_de, w0, wa))
+        except ValueError:
+            break
+        if math.isfinite(e2_anchor) and e2_anchor != 0.0:
+            observed_sign = 1.0 if e2_anchor > 0.0 else -1.0
+            if observed_sign == expected_sign:
+                return a_anchor, e2_anchor
+        a_anchor *= 1.0e-3
+    raise _IndeterminateRootSearch(
+        "Could not find an anchor scale factor close enough to a=0 whose "
+        "numerically evaluated E(a)^2 sign agrees with the analytically "
+        "predicted Big-Bang-limit sign, needed to certify that a_i is "
+        "connected to the true Big Bang along a continuous expanding "
+        "branch. This is an honest limitation of this program's "
+        "float64 search, not evidence that no such branch exists."
+    )
+
+
+_LEGGAUSS_CACHE = {}
+
+
+def _leggauss_cached(n_nodes):
+    """np.polynomial.legendre.leggauss(n) performs an eigenvalue
+    decomposition and is not cheap; both quadrature routines below call
+    it with the same fixed n_nodes on every invocation, and the new
+    interior-sample generation across a turning-point handoff
+    (_advance_to_boundary) can call one of them thousands of times for
+    a single run. The nodes/weights depend only on n_nodes, never on
+    the physics parameters, so they are computed once per n_nodes and
+    reused -- a pure performance optimization with no effect on the
+    numerical result."""
+    cached = _LEGGAUSS_CACHE.get(n_nodes)
+    if cached is None:
+        cached = np.polynomial.legendre.leggauss(n_nodes)
+        _LEGGAUSS_CACHE[n_nodes] = cached
+    return cached
 
 
 def _quad_time_between(a_lo, a_hi, args, n_nodes=60):
@@ -690,7 +888,7 @@ def _quad_time_between(a_lo, a_hi, args, n_nodes=60):
     H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa = args
     if a_hi <= a_lo:
         return 0.0
-    nodes, weights = np.polynomial.legendre.leggauss(n_nodes)
+    nodes, weights = _leggauss_cached(n_nodes)
     aa = 0.5 * (a_hi - a_lo) * nodes + 0.5 * (a_hi + a_lo)
     wq = 0.5 * (a_hi - a_lo) * weights
     e2 = np.asarray(E2(aa, omega_m, omega_r, omega_k, omega_de, w0, wa),
@@ -711,6 +909,32 @@ _BRACKET_NOT_YET_KNOWN = object()  # sentinel distinct from a real bracket
                                     # its own already-computed None (no
                                     # root found) without it being
                                     # mistaken for "not yet computed".
+_INDETERMINATE = object()  # sentinel a caller can use to mark a
+                            # _first_root_ahead search that raised
+                            # _IndeterminateRootSearch, distinct from
+                            # both a real bracket and a certified "no
+                            # root" None -- used where a caller wants to
+                            # handle "could not resolve" as its own
+                            # third outcome rather than letting the
+                            # exception propagate (e.g. the Big Rip
+                            # look-ahead check, which degrades to a
+                            # neutral "not certified" statement instead
+                            # of crashing an otherwise-valid run).
+
+
+_BOUNDARY_INTERIOR_SAMPLES = 120  # interior (t, a) points generated across
+                               # a genuine turning-point handoff, evenly
+                               # spaced in cosmic time (found by bisecting
+                               # the monotonic time-to-turnaround
+                               # quadrature, not in the singularity-
+                               # removing variable u=sqrt(a_turn-a) that
+                               # quadrature itself uses internally) -- see
+                               # _advance_to_boundary. This keeps the
+                               # returned trajectory from silently
+                               # jumping straight from the handoff point
+                               # to the resolved endpoint in one segment
+                               # that can span a large fraction of the
+                               # run's remaining history.
 
 
 def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr,
@@ -720,10 +944,25 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr,
     turning point (or has already overshot one). Determines which of
     three mutually exclusive events actually comes first -- reaching
     a_max, reaching t_max, or a genuine turning point -- and returns
-    (t_next, a_next, event, time_to). a_max and t_max, when given, are
-    treated as hard stopping bounds: a turning point beyond either of
-    them is never reported, exactly as an ordinary (non-turning-point)
-    step would never be allowed to overshoot them.
+    (t_next, a_next, event, time_to, interior_samples). a_max and
+    t_max, when given, are treated as hard stopping bounds: EVERY
+    returned point, including a_next itself, satisfies a_next <= a_max
+    and (when given) t_next <= t_max_gyr -- a turning point beyond
+    either of them is never reported, exactly as an ordinary
+    (non-turning-point) step would never be allowed to overshoot them.
+    This is an unconditional invariant, not a labeling convenience: it
+    is enforced by comparing a_max and a_turn (and t_max_gyr and
+    t_turn) with plain, tolerance-free "<"/">" on the literal values
+    involved, never a floating-point-noise tolerance that could let a
+    reported endpoint exceed a bound the user actually specified (a
+    tolerance-based reclassification tried in an earlier revision, to
+    make a coincidental a_max/a_turn tie read as "turnaround," could
+    return a_next slightly past a_max -- a strictly worse defect than
+    the label-flip it was meant to smooth over, since it broke the
+    hard-bound contract this function exists to guarantee. A user who
+    deliberately sets a_max a hair below a genuine turning point gets
+    exactly what they asked for: stop_reason='a_max' at that literal
+    a_max, not a silently substituted a_turn).
 
     time_to is a callable, time_to(target_a) -> elapsed cosmic time
     from the current a to any target_a in [a, a_next], used by the
@@ -735,6 +974,26 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr,
     (RuntimeError near/at an exact turnaround, silently wrong
     checkpoint times, or a leaked internal exception near t_max).
 
+    interior_samples is a list of (t_i, a_i) pairs strictly between the
+    starting (a, t) and the returned (a_next, t_next), evenly spaced in
+    cosmic time (via bisection on the monotonic time-to-turnaround
+    quadrature -- see the inline comment in the nested interior_samples
+    construction below for why time, not the quadrature's own internal
+    u=sqrt(a_turn-a) substitution variable, is the right spacing choice)
+    when a genuine turning point anchors this handoff (empty when it
+    resolves to an
+    ordinary, non-singular a_max/t_max boundary with no turning point
+    nearby at all, since there the quadrature used for the single
+    remaining segment is already smooth and accurate throughout, with
+    no singularity to resolve finely). Without these, the interval
+    between the point where turning-point handling engaged and the
+    actual stopping point -- which can span a large fraction of the
+    run's remaining time, since the proactive trigger can fire well
+    before the singularity itself -- would be represented by only its
+    two endpoints, silently discarding the trajectory's shape across
+    everything in between even though the reported endpoint time
+    itself is accurate.
+
     bracket, if given (as a bracket pair, or None meaning "confirmed no
     root"), is a pre-computed _first_root_ahead(...) result the caller
     has already determined -- e.g. a proactive probe the main loop
@@ -743,13 +1002,13 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr,
     search. Leaving it at its default performs the search itself,
     exactly as before.
     """
-    def _bisect_for_time(time_to_fn, target_dt, lo, hi):
+    def _bisect_for_time(time_to_fn, target_dt, lo, hi, n_iter=MAX_BISECTIONS):
         # Solve time_to_fn(target_a) == target_dt for target_a in
         # [lo, hi], by bisection on the (monotonically increasing in
         # target_a) quadrature-based time function itself -- never by
         # RK4-stepping toward a target that may sit close to a
         # singularity.
-        for _ in range(MAX_BISECTIONS):
+        for _ in range(n_iter):
             mid = 0.5 * (lo + hi)
             if time_to_fn(mid) < target_dt:
                 lo = mid
@@ -794,8 +1053,8 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr,
         t_to_amax = time_to(a_max)
         if t_max_gyr is not None and t + t_to_amax > t_max_gyr:
             a_next = _bisect_for_time(time_to, t_max_gyr - t, a, a_max)
-            return t_max_gyr, a_next, "t_max", time_to
-        return t + t_to_amax, a_max, "a_max", time_to
+            return t_max_gyr, a_next, "t_max", time_to, []
+        return t + t_to_amax, a_max, "a_max", time_to, []
 
     a_lo, a_hi = bracket
     a_turn = _bisect_root_a(a_lo, a_hi, args)
@@ -809,34 +1068,66 @@ def _advance_to_boundary(a, t, dt, args, a_max, t_max_gyr,
             return t_to_turn
         return t_to_turn - _quad_time_to_turnaround(target_a, a_turn, args)
 
-    # a_max and a_turn are compared with a small relative tolerance,
-    # not strict "<", so that a requested a_max which mathematically
-    # coincides with (or sits an ULP away from) the true turning point
-    # is reliably reported as "turnaround" rather than flipping to
-    # "a_max" purely from floating-point noise in how a_turn happens to
-    # be bisected. _CERT_SAFETY_REL-scale tolerances elsewhere in this
-    # module are tied to the certificate's own arithmetic; this one is
-    # tied to _bisect_root_a's convergence, so it uses the same kind of
-    # generous-but-not-physically-meaningful relative slack: far looser
-    # than that bisection's ~1e-15-relative noise floor, far tighter
-    # than any a_max difference a user would ever choose deliberately.
-    if a_max < a_turn and not math.isclose(
-            a_max, a_turn, rel_tol=1.0e-9, abs_tol=1.0e-12):
+    def interior_samples(a_stop):
+        # Evenly spaced points in COSMIC TIME between the current (t,
+        # a) and (t_stop, a_stop) -- exclusive of both ends, which the
+        # caller supplies -- each located by bisecting the same
+        # monotonic time_to quadrature used for the endpoint itself,
+        # never by RK4-stepping toward a target near the singularity.
+        # An earlier version of this sampled evenly in the
+        # singularity-removing variable u=sqrt(a_turn-a) instead, which
+        # gives good resolution close to a_turn (where the quadrature's
+        # integrand is smooth and bounded in u, so steps there are also
+        # roughly uniform in time) but not necessarily far from it: the
+        # proactive handoff that reaches this function can fire well
+        # before the singularity, leaving a stretch where dt/du is not
+        # constant and a large time gap could still appear. Bisecting
+        # directly on time removes that assumption and bounds the
+        # largest gap in COSMIC TIME across the ENTIRE handoff, which
+        # is what most affects how the returned trajectory looks in a
+        # plot or CSV. A reduced iteration count (well beyond what
+        # placing a cosmetic interior sample needs, though far fewer
+        # than the full precision the actual event boundary requires)
+        # keeps the added cost modest.
+        t_stop = t + time_to(a_stop)
+        if t_stop <= t:
+            return []
+        ts = np.linspace(t, t_stop, _BOUNDARY_INTERIOR_SAMPLES + 2)[1:-1]
+        pts = []
+        lo_a = a
+        for t_target in ts:
+            a_i = _bisect_for_time(time_to, t_target - t, lo_a, a_stop,
+                                    n_iter=40)
+            pts.append((t_target, a_i))
+            lo_a = a_i  # target_a is monotonically increasing in t, so
+                        # each subsequent bisection can start from here
+        return pts
+
+    # a_max and a_turn (and, below, t_max_gyr and t_turn) are compared
+    # with plain, tolerance-free "<"/">": a_max is a HARD bound on the
+    # returned trajectory (see the docstring above), so a requested
+    # a_max even a single ULP below the true a_turn must still return
+    # exactly that a_max, not a substituted a_turn that would exceed
+    # it. A user who wants "turnaround" reported instead can simply
+    # request an a_max at or beyond a_turn.
+    if a_max < a_turn:
         t_to_amax = time_to(a_max)
         if t_max_gyr is not None and t + t_to_amax > t_max_gyr:
             a_next = _bisect_for_time(time_to, t_max_gyr - t, a, a_max)
-            return t_max_gyr, a_next, "t_max", time_to
-        return t + t_to_amax, a_max, "a_max", time_to
+            return t_max_gyr, a_next, "t_max", time_to, interior_samples(a_next)
+        return t + t_to_amax, a_max, "a_max", time_to, interior_samples(a_max)
 
     t_turn = t + t_to_turn
     if t_max_gyr is not None and t_turn > t_max_gyr:
         # The turning point is real and within a_max, but occurs later
         # than the requested t_max: t_max stops the run first, still on
-        # the smooth pre-turnaround branch.
+        # the smooth pre-turnaround branch. Compared with plain "<"/">"
+        # for the same hard-bound reason as a_max above -- t_max is
+        # never overridden by a near-tie with t_turn.
         a_next = _bisect_for_time(time_to, t_max_gyr - t, a, a_turn)
-        return t_max_gyr, a_next, "t_max", time_to
+        return t_max_gyr, a_next, "t_max", time_to, interior_samples(a_next)
 
-    return t_turn, a_turn, "turnaround", time_to
+    return t_turn, a_turn, "turnaround", time_to, interior_samples(a_turn)
 
 
 def _quad_time_to_turnaround(a_lo, a_turn, args, n_nodes=60):
@@ -859,7 +1150,7 @@ def _quad_time_to_turnaround(a_lo, a_turn, args, n_nodes=60):
     u0 = math.sqrt(max(a_turn - a_lo, 0.0))
     if u0 <= 0.0:
         return 0.0
-    nodes, weights = np.polynomial.legendre.leggauss(n_nodes)
+    nodes, weights = _leggauss_cached(n_nodes)
     u = 0.5 * u0 * (nodes + 1.0)
     wq = 0.5 * u0 * weights
     aa = a_turn - u ** 2
@@ -891,6 +1182,37 @@ def _quad_time_to_turnaround(a_lo, a_turn, args, n_nodes=60):
     e2 = np.where(e2 <= 0.0, 1.0e-14, e2)
     integrand = 2.0 * u / (aa * H0_pgyr * np.sqrt(e2))
     return float(np.sum(wq * integrand))
+
+
+def _bisect_time_to_turnaround_for_a(delta_t, a_turn, args, a_lo_bound,
+                                      n_iter=MAX_BISECTIONS):
+    """
+    Invert _quad_time_to_turnaround: given a target time-to-turnaround
+    delta_t (assumed to lie in [0, _quad_time_to_turnaround(a_lo_bound,
+    a_turn, args)] -- the caller checks this), find the scale factor
+    a_source in [a_lo_bound, a_turn] such that
+    _quad_time_to_turnaround(a_source, a_turn, args) == delta_t.
+
+    _quad_time_to_turnaround is exactly monotonically DEcreasing in its
+    a_lo argument (a scale factor closer to a_turn always has less time
+    left to reach it), so this is a well-posed inversion by bisection on
+    that function's OWN OUTPUT -- reusing the same accurate,
+    singularity-aware quadrature already used to go forward from a
+    given a to a_turn, rather than needing any new physics or a separate
+    "mirror quadrature." This is what resolves the exact contracting-
+    branch endpoint at a requested t_max (see Copilot Audit 6 P0-1 /
+    Codex Audit 6 P1-1, which independently flagged the same defect: an
+    earlier version merely filtered the mirrored samples to t <= t_max
+    without inserting the actual state at t_max).
+    """
+    lo, hi = a_lo_bound, a_turn
+    for _ in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        if _quad_time_to_turnaround(mid, a_turn, args) > delta_t:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
 
 
 def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
@@ -968,6 +1290,63 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
             "expanding branch there. Increase a_i or change the "
             "density parameters."
         )
+
+    # E(a_i)^2 > 0 alone does NOT mean a_i lies on a branch continuously
+    # connected back to the true Big Bang at a=0: there can be a hidden
+    # forbidden interval (E(a)^2 < 0 between two nearby roots) strictly
+    # between a=0 and a_i, or E(a)^2 itself can tend to a NEGATIVE value
+    # as a->0 for this parameter combination even though it happens to
+    # be positive at a_i. Both are certified against here, reusing the
+    # same certified search machinery _first_root_ahead already uses to
+    # look for a FUTURE turning point, pointed instead at the interval
+    # behind the starting point (see Codex Audit 6 P0-1).
+    args0 = (H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa)
+    p_min, expected_sign, _tied = _dominant_leading_term_exponent_and_sign(
+        omega_m, omega_r, omega_k, omega_de, w0, wa)
+    if p_min is not None:
+        if expected_sign == 0.0:
+            raise ValueError(
+                "This parameter combination has an exact cancellation "
+                "among the components that jointly dominate as a->0 "
+                "(their coefficients sum to zero at the leading power "
+                "of a), so the sign of E(a)^2 in the Big-Bang limit "
+                "cannot be determined from the leading term alone, and "
+                "whether a_i is connected to a genuine Big Bang cannot "
+                "be certified. Adjust the density parameters slightly "
+                "to break the tie."
+            )
+        if expected_sign < 0.0:
+            raise ValueError(
+                f"E(a)^2 tends to a negative value as a->0 for this "
+                "parameter combination (the component that dominates "
+                "in that limit has a negative coefficient), even though "
+                f"E(a_i={a_i:.3g})^2 > 0: a_i sits on an isolated "
+                "expanding branch with no continuous path back to the "
+                "true Big Bang at a=0. This model has no valid history "
+                "before some earlier turning point; increase a_i past "
+                "that point, or change the density parameters."
+            )
+        # _IndeterminateRootSearch is deliberately let through UNCHANGED
+        # here (not wrapped in a ValueError) -- it already carries a
+        # clear message, and it is the same tri-state, loud-failure
+        # search used elsewhere in this module (e.g. for a future
+        # turnaround), which callers and tests already distinguish by
+        # exception type rather than by parsing a wrapped message.
+        a_anchor, _e2_anchor = _big_bang_connectivity_anchor(
+            a_i, omega_m, omega_r, omega_k, omega_de, w0, wa,
+            expected_sign)
+        bracket = _first_root_ahead(a_anchor, a_i, args0)
+        if bracket is not None:
+            lo_b, hi_b = bracket
+            raise ValueError(
+                "This parameter combination has a hidden forbidden "
+                f"interval (E(a)^2 < 0 somewhere between a={lo_b:.6g} "
+                f"and a={hi_b:.6g}) strictly between the true Big Bang "
+                f"(a=0) and a_i={a_i:.3g}: E(a_i)^2 > 0 does not by "
+                "itself mean a_i is on a branch continuously connected "
+                "back to a=0. Increase a_i to sit past this forbidden "
+                "interval, or change the density parameters."
+            )
 
     t_i, early_regime, dominance = early_time_offset_Gyr(
         a_i, H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa)
@@ -1131,8 +1510,17 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
             # is not searched for a second time; a reactive-only
             # overshoot (root_bracket left at its "not yet known"
             # sentinel here) still gets a fresh search of its own.
-            t_next, a_next, event, time_to = _advance_to_boundary(
+            t_next, a_next, event, time_to, interior = _advance_to_boundary(
                 a, t, dt, args, a_max, t_max_gyr, bracket=root_bracket)
+            # interior holds any fine-grained (t, a) samples generated
+            # across a genuine turning-point handoff (see
+            # _advance_to_boundary): without these, this segment would
+            # be represented only by its two endpoints, even though it
+            # can span a large fraction of the run's remaining time.
+            # Merge them with any checkpoint that also falls in this
+            # same interval, all in increasing-a order, before the
+            # final endpoint itself.
+            merged_points = list(interior)
             for c in list(checkpoints):
                 if a < c <= a_next:
                     # Use the same quadrature this function already used
@@ -1144,9 +1532,12 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
                     # return a plausible-looking but wrong checkpoint time.
                     t_c = t + time_to(c)
                     checkpoint_times[c] = t_c
-                    t_list.append(t_c)
-                    a_list.append(c)
+                    merged_points.append((t_c, c))
                     checkpoints.remove(c)
+            merged_points.sort(key=lambda pt: pt[1])
+            for t_pt, a_pt in merged_points:
+                t_list.append(t_pt)
+                a_list.append(a_pt)
             t_list.append(t_next)
             a_list.append(a_next)
             t, a = t_next, a_next
@@ -1193,17 +1584,79 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
     n_forward = a_arr.size
 
     total_lifetime_gyr = None
-    if turnaround is not None and continue_collapse:
+    if turnaround is not None:
         # Exact time-reversal symmetry of the Friedmann equation: E(a)^2
-        # depends on a alone, never on the sign of a_dot, so the
-        # contracting branch is the mirror image of the expanding one
-        # about the turnaround. No re-integration is needed.
+        # depends on a alone, never on the sign of a_dot, so the total
+        # lifetime of a recollapsing model (twice the time to
+        # turnaround) is known exactly the instant a genuine turnaround
+        # is found -- independent of whether the mirrored contracting-
+        # branch ARRAY data below is also generated. An earlier version
+        # left total_lifetime_gyr as None whenever --continue_collapse
+        # was not requested, silently withholding a fundamental physical
+        # property of the model from the run summary even though it was
+        # already known exactly (Gemini Audit 6).
         t_turn = turnaround["t_turn_gyr"]
-        t_mirror = 2.0 * t_turn - t_arr[::-1][1:]
-        a_mirror = a_arr[::-1][1:]
-        t_arr = np.concatenate([t_arr, t_mirror])
-        a_arr = np.concatenate([a_arr, a_mirror])
         total_lifetime_gyr = 2.0 * t_turn
+
+        if continue_collapse:
+            # The contracting branch is the mirror image of the
+            # expanding one about the turnaround. No re-integration is
+            # needed.
+            t_mirror = 2.0 * t_turn - t_arr[::-1][1:]
+            a_mirror = a_arr[::-1][1:]
+            # t_max_gyr, when given, is a hard bound on the RETURNED
+            # trajectory on either branch -- mirroring must not silently
+            # extend the arrays past a time limit the forward
+            # integration itself would have respected. This matters
+            # whenever the turnaround occurs before t_max_gyr (so the
+            # forward pass legitimately reports "turnaround," not
+            # "t_max") but t_max_gyr itself falls strictly on the
+            # CONTRACTING branch, i.e. t_turn < t_max_gyr < 2*t_turn.
+            if t_max_gyr is not None:
+                keep = t_mirror <= t_max_gyr
+                if not np.all(keep):
+                    t_mirror = t_mirror[keep]
+                    a_mirror = a_mirror[keep]
+                    # Merely dropping every mirrored sample past t_max
+                    # (as an earlier version did) silently returned a
+                    # trajectory ending strictly BEFORE t_max while still
+                    # claiming stop_reason="t_max" (Copilot Audit 6 P0-1
+                    # / Codex Audit 6 P1-1, independently). Resolve the
+                    # EXACT contracting-branch state at t_max_gyr
+                    # instead: by the same time-reversal symmetry used
+                    # to build t_mirror above, the contracting state at
+                    # t_max_gyr is the mirror image of the EXPANDING
+                    # state at t_source = 2*t_turn - t_max_gyr, whose
+                    # scale factor is found by inverting the existing,
+                    # accurate _quad_time_to_turnaround quadrature (never
+                    # by RK4-stepping near the singularity) -- no new
+                    # physics or a separate "mirror quadrature" needed.
+                    a_turn_val = turnaround["a_turn"]
+                    delta_t = t_max_gyr - t_turn
+                    a_lo_bound = float(a_arr[0])
+                    max_delta_t = _quad_time_to_turnaround(
+                        a_lo_bound, a_turn_val, args0)
+                    if delta_t < 0.0 or delta_t > max_delta_t:
+                        raise ValueError(
+                            f"--t_max ({t_max_gyr:.6g} Gyr) falls on the "
+                            "contracting branch but its mirrored source "
+                            f"point precedes a_i={a_lo_bound:.3g}, "
+                            "outside the domain of this run's computed "
+                            "trajectory; choose a smaller --t_max or a "
+                            "smaller --a_i."
+                        )
+                    a_source = _bisect_time_to_turnaround_for_a(
+                        delta_t, a_turn_val, args0, a_lo_bound)
+                    t_mirror = np.concatenate([t_mirror, [t_max_gyr]])
+                    a_mirror = np.concatenate([a_mirror, [a_source]])
+                    # The returned trajectory was truncated by t_max on
+                    # the contracting branch, even though the forward
+                    # pass reached a genuine turnaround -- the RETURNED
+                    # history stops at t_max, short of the full mirrored
+                    # lifetime recorded above in total_lifetime_gyr.
+                    stop_reason = "t_max"
+            t_arr = np.concatenate([t_arr, t_mirror])
+            a_arr = np.concatenate([a_arr, a_mirror])
 
     # H = a_dot / a is positive on the expanding branch and negative on
     # the mirrored contracting branch; E(a)^2 = (H/H0)^2 cannot carry
@@ -1281,15 +1734,25 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
             "closed-FRW toy model."
         )
 
-    a_eq_rm = None
-    if omega_m > 0.0 and omega_r > 0.0:
-        a_eq_rm = omega_r / omega_m
-
     # Search only out to the scale factor the run actually reached (a),
     # not the requested a_max: if the run stopped early at a genuine
     # turnaround or at --t_max, a milestone reported between the reached
     # 'a' and a_max would describe a point the trajectory never got to.
+    # a_eq_rm = omega_r/omega_m is a pure algebraic identity, computed
+    # independently of the integrated trajectory -- but it still
+    # describes a scale factor, and the SAME reachability rule that
+    # already gated a_eq_mde/a_accel below (both found by scanning only
+    # up to a_reached) must also apply here: reporting a_eq_rm beyond
+    # a_reached would claim a milestone the model's own history never
+    # got to, e.g. a model that recollapses at a~1 has no meaningful
+    # "matter-radiation equality at a=100" (see Codex Audit 6 P1-3).
     a_reached = min(a, a_max)
+    a_eq_rm = None
+    if omega_m > 0.0 and omega_r > 0.0:
+        _a_eq_rm_candidate = omega_r / omega_m
+        if _a_eq_rm_candidate <= a_reached:
+            a_eq_rm = _a_eq_rm_candidate
+
     a_eq_mde = _find_sign_change(
         lambda aa: (omega_fractions(aa, omega_m, omega_r, omega_k, omega_de, w0, wa)[0]
                     - omega_fractions(aa, omega_m, omega_r, omega_k, omega_de, w0, wa)[3]),
@@ -1300,16 +1763,123 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         1.0e-6, a_reached)
 
     big_rip_gyr = None
+    # fate_status/future_turnaround_a/fate_search_limit_a are structured,
+    # machine-readable fields distinguishing the model's ultimate
+    # PHYSICAL FATE from stop_reason (why the RETURNED trajectory
+    # stopped -- e.g. it can stop at t_max while fate_status is still
+    # "recollapse"). Earlier this fate distinction lived only in the
+    # human-readable warnings strings above, which neither --compare
+    # mode's summary table nor a CSV consumer could parse (see Copilot
+    # Audit 6 P2-2 / Codex Audit 6 P1-2). Values: "recollapse" (a
+    # turnaround was found within the requested run), "big_rip",
+    # "future_recollapse" (certified to recollapse beyond the requested
+    # a_max/t_max, so never shown in this run's own trajectory), or
+    # "unresolved" (the phantom-fate search itself could not certify
+    # either outcome); None when none of these fate questions apply
+    # (e.g. w0 >= -1, or omega_de <= 0).
+    fate_status = "recollapse" if turnaround is not None else None
+    future_turnaround_a = None
+    fate_search_limit_a = None
     if wa == 0.0 and w0 < -1.0 and omega_de > 0.0 and turnaround is None and age_today_gyr is not None:
-        m = -1.5 * (1.0 + w0)
-        big_rip_gyr = age_today_gyr + 1.0 / (m * H0_pgyr * math.sqrt(omega_de))
-        warnings.append(
-            "w0 < -1 (phantom dark energy): the DE density grows without "
-            "bound, driving a's expansion rate to infinity at a finite "
-            "future time (a 'Big Rip'). The quoted t_rip is an analytic "
-            "estimate that neglects the (by then negligible) matter and "
-            "radiation contributions and assumes wa=0."
-        )
+        # turnaround is None here means only that the REQUESTED run (up
+        # to a_max/t_max) did not encounter a turning point before
+        # stopping -- NOT that no root of E(a)^2=0 exists at all beyond
+        # that point. A closed (or otherwise negative-curvature-
+        # dominated) phantom model can still recollapse at some a
+        # beyond the requested boundary, before the growing phantom
+        # term ever takes over; reporting a Big Rip for such a model
+        # would state a fate its expanding branch can never actually
+        # reach. This is certified, not assumed: the phantom term
+        # omega_de*a^p (p=-3(1+w0)>0 since w0<-1 and wa=0, so g(a) is a
+        # pure power law) grows without bound, while every OTHER
+        # component's magnitude is non-increasing for a>=1 -- so a
+        # cheap, closed-form upper bound on all of them gives a finite
+        # scale a_dom beyond which the phantom term is guaranteed to
+        # dominate, and hence E(a)^2>0, for every larger a as well. The
+        # same certified search used for ordinary turnaround detection
+        # then only has to resolve the finite stretch from here to
+        # a_dom.
+        #
+        # Only NEGATIVE curvature can ever drive E(a)^2 negative for
+        # a>=1: matter and radiation have non-negative coefficients and
+        # their a^-3/a^-4 contributions are non-increasing there, so
+        # they can never overcome a growing phantom term. An earlier
+        # version summed in abs(omega_m)+abs(omega_r)+abs(omega_k) as
+        # "hazards" here, which was not merely numerically unsafe but
+        # substantively wrong: including non-negative components that
+        # can never cause a future recollapse. The dominance-scale
+        # exponent below is 1/(p_phantom+2), not 1/p_phantom: the "+2"
+        # covers curvature's own a^-2 falloff directly (rather than
+        # bounding it by its value at a=1 the way the old formula
+        # effectively did), and it stays bounded (<=0.5) even as
+        # w0->-1+ (p_phantom->0+) -- unlike 1/p_phantom, which diverges
+        # in exactly that limit and could overflow float64 when used to
+        # raise a power directly (see Codex Audit 6 P0-2's w0=-1.000001
+        # reproducer). Everything here is worked out, and evaluated, in
+        # log space so no intermediate power large enough to overflow
+        # is ever actually formed.
+        args_full = (H0_pgyr, omega_m, omega_r, omega_k, omega_de, w0, wa)
+        a_probe = max(a, 1.0)
+        p_phantom = -3.0 * (1.0 + w0)
+        c_other = -omega_k if omega_k < 0.0 else 0.0
+        a_dom_cap = max(1.0e12, 1.0e6 * a_probe)
+        log_a_probe = math.log(a_probe)
+        log_a_dom_cap = math.log(a_dom_cap)
+        exponent = 1.0 / (p_phantom + 2.0)
+        if c_other <= 0.0:
+            dominance_certain = True
+            a_dom = a_probe
+        else:
+            log_a_dom_raw = (math.log(c_other) - math.log(omega_de)) * exponent
+            dominance_certain = log_a_dom_raw <= log_a_dom_cap
+            log_a_dom = min(max(log_a_dom_raw, log_a_probe), log_a_dom_cap)
+            a_dom = math.exp(log_a_dom)
+
+        try:
+            future_bracket = _first_root_ahead(a_probe, a_dom, args_full)
+        except _IndeterminateRootSearch:
+            future_bracket = _INDETERMINATE
+
+        fate_search_limit_a = a_dom
+        if future_bracket is None and dominance_certain:
+            m = -1.5 * (1.0 + w0)
+            big_rip_gyr = age_today_gyr + 1.0 / (m * H0_pgyr * math.sqrt(omega_de))
+            fate_status = "big_rip"
+            warnings.append(
+                "w0 < -1 (phantom dark energy): checked, out to the "
+                "scale factor beyond which the phantom term is "
+                "guaranteed to permanently dominate every other "
+                "component, that the expanding branch does not "
+                "recollapse first. The DE density grows without bound, "
+                "driving a's expansion rate to infinity at a finite "
+                "future time (a 'Big Rip'). The quoted t_rip is an "
+                "analytic estimate that neglects the (by then "
+                "negligible) matter and radiation contributions and "
+                "assumes wa=0."
+            )
+        elif isinstance(future_bracket, tuple):
+            a_lo_f, a_hi_f = future_bracket
+            a_turn_future = _bisect_root_a(a_lo_f, a_hi_f, args_full)
+            fate_status = "future_recollapse"
+            future_turnaround_a = a_turn_future
+            warnings.append(
+                "w0 < -1 (phantom dark energy), but this model's "
+                f"expanding branch recollapses at a_turn~{a_turn_future:.6g} "
+                "-- beyond the requested --a_max/--t_max, so not shown "
+                "in this run's trajectory -- before it ever reaches the "
+                "phantom-dominated regime. No Big Rip occurs for this "
+                "model; increase --a_max or --t_max to see the "
+                "recollapse directly."
+            )
+        else:
+            fate_status = "unresolved"
+            warnings.append(
+                "w0 < -1 (phantom dark energy), but this program could "
+                "not certify, within a practical search range, whether "
+                "the expanding branch recollapses before entering the "
+                "phantom-dominated regime. No Big Rip time is reported "
+                "for this model."
+            )
 
     if abs(omega_k) > 0.05:
         warnings.append(
@@ -1340,7 +1910,28 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
         stop_reason=stop_reason,
         total_lifetime_gyr=total_lifetime_gyr,
         big_rip_gyr=big_rip_gyr,
-        n_steps=len(a_arr),
+        # Structured fate fields -- see the comment where fate_status is
+        # first initialized, above, for the full description of each
+        # value. These let --compare mode and CSV consumers report the
+        # model's ultimate physical fate without parsing prose warnings.
+        fate_status=fate_status,
+        future_turnaround_a=future_turnaround_a,
+        fate_search_limit_a=fate_search_limit_a,
+        # These are two different counts, kept distinct rather than
+        # conflated under one ambiguous "n_steps": n_forward_iterations
+        # is the actual RK4 loop counter (how many times the ODE was
+        # advanced) -- renamed from n_integration_steps (Codex Audit 6
+        # P2-4) because "integration steps" read as though it might
+        # also cover the quadrature-based turning-point/handoff work
+        # elsewhere in this function, which it never did -- while
+        # n_output_samples is the length of the returned arrays, which
+        # also includes inserted checkpoints (e.g. a=1) and, with a
+        # genuine turning-point handoff, the fine-grained interior
+        # samples generated across it, and, with --continue_collapse,
+        # the mirrored contracting-branch points that were never
+        # independently integrated at all.
+        n_forward_iterations=steps,
+        n_output_samples=len(a_arr),
         model_version=MODEL_VERSION,
         warnings=warnings,
     )

@@ -39,7 +39,8 @@ Examples
   # A closed universe that recollapses; mirrored back down to a_i by default
   python main.py --mode evolve --omega_m 1.5 --omega_de 0.0 --continue_collapse
 
-  # Phantom dark energy: w0 < -1 drives a future Big Rip
+  # Phantom dark energy: w0 < -1 can lead to a future Big Rip, if no
+  # earlier recollapse intervenes first
   python main.py --mode evolve --w0 -1.2 --a_max 60
 
   # Compare several textbook cosmologies side by side
@@ -107,9 +108,10 @@ def parse_args():
     g.add_argument("--w0", type=float, default=-1.0, metavar="W0",
                    help="dark-energy equation of state AT a=1 (today); -1 "
                         "is a cosmological constant, <-1 contributes "
-                        "toward phantom behavior, >-1 toward quintessence "
-                        "-- if --wa is nonzero this describes only today, "
-                        "not the whole history")
+                        "toward phantom behavior, -1<w0<-1/3 is "
+                        "quintessence-like, w0>=-1/3 does not accelerate "
+                        "the expansion on its own -- if --wa is nonzero "
+                        "this describes only today, not the whole history")
     g.add_argument("--wa", type=float, default=0.0, metavar="WA",
                    help="CPL evolution of the dark-energy equation of "
                         "state, w(a)=w0+wa(1-a); 0 means constant w0")

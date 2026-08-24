@@ -201,7 +201,13 @@ def _print_evolve_summary(s):
     if s["big_rip_gyr"] is not None:
         print(f"  Estimated Big Rip time: {s['big_rip_gyr']:.4g} Gyr "
               f"(i.e. {s['big_rip_gyr'] - (s['age_today_gyr'] or 0):.4g} Gyr from today)")
-    print(f"  Integration steps     : {s['n_steps']:,}")
+    if s.get("fate_status") == "future_recollapse":
+        print(f"  Fate (beyond this run): future recollapse near "
+              f"a~{_fmt(s.get('future_turnaround_a'))}")
+    elif s.get("fate_status") == "unresolved":
+        print("  Fate (beyond this run): unresolved (see warnings)")
+    print(f"  Integration steps     : {s['n_forward_iterations']:,}")
+    print(f"  Output samples        : {s['n_output_samples']:,}")
     print(f"  Run stopped because   : {s.get('stop_reason') or 'n/a'} "
           "(a_max reached / t_max reached / genuine turnaround)")
     _print_warnings(s["warnings"])
@@ -219,16 +225,34 @@ def _run_evolve(kw, outdir, csvdir, dpi, lw):
 
     if csvdir is not None:
         s = result["summary"]
+        ta = s.get("turnaround")
         prov = _provenance("evolve", {
             k: kw[k] for k in ("H0", "omega_m", "omega_r", "omega_de", "w0",
                                "wa", "a_i", "a_max", "t_max", "step_frac",
                                "continue_collapse")
         }, results={
             "stop_reason": s.get("stop_reason"),
+            # omega_de as GIVEN on the command line can be None (flat,
+            # unspecified); this is the actual numeric value the model
+            # used, resolved by the closure relation -- distinct from
+            # the raw input echoed in the parameters section above, and
+            # what a script parsing this CSV programmatically actually
+            # needs.
+            "omega_de0_resolved": s.get("omega_de"),
             "omega_k0_derived": s.get("omega_k"),
             "age_today_gyr": s.get("age_today_gyr"),
-            "turnaround": s.get("turnaround"),
+            # Serialized as separate scalar keys, not a nested Python
+            # dict string, so a machine reading this header does not
+            # need to parse Python literal syntax to recover them.
+            "a_turn": ta["a_turn"] if ta is not None else None,
+            "t_turn_gyr": ta["t_turn_gyr"] if ta is not None else None,
             "total_lifetime_gyr": s.get("total_lifetime_gyr"),
+            "big_rip_gyr": s.get("big_rip_gyr"),
+            "fate_status": s.get("fate_status"),
+            "future_turnaround_a": s.get("future_turnaround_a"),
+            "fate_search_limit_a": s.get("fate_search_limit_a"),
+            "n_forward_iterations": s.get("n_forward_iterations"),
+            "n_output_samples": s.get("n_output_samples"),
         })
         _write_csv(csvdir, "cosmo_evolve", EVOLVE_HEADER,
                   _evolve_rows(result), comments=prov)
@@ -259,6 +283,30 @@ def _cell(x, width, prec=4):
     return f"{text:>{width}}"
 
 
+def _fate_note(s):
+    """
+    Short human-readable fate label for --compare mode's summary table
+    and CSV, built from the structured fate_status field (see
+    physics_cosmo.integrate_evolution) rather than re-deriving it from
+    turnaround/big_rip_gyr alone -- the latter left the
+    diagnosed-but-out-of-range "future_recollapse" case (a phantom model
+    certified to recollapse beyond this run's --a_max/--t_max) with a
+    blank note even though its fate WAS known, and left "unresolved"
+    indistinguishable from "no fate question applies here at all"
+    (Codex Audit 6 P1-2 / Copilot Audit 6 P2-2).
+    """
+    status = s.get("fate_status")
+    if status == "recollapse":
+        return "recollapses"
+    if status == "big_rip":
+        return "Big Rip ahead"
+    if status == "future_recollapse":
+        return "future recollapse"
+    if status == "unresolved":
+        return "fate unresolved"
+    return ""
+
+
 def _print_compare_summary(names, results):
     _head("compare")
     hdr = f"  {'name':<14}{'age_Gyr':>10}{'H0*t0':>9}{'q0':>9}{'z_accel':>10}{'note':>14}"
@@ -267,11 +315,7 @@ def _print_compare_summary(names, results):
     for name, r in zip(names, results):
         s = r["summary"]
         h0t0 = (s["age_today_gyr"] / s["H0_inv_gyr"]) if s["age_today_gyr"] else None
-        note = ""
-        if s["turnaround"] is not None:
-            note = "recollapses"
-        elif s["big_rip_gyr"] is not None:
-            note = "Big Rip ahead"
+        note = _fate_note(s)
         print(f"  {name:<14}{_cell(s['age_today_gyr'], 10)}"
               f"{_cell(h0t0, 9)}{_cell(s['q0'], 9, 3)}"
               f"{_cell(s['z_accel'], 10)}{note:>14}")
@@ -313,7 +357,7 @@ def _run_compare(kw, outdir, csvdir, dpi, lw):
                 h0t0 if h0t0 == "" else f"{h0t0:.6g}",
                 s["q0"] if s["q0"] is None else f"{s['q0']:.6g}",
                 "" if s["z_accel"] is None else f"{s['z_accel']:.6g}",
-                "recollapses" if s["turnaround"] else ("big_rip" if s["big_rip_gyr"] else ""),
+                s.get("fate_status") or "",
             ])
         _write_csv(csvdir, "cosmo_compare_ages",
                   ["preset", "label", "H0", "omega_m", "omega_r", "omega_k",
@@ -340,11 +384,17 @@ def _run_compare(kw, outdir, csvdir, dpi, lw):
 # ======================================================================
 # Mode: age (parameter scan)
 # ======================================================================
-_AGE_SCAN_A_MAX = 5.0  # large enough that recollapse is detected wherever it
-                        # physically occurs in the documented scan ranges
+_AGE_SCAN_A_MAX = 5.0  # a finite look-ahead horizon, large enough to catch
+                        # recollapse in the exercises this program documents
                         # (a_max=1.05, used previously, could never see a
                         # turnaround at all: even the mildest recollapsing
-                        # cases in these exercises have a_turn well above 1.05)
+                        # cases in these exercises have a_turn well above
+                        # 1.05) -- but an arbitrary, user-chosen scan range
+                        # can always place a genuine a_turn beyond ANY fixed
+                        # horizon. This is documented as exactly that: a
+                        # finite-horizon convention (see recollapses_by_a5
+                        # below and the help file), not a claim that every
+                        # possible recollapse is caught.
 
 
 def _run_age(kw, outdir, csvdir, dpi, lw):

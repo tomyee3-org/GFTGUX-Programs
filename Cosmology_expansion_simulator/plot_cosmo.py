@@ -109,7 +109,7 @@ def plot_evolve(result, outdir=None, dpi=150, lw=1.6, figsize=(13, 10)):
     if s["omega_de"] != 0:
         ax3.plot(a, Ode, color=C_DE, lw=lw, label=r"$\Omega_{DE}(a)$")
     ax3.plot(a, Om + Or + Ok + Ode, color=C_SUM, lw=0.8, ls=":",
-             label=r"sum (=1 always)")
+             label=r"sum (=1 identically, except NaN at a turnaround)")
     if s["a_eq_rm"] is not None:
         ax3.axvline(s["a_eq_rm"], color=C_R, lw=0.8, ls="--", alpha=0.7)
     if s["a_eq_mde"] is not None:
@@ -119,6 +119,30 @@ def plot_evolve(result, outdir=None, dpi=150, lw=1.6, figsize=(13, 10)):
     ax3.set_xlabel("Scale factor $a$")
     ax3.set_ylabel(r"$\Omega_i(a)$")
     ax3.set_title("Fractional energy-density content")
+    # Omega_i(a) is only masked to NaN where E(a)^2<=0 exactly (see
+    # physics_cosmo.omega_fractions); a point that is genuinely on the
+    # expanding branch with a small but strictly positive E(a)^2 -- a
+    # loitering model's near-double-root dip -- now correctly plots its
+    # large but finite Omega values instead of being hidden as NaN
+    # (Codex Audit 6 P2-1). Left unclamped, a single such spike (which
+    # can be many orders of magnitude) would flatten the rest of this
+    # panel to an unreadable line. Clip the DISPLAYED y-range only --
+    # the underlying data (and the CSV export) are untouched -- to keep
+    # the ordinary Omega_i in [0, 1] regime readable; a callout notes
+    # when a spike has been clipped from view.
+    y_lo, y_hi = -0.3, 1.3
+    clipped = False
+    for series in (Om, Or, Ok, Ode):
+        finite = series[np.isfinite(series)]
+        if finite.size and (finite.min() < y_lo or finite.max() > y_hi):
+            clipped = True
+    ax3.set_ylim(y_lo, y_hi)
+    if clipped:
+        ax3.text(0.02, 0.02,
+                  "some Omega_i(a) excursions clipped from view\n"
+                  "(full values remain in the returned data/CSV)",
+                  transform=ax3.transAxes, fontsize=7, color="0.4",
+                  va="bottom", ha="left")
     ax3.legend(fontsize=8)
     ax3.grid(True, lw=0.3, alpha=0.5, which="both")
 
