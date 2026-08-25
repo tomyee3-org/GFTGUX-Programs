@@ -44,10 +44,70 @@ Schwarzschild radii, metres, milliseconds and multiples of standard
 gravity g.
 """
 
+import hashlib
+from pathlib import Path
 import math
 import numpy as np
 
 MODEL_VERSION = "1.1.0"
+
+BUILD_ID_COVERS = (
+    "physics_bh.py",
+    "driver_bh.py",
+    "main.py",
+    "plot_bh.py",
+)
+
+def _compute_build_id():
+    """A short, content-derived build identifier (Copilot Audit 7 P1-2).
+
+    This project has no external version-control system available at
+    build time, so MODEL_VERSION alone cannot distinguish two builds
+    that share the same version string but differ in source content
+    (e.g. a local patch applied without remembering to bump
+    MODEL_VERSION). This hashes the actual on-disk source of the core
+    computational modules listed in BUILD_ID_COVERS, giving CSV
+    provenance and --version output a machine-checkable answer to "did
+    these two runs use byte-identical code?" without requiring git or
+    any other source-control tooling. It degrades to "unknown" (never
+    raises) if the source files cannot be located or read -- e.g.
+    inside a frozen/zipped distribution -- since a missing build id
+    should never prevent the program from running.
+
+    Two robustness fixes over an earlier version, both catching real
+    ways two semantically identical checkouts could otherwise hash
+    differently or collide:
+
+    - Read in TEXT mode (universal-newline translation) and re-encoded
+      to UTF-8 before hashing, not raw bytes: a checkout with CRLF line
+      endings (e.g. from Windows) would otherwise hash differently from
+      the exact same source checked out with LF endings.
+    - Each file's name and byte length are hashed immediately before
+      its own content, not just all four files' bytes concatenated back
+      to back: without that framing, moving a shared byte sequence
+      across a file boundary (e.g. content shifted from the end of one
+      file to the start of the next) can reproduce the exact same
+      concatenated byte stream and therefore the same hash, even though
+      the two files individually differ.
+    """
+    import hashlib
+    import os
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        h = hashlib.sha256()
+        for name in BUILD_ID_COVERS:
+            with open(os.path.join(here, name), "r", encoding="utf-8",
+                      newline=None) as f:
+                content = f.read().encode("utf-8")
+            h.update(name.encode("utf-8"))
+            h.update(len(content).to_bytes(8, "big"))
+            h.update(content)
+        return h.hexdigest()[:12]
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+
+BUILD_ID = _compute_build_id()
+
 
 # ----------------------------------------------------------------------
 # Physical constants (SI, CODATA / IAU nominal values)

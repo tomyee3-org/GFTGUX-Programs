@@ -72,8 +72,13 @@ def parse_args():
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--version", action="version",
-                   version=f"Black_hole_spacetime_visualizer {physics_bh.MODEL_VERSION}")
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"Black_hole_spacetime_visualizer "
+                f"{physics_bh.MODEL_VERSION} "
+                f"(build {physics_bh.BUILD_ID})",
+    )                
     p.add_argument("--mode", choices=driver_bh.MODES, default="embed",
                    help="which calculation to run")
 

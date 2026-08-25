@@ -103,7 +103,9 @@ PARAMS_BY_MODE = {
 def _provenance(mode, kw):
     """Comment lines recording exactly how a data file was produced."""
     lines = [
-        f"Black_hole_spacetime_visualizer version {phys.MODEL_VERSION}",
+        f"Black_hole_spacetime_visualizer version "
+        f"{phys.MODEL_VERSION} "
+        f"(build {phys.BUILD_ID})",
         f"mode = {mode}",
         f"run at {datetime.now().isoformat(timespec='seconds')}",
         "parameters actually used by this mode:",
@@ -133,7 +135,10 @@ def _write_csv(csvdir, prefix, header, rows, comments=()):
 # ======================================================================
 def _head(title):
     print(SEP)
-    print(f"  Black_hole_spacetime_visualizer {phys.MODEL_VERSION} — {title}")
+    print(
+        f"  Black_hole_spacetime_visualizer "
+        f"{phys.MODEL_VERSION} "
+        f"(build {phys.BUILD_ID}) — {title}")
     print(SEP)
 
 
