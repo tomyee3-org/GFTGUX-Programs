@@ -47,7 +47,7 @@ gravity g.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.1.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -241,9 +241,19 @@ def embedding_profile(m_msun=10.0, r_max_rs=8.0, n_r=400):
     inside the auxiliary flat 3-D space used to draw it -- and it is this
     slope, not the slice's own intrinsic curvature, that blows up.  The
     intrinsic Gaussian curvature of the slice itself, computable from the
-    2-D metric alone, is K(r) = r_s / (2 r^3): finite everywhere on the
-    domain r >= r_s, including at the throat, where it takes the finite
-    value K(r_s) = 1/(2 r_s^2).  The throat is a smooth, regular minimal
+    2-D metric alone (K = -r_s / (2 r^3), by either the general orthogonal-
+    coordinate formula applied to this metric or the equivalent surface-
+    of-revolution formula f'f''/[r(1+f'^2)^2] applied to z(r) above -- both
+    give the same result, as the Theorema Egregium requires), is finite
+    everywhere on the domain r >= r_s, including at the throat, where it
+    takes the finite value K(r_s) = -1/(2 r_s^2).  The sign is worth
+    dwelling on: despite the throat's convex, bowl-like appearance in the
+    embedding, the slice is intrinsically *negatively* curved everywhere,
+    like a trumpet or a pseudosphere, not positively curved like a sphere
+    or an ordinary paraboloid z ~ r^2 (whose curvature is +1/[a^2(1+r^2/
+    a^2)^2], positive everywhere) -- the visual convexity is a fact about
+    this particular embedding in flat 3-space, not about the intrinsic
+    geometry it depicts.  The throat is a smooth, regular minimal
     surface, not a curvature singularity; nothing in this static exterior
     geometry is singular before r = 0.  Nothing in the static exterior
     geometry corresponds to r < r_s, so the surface is not extended inside
@@ -906,47 +916,78 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     # for a modest mass ratio -- can fail to bracket the critical radius at
     # all once m1/m0 is large, so both ends are searched outward
     # geometrically until they do, before bisecting.
-    lo = 0.5 * rs0
-    hi = max(1.5 * rs0, 1.5 * rs1)
+    #
+    # M0 == M1 (no accretion at all) is handled as an exact special case
+    # below, *not* by running the general shooting search with M1 == M0
+    # plugged in. Reason (found while building the regression suite,
+    # reproduced with --M0 8 --M1 8 --bisect_iters 20): r = 2M is an
+    # *unstable* fixed point of dr/dv = 0.5(1-2M/r) when M is constant, so
+    # any offset between the located r_crit and the true r_s0 -- even one
+    # as small as the bisection bracket's last ULP -- grows like
+    # exp[(v-v_start)/(2 r_s0)]. At the default --bisect_iters 60 the
+    # bracket collapses to a single double-precision float and the offset
+    # is exactly zero, so this was numerically invisible; at
+    # --bisect_iters 20 (a value Exercise EXP-13 explicitly asks students
+    # to try) the residual is only ~1e-6 r_s0, and by v_end (default
+    # margins) that has been amplified to a spurious r_EH(v) swinging out
+    # to several r_s0 -- flatly contradicting the "the two horizons
+    # coincide at r = r_s0 for the whole run" text this same module's
+    # summary prints for M0 == M1 (see driver_bh._print_horizons_summary
+    # and plot_bh.plot_horizons, both keyed on the identical m0_msun ==
+    # m1_msun test used here). Since M(v) = M0 identically in this case,
+    # r_AH(v) = r_EH(v) = r_s0 is not an approximation to verify -- it is
+    # the exact algebraic answer, so it is used directly, independent of
+    # --bisect_iters, --v_start_margin_rs0 or --v_end_margin_rs0.
+    no_accretion = (m0_msun == m1_msun)
+    if no_accretion:
+        r_crit = rs0
+        residual_rs0 = 0.0
+        v_grid = np.linspace(v_start, v_end, n_steps + 1)
+        r_ah = vaidya_mass_of_v(v_grid, m0, m1, v1, v2) * 2.0
+        r_eh_grid = np.full_like(v_grid, rs0)
+        v_eh, r_eh = v_grid, r_eh_grid.copy()
+    else:
+        lo = 0.5 * rs0
+        hi = max(1.5 * rs0, 1.5 * rs1)
 
-    def escapes(r_i):
-        _, r_arr = _integrate_null_geodesic(v_start, r_i, v_end, m0, m1, v1, v2)
-        return r_arr[-1] > rs1
+        def escapes(r_i):
+            _, r_arr = _integrate_null_geodesic(v_start, r_i, v_end, m0, m1, v1, v2)
+            return r_arr[-1] > rs1
 
-    for _ in range(20):
-        if not escapes(lo):
-            break
-        lo *= 0.5
-    for _ in range(60):
-        if escapes(hi):
-            break
-        hi *= 1.6
+        for _ in range(20):
+            if not escapes(lo):
+                break
+            lo *= 0.5
+        for _ in range(60):
+            if escapes(hi):
+                break
+            hi *= 1.6
 
-    if escapes(lo) or not escapes(hi):
-        raise RuntimeError(
-            f"Could not bracket the event horizon even after adaptively "
-            f"widening the search to [{lo/rs0:.3g}, {hi/rs0:.3g}] r_s0; try "
-            "a larger --v_end_margin_rs0 (so trial geodesics have enough "
-            "advanced time to clearly escape or plunge) or check that "
-            "--M0/--M1 and the accretion window are physically reasonable."
-        )
+        if escapes(lo) or not escapes(hi):
+            raise RuntimeError(
+                f"Could not bracket the event horizon even after adaptively "
+                f"widening the search to [{lo/rs0:.3g}, {hi/rs0:.3g}] r_s0; try "
+                "a larger --v_end_margin_rs0 (so trial geodesics have enough "
+                "advanced time to clearly escape or plunge) or check that "
+                "--M0/--M1 and the accretion window are physically reasonable."
+            )
 
-    for _ in range(bisect_iters):
-        mid = 0.5 * (lo + hi)
-        if escapes(mid):
-            hi = mid
-        else:
-            lo = mid
-    r_crit = 0.5 * (lo + hi)
-    residual_rs0 = (hi - lo) / rs0
+        for _ in range(bisect_iters):
+            mid = 0.5 * (lo + hi)
+            if escapes(mid):
+                hi = mid
+            else:
+                lo = mid
+        r_crit = 0.5 * (lo + hi)
+        residual_rs0 = (hi - lo) / rs0
 
-    v_eh, r_eh = _integrate_null_geodesic(v_start, r_crit, v_end, m0, m1, v1, v2)
+        v_eh, r_eh = _integrate_null_geodesic(v_start, r_crit, v_end, m0, m1, v1, v2)
 
-    v_grid = np.linspace(v_start, v_end, n_steps + 1)
-    r_ah = vaidya_mass_of_v(v_grid, m0, m1, v1, v2) * 2.0
-    # Interpolate r_eh (computed on its own, possibly-truncated grid) onto
-    # the common v_grid for direct comparison and CSV output.
-    r_eh_grid = np.interp(v_grid, v_eh, r_eh, left=r_eh[0], right=r_eh[-1])
+        v_grid = np.linspace(v_start, v_end, n_steps + 1)
+        r_ah = vaidya_mass_of_v(v_grid, m0, m1, v1, v2) * 2.0
+        # Interpolate r_eh (computed on its own, possibly-truncated grid) onto
+        # the common v_grid for direct comparison and CSV output.
+        r_eh_grid = np.interp(v_grid, v_eh, r_eh, left=r_eh[0], right=r_eh[-1])
 
     # --- a family of nearby geodesics, for the "how the horizon is found"
     # panel: some inside the critical radius (fall in), some outside
@@ -983,15 +1024,24 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
                            escapes=bool(r_f[-1] > rs1)))
 
     warnings = list(warn0) + list(warn1)
-    warnings.append(
-        f"the bisection bracket has been narrowed to a width of about "
-        f"{residual_rs0:.2e} r_s0 ({bisect_iters} iterations); this measures "
-        "only the bisection's own precision, not how close the shooting "
-        "method's finite --v_start_margin_rs0 brings the located horizon to "
-        "the true one -- see the algorithm section of the help file, and "
-        "Exercise EXP-10, for that separate and generally larger source of "
-        "error."
-    )
+    if no_accretion:
+        warnings.append(
+            "M0 = M1: no accretion, so r_AH(v) = r_EH(v) = r_s0 is used as "
+            "the exact algebraic answer for the whole run, bypassing the "
+            "shooting search entirely (it is not run, and not needed, "
+            "when the mass function is constant); residual_rs0 = 0 and "
+            "bisect_iters is unused for this run."
+        )
+    else:
+        warnings.append(
+            f"the bisection bracket has been narrowed to a width of about "
+            f"{residual_rs0:.2e} r_s0 ({bisect_iters} iterations); this measures "
+            "only the bisection's own precision, not how close the shooting "
+            "method's finite --v_start_margin_rs0 brings the located horizon to "
+            "the true one -- see the algorithm section of the help file, and "
+            "Exercise EXP-10, for that separate and generally larger source of "
+            "error."
+        )
 
     return dict(
         kind="horizons",

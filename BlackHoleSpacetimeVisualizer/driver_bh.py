@@ -441,8 +441,15 @@ def run(mode="embed",
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}.")
 
     dpi, lw = _validate_output(outdir, csvdir, dpi, lw)
-    if no_plot and outdir is not None:
-        raise ValueError("no_plot and outdir cannot both be requested.")
+    # --no_plot skips the figure (screen display AND any PNG) entirely,
+    # exactly as documented in main.py's own --no_plot --help text and in
+    # the help file's Parameters and Algorithm sections ("no screen
+    # display and no PNG, regardless of --outdir"). An --outdir supplied
+    # alongside --no_plot is therefore simply unused, not an error --
+    # main.py's own help text says so explicitly ("regardless of
+    # --outdir"), so rejecting the combination here would silently
+    # contradict the documented behaviour, e.g. every time a student left
+    # --outdir set in a shell loop while adding --no_plot for a sweep.
     if no_plot and csvdir is None:
         raise ValueError(
             "no_plot was requested but no csvdir was given, so the run would "
