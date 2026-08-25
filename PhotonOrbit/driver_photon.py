@@ -6,7 +6,7 @@ Driver module for setting parameters and calling the physics and plot modules.
 
 import math
 
-from physics_photon import integrate_photon_orbit
+import physics_photon as phys
 from plot_photon import plot_photon_orbit
 
 
@@ -26,7 +26,10 @@ def _print_summary(GM_over_c2, r0, b, lambda_max, info):
     W = 62
     sep = "-" * W
     print(sep)
-    print("  PhotonOrbit -- Run Summary")
+    print(
+        f"  PhotonOrbit {phys.MODEL_VERSION} "
+        f"(build {phys.BUILD_ID}) -- Run Summary"
+    )
     print(sep)
     print(f"  GM_over_c2 (M)       : {GM_over_c2:.6g}")
     print(f"  Starting radius r0   : {r0:.6g}")
@@ -59,7 +62,7 @@ def driver_photon_orbit(
     """
     dpi, lw = _validate_plot_inputs(dpi, lw)
 
-    x_vals, y_vals, info = integrate_photon_orbit(
+    x_vals, y_vals, info = phys.integrate_photon_orbit(
         GM_over_c2=GM_over_c2,
         r0=r0,
         b=b,

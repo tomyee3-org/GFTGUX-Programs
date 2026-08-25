@@ -85,7 +85,8 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--version", action="version",
-                   version=f"StellarEvolutionTracks {physics_sev.MODEL_VERSION}")
+                   version=(f"StellarEvolutionTracks {physics_sev.MODEL_VERSION} "
+                            f"(build {physics_sev.BUILD_ID})"))
     p.add_argument("--mode", choices=driver_sev.MODES, default="tracks",
                    help="which calculation to run")
 

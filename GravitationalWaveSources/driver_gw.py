@@ -80,7 +80,10 @@ def _print_summary(s):
     W = 62
     sep = "─" * W
     print(sep)
-    print("  GravitationalWaveSources — Run Summary")
+    print(
+        f"  GravitationalWaveSources {phys.MODEL_VERSION} "
+        f"(build {phys.BUILD_ID}) — Run Summary"
+    )
     print(sep)
     print(f"  Masses              : {s['m1_msun']:.3f} + {s['m2_msun']:.3f}  M☉")
     print(f"  Total mass          : {s['M_total_msun']:.3f}  M☉")

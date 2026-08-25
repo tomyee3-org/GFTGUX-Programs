@@ -44,19 +44,24 @@ Schwarzschild radii, metres, milliseconds and multiples of standard
 gravity g.
 """
 
-import hashlib
-from pathlib import Path
 import math
 import numpy as np
 
 MODEL_VERSION = "1.1.0"
 
+
+#: The exact source files this build identifier covers: a documentation-only
+#: change, a sample-output file, or an edit to the test suite does not change
+#: this value -- only the four core program modules listed here do.  Exposed
+#: so callers can determine precisely what BUILD_ID covers without duplicating
+#: this list.
 BUILD_ID_COVERS = (
     "physics_bh.py",
     "driver_bh.py",
     "main.py",
     "plot_bh.py",
 )
+
 
 def _compute_build_id():
     """A short, content-derived build identifier (Copilot Audit 7 P1-2).
@@ -105,6 +110,7 @@ def _compute_build_id():
         return h.hexdigest()[:12]
     except (OSError, UnicodeDecodeError):
         return "unknown"
+
 
 BUILD_ID = _compute_build_id()
 
@@ -282,6 +288,7 @@ def embedding_profile(m_msun=10.0, r_max_rs=8.0, n_r=400):
                         "this is the throat, not a numerical artefact",
             warnings=warn_m,
             model_version=MODEL_VERSION,
+            build_id=BUILD_ID,
         ),
     )
 
@@ -379,6 +386,7 @@ def tidal_profile(m_msun=10.0, r_min_rs=1.01, r_max_rs=10.0, n_r=400,
             a_tangential_horizon_g=a_t_horizon / g0,
             warnings=warn_m,
             model_version=MODEL_VERSION,
+            build_id=BUILD_ID,
         ),
     )
 
@@ -657,6 +665,7 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
             v_local_final=v_local[-1], redshift_final=redshift[-1],
             warnings=warnings,
             model_version=MODEL_VERSION,
+            build_id=BUILD_ID,
         ),
     )
 
@@ -1002,5 +1011,6 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             n_points=v_grid.size,
             warnings=warnings,
             model_version=MODEL_VERSION,
+            build_id=BUILD_ID,
         ),
     )

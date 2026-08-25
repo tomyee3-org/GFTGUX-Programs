@@ -14,6 +14,56 @@ masses and megaparsecs.
 import math
 import numpy as np
 
+MODEL_VERSION = "1.0.0"
+
+
+#: The exact source files this build identifier covers: a documentation-only
+#: change, a sample-output file, or an edit to the test suite does not change
+#: this value -- only the four core program modules listed here do.  Exposed
+#: so callers can determine precisely what BUILD_ID covers without duplicating
+#: this list.
+BUILD_ID_COVERS = (
+    "physics_gw.py",
+    "driver_gw.py",
+    "main.py",
+    "plot_gw.py",
+)
+
+
+def _compute_build_id():
+    """Return a short identifier derived from the core source files.
+
+    MODEL_VERSION records the program's declared release version.  BUILD_ID
+    additionally distinguishes source revisions that retain the same declared
+    version.  The hash is independent of LF versus CRLF line endings and
+    frames each file with its name and length so file-boundary changes cannot
+    collide with an unchanged concatenated byte stream.
+
+    Return ``"unknown"`` rather than preventing the program from running if
+    the source files cannot be located or decoded, as can happen in some
+    frozen or zipped distributions.
+    """
+    import hashlib
+    import os
+
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        digest = hashlib.sha256()
+        for name in BUILD_ID_COVERS:
+            with open(os.path.join(here, name), "r", encoding="utf-8",
+                      newline=None) as source:
+                content = source.read().encode("utf-8")
+            digest.update(name.encode("utf-8"))
+            digest.update(len(content).to_bytes(8, "big"))
+            digest.update(content)
+        return digest.hexdigest()[:12]
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+
+
+BUILD_ID = _compute_build_id()
+
+
 # Physical constants
 G = 6.674_30e-11       # m^3 kg^-1 s^-2
 c = 2.997_924_58e8     # m s^-1
@@ -280,6 +330,8 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         tau_qnm_ms=(tau_qnm * 1e3 if include_ringdown else np.nan),
         estimated_newtonian_time_s=T_est,
         inspiral_steps=len(t_list),
+        model_version=MODEL_VERSION,
+        build_id=BUILD_ID,
     )
 
     return dict(

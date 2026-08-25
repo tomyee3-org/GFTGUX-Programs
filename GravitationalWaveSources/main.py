@@ -20,6 +20,7 @@ Examples
 
 import argparse
 import driver_gw
+import physics_gw
 
 
 def parse_args():
@@ -30,6 +31,12 @@ def parse_args():
             "the Schwarzschild ISCO cutoff. An optional Schwarzschild QNM "
             "ringdown is available as an explicitly illustrative extension."
         ),
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=(f"GravitationalWaveSources {physics_gw.MODEL_VERSION} "
+                 f"(build {physics_gw.BUILD_ID})"),
     )
 
     g = p.add_argument_group("Binary parameters")

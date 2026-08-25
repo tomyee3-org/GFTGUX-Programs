@@ -24,6 +24,7 @@ Examples
 
 import argparse
 
+import physics_photon
 from driver_photon import driver_photon_orbit
 
 
@@ -36,6 +37,12 @@ def parse_args():
             "fourth-order Runge-Kutta scheme, and plot the resulting path "
             "together with the event horizon and photon sphere."
         ),
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=(f"PhotonOrbit {physics_photon.MODEL_VERSION} "
+                 f"(build {physics_photon.BUILD_ID})"),
     )
 
     g = p.add_argument_group("Physics parameters")

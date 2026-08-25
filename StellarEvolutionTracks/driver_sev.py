@@ -113,7 +113,8 @@ def _provenance(mode, kw):
     effect on the numbers beside it.
     """
     lines = [
-        f"StellarEvolutionTracks version {phys.MODEL_VERSION}",
+        f"StellarEvolutionTracks version {phys.MODEL_VERSION} "
+        f"(build {phys.BUILD_ID})",
         f"mode = {mode}",
         f"run at {datetime.now().isoformat(timespec='seconds')}",
         "parameters actually used by this mode:",
@@ -175,7 +176,10 @@ TRACK_HEADER = ["M_Msun", "age_Gyr", "phase", "X_c", "Mcore_Msun", "mu_eff",
 # ======================================================================
 def _head(title):
     print(SEP)
-    print(f"  StellarEvolutionTracks {phys.MODEL_VERSION} — {title}")
+    print(
+        f"  StellarEvolutionTracks {phys.MODEL_VERSION} "
+        f"(build {phys.BUILD_ID}) — {title}"
+    )
     print(SEP)
 
 
