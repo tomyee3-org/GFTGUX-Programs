@@ -104,10 +104,32 @@ def plot_embedding(result, outdir=None, dpi=150, lw=1.6, figsize=(13.0, 6.2)):
                        alpha=0.9))
 
     # --- Panel 2: 3-D surface of revolution -----------------------------
+    # Downsample the RADIAL resolution used for the 3-D mesh only (the 2-D
+    # profile in panel 1, and any CSV export, keep the full --n_r
+    # resolution). embedding_profile documents n_r up to MAX_POINTS
+    # (200,000); forming R/PHI/Z/X/Y as n_phi-by-n_r float64 arrays at that
+    # resolution needs a bit over 1 GB for those five arrays alone, before
+    # plot_surface's own overhead, on a value the CLI explicitly allows --
+    # visually indistinguishable from a few hundred radial points for a
+    # smooth surface of revolution (Reviewer Audit round 1, Codex P2-4).
+    # A regular stride (not e.g. np.linspace re-indexing) keeps the first
+    # and last sample (r_s and r_max) exactly, matching the 2-D panel's
+    # endpoints.
+    MAX_3D_RADIAL_POINTS = 400
+    if r.size > MAX_3D_RADIAL_POINTS:
+        stride = int(np.ceil(r.size / MAX_3D_RADIAL_POINTS))
+        r_3d = r[::stride]
+        z_3d = z[::stride]
+        if r_3d[-1] != r[-1]:
+            r_3d = np.append(r_3d, r[-1])
+            z_3d = np.append(z_3d, z[-1])
+    else:
+        r_3d, z_3d = r, z
+
     n_phi = 140
     phi = np.linspace(0.0, 2.0 * np.pi, n_phi)
-    R, PHI = np.meshgrid(r, phi)
-    Z = np.tile(z, (n_phi, 1))
+    R, PHI = np.meshgrid(r_3d, phi)
+    Z = np.tile(z_3d, (n_phi, 1))
     X = R * np.cos(PHI)
     Y = R * np.sin(PHI)
     ax2.plot_surface(X / rs, Y / rs, Z / rs, cmap="viridis",
@@ -121,6 +143,12 @@ def plot_embedding(result, outdir=None, dpi=150, lw=1.6, figsize=(13.0, 6.2)):
     ax2.set_zlabel(r"$z/r_s$")
     ax2.set_title("Surface of revolution")
     ax2.view_init(elev=28, azim=-60)
+    if r_3d.size < r.size:
+        ax2.text2D(0.02, 0.02,
+                   f"3-D mesh downsampled to {r_3d.size:,} of {r.size:,} radial "
+                   "points\n(memory only; the 2-D panel and any CSV keep full "
+                   "resolution)",
+                   transform=ax2.transAxes, fontsize=6.8, ha="left", va="bottom")
 
     note = "\n".join([
         f"plotted to {s['r_max_rs']:.3g} " r"$r_s$",
@@ -345,9 +373,18 @@ def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(13.5, 5.6)):
                            alpha=0.9))
 
     # --- Panel 2: geodesic family -----------------------------------------
-    for fam in result["family"]:
-        col = C_ESCAPE if fam["escapes"] else C_PLUNGE
-        ax2.plot(fam["v"] / rs0, fam["r"] / rs0, color=col, lw=1.1, alpha=0.85)
+    # A single trajectory (--n_family 1) is not a bracketing family at all
+    # -- it is just the horizon generator itself, plotted once more -- and
+    # is given its own presentation rather than the escape/plunge legend,
+    # which would otherwise describe colours that are not actually shown
+    # (Reviewer Audit round 1, Codex "lower-level" observation; n_family=2
+    # is rejected outright by vaidya_horizons for the same reason, so it
+    # cannot reach this function).
+    single_trajectory = (len(result["family"]) == 1)
+    if not single_trajectory:
+        for fam in result["family"]:
+            col = C_ESCAPE if fam["escapes"] else C_PLUNGE
+            ax2.plot(fam["v"] / rs0, fam["r"] / rs0, color=col, lw=1.1, alpha=0.85)
     ax2.plot(v, r_eh, color=C_EH, lw=lw, label="event-horizon generator")
     if not no_accretion:
         ax2.axvspan(s["v1_rs0"], s["v2_rs0"], color="#fdecd8", zorder=0)
@@ -360,13 +397,26 @@ def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(13.5, 5.6)):
     ax2.set_ylim(0, y_hi)
     ax2.set_xlabel(r"advanced time $v / r_{s0}$")
     ax2.set_ylabel(r"$r / r_{s0}$")
-    ax2.set_title("How the shooting method finds it")
+    if single_trajectory:
+        ax2.set_title("Event-horizon generator (--n_family 1: no bracketing family)")
+        black_patch = plt.Line2D([0], [0], color=C_EH, lw=lw, label="event horizon")
+        ax2.legend(handles=[black_patch], fontsize=8, loc="upper left", framealpha=0.9)
+        ax2.text(0.5, 0.5,
+                 "--n_family 1 requested: showing only the located\n"
+                 "event-horizon generator itself, not a bracketing\n"
+                 "family. Use --n_family 3 or more to see nearby\n"
+                 "escaping/plunging trajectories on either side.",
+                 transform=ax2.transAxes, ha="center", va="center", fontsize=8,
+                 bbox=dict(boxstyle="round,pad=0.4", fc="lightyellow", ec="gray",
+                           alpha=0.9))
+    else:
+        ax2.set_title("How the shooting method finds it")
+        green_patch = plt.Line2D([0], [0], color=C_ESCAPE, lw=2, label="escapes to infinity")
+        red_patch = plt.Line2D([0], [0], color=C_PLUNGE, lw=2, label="plunges to $r=0$")
+        black_patch = plt.Line2D([0], [0], color=C_EH, lw=lw, label="event horizon")
+        ax2.legend(handles=[green_patch, red_patch, black_patch], fontsize=8,
+                  loc="upper left", framealpha=0.9)
     ax2.grid(True, lw=0.3, alpha=0.5)
-    green_patch = plt.Line2D([0], [0], color=C_ESCAPE, lw=2, label="escapes to infinity")
-    red_patch = plt.Line2D([0], [0], color=C_PLUNGE, lw=2, label="plunges to $r=0$")
-    black_patch = plt.Line2D([0], [0], color=C_EH, lw=lw, label="event horizon")
-    ax2.legend(handles=[green_patch, red_patch, black_patch], fontsize=8,
-              loc="upper left", framealpha=0.9)
 
     note = "\n".join([
         fr"$r_{{\rm crit}}/r_{{s0}} = {s['r_crit_over_rs0']:.6f}$ at $v_{{\rm start}}$",

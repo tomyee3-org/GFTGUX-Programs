@@ -98,12 +98,27 @@ def infall_cycloid_tau(m_msun, r0_rs, r_stop_rs):
     Newtonian radial Kepler-fall cycloid with r0 in place of the
     semi-latus rectum), coded independently of physics_bh.infall_radial's
     RK4 integrator.
+
+    GM is taken from the literal IAU 2015 Resolution B3 nominal solar mass
+    parameter, not from phys.G/phys.M_sun: reusing the module's own
+    constants here would make this "independent" oracle share physics_bh's
+    then-current constant, so a wrong constant in the module could not be
+    caught by this test (Reviewer Audit round 1, Codex P2-2 test-suite
+    critique). phys.schwarzschild_radius is still used for r0/r_stop's
+    metre conversion, which is a separate, purely geometric step
+    (r0_rs/r_stop_rs times r_s) not under test here; the mass-dependent
+    physics itself is recomputed from the literal constant below.
     """
-    rs = phys.schwarzschild_radius(m_msun)
+    GM_SUN_NOMINAL = 1.3271244e20   # m^3 s^-2, IAU 2015 Resolution B3
+    c = 2.99792458e8                # m s^-1
+    rs = 2.0 * m_msun * GM_SUN_NOMINAL / c ** 2
     r0 = r0_rs * rs
     r_stop = r_stop_rs * rs
-    GM = phys.G * (m_msun * phys.M_sun)
+    GM = m_msun * GM_SUN_NOMINAL
     eta_stop = math.acos(2.0 * r_stop / r0 - 1.0)
+    # sqrt(r0^3/(8*GM)) already carries units of seconds directly (GM is
+    # m^3/s^2), matching the standard Newtonian free-fall-time formula
+    # exactly, with no separate factor of c needed.
     return math.sqrt(r0 ** 3 / (8.0 * GM)) * (eta_stop + math.sin(eta_stop))
 
 
@@ -147,12 +162,22 @@ class TestSchwarzschildScales(unittest.TestCase):
             self.assertAlmostEqual(rs_f / rs1, factor, delta=factor * 1e-12)
 
     def test_rs_matches_independent_SI_calculation(self):
-        # Hand-computed from CODATA-style constants, independent of the
-        # module's own G/c/M_sun constants being wired up correctly.
-        G = 6.67430e-11
+        # CORRECTED ORACLE (Reviewer Audit round 1, Codex P2-2): this test
+        # previously hand-computed G*(M_msun*M_sun_in_kg) using the exact
+        # same nonstandard M_sun=1.98892e30 kg value physics_bh.py itself
+        # used at the time -- so it was not actually an independent check
+        # of the module's mass-dependent physics at all; it would have
+        # passed identically whether or not that M_sun value was correct.
+        # The literal expected value below is now taken directly from the
+        # IAU 2015 Resolution B3 nominal solar mass *parameter* GM_sun
+        # (arXiv:1510.07674), which is what physics_bh.schwarzschild_radius
+        # is now computed from (GM_SUN_NOMINAL), and needs no separately
+        # sourced kilogram mass or G at all -- a genuinely independent
+        # literal constant, not a reference to phys.G/phys.M_sun/
+        # phys.GM_SUN_NOMINAL.
+        GM_sun_nominal = 1.3271244e20   # m^3 s^-2, IAU 2015 Resolution B3
         c = 2.99792458e8
-        Msun = 1.98892e30
-        expected = 2.0 * G * (10.0 * Msun) / c ** 2
+        expected = 2.0 * 10.0 * GM_sun_nominal / c ** 2
         self.assertAlmostEqual(phys.schwarzschild_radius(10.0), expected,
                                 delta=expected * 1e-9)
 
@@ -185,6 +210,27 @@ class TestSchwarzschildScales(unittest.TestCase):
     def test_check_mass_silent_in_trusted_range(self):
         m, warn = phys.check_mass("mass", 10.0)
         self.assertEqual(warn, [])
+
+    def test_schwarzschild_radius_rejects_nonfinite_result_from_finite_mass(self):
+        # Reviewer Audit round 1, Codex P2-3 reproducer: a finite --M does
+        # not guarantee a finite r_s. schwarzschild_radius(1e300) is a
+        # *finite* input mass, but 2*m*GM_SUN_NOMINAL/c^2 overflows a
+        # double before this fix, and the function silently returned inf
+        # instead of raising.
+        with self.assertRaises(ValueError):
+            phys.schwarzschild_radius(1.0e300)
+        self.assertTrue(math.isfinite(phys.schwarzschild_radius(1.0e10)))
+
+    def test_require_finite_reports_overflow_as_value_error(self):
+        # Reviewer Audit round 1, Codex P2-3: float() on a Python int with
+        # hundreds of digits raises OverflowError, not ValueError/TypeError
+        # -- previously uncaught by _require_finite, so it propagated as a
+        # raw traceback instead of the program's usual concise message.
+        giant_int = 10 ** 400
+        with self.assertRaises(ValueError):
+            phys._require_finite("mass", giant_int)
+        with self.assertRaises(ValueError):
+            phys.check_mass("mass", giant_int)
 
 
 # ======================================================================
@@ -257,6 +303,16 @@ class TestEmbedding(unittest.TestCase):
         self.assertLess(slope_far, 0.1)  # << 1: the surface is nearly flat out here
 
     def test_proper_radial_distance_matches_independent_closed_form(self):
+        # TIGHTENED TOLERANCE (Reviewer Audit round 1, Codex P2-6):
+        # physics_bh._proper_radial_distance was a 4000-point trapezoidal
+        # numerical integration, so 1e-6 was a realistic discretization-
+        # error tolerance against this independently-derived closed form.
+        # It is now itself an exact closed form (differently written --
+        # asinh here in the module vs. a normalized log here in the test
+        # -- but mathematically identical), so the two should now agree to
+        # floating-point precision, not merely 1e-6; a regression back to
+        # numerical integration, or a sign/constant slip in either closed
+        # form, would now be caught at a far tighter tolerance.
         m = 8.4
         rs = phys.schwarzschild_radius(m)
         for r_over_rs in (1.0001, 1.01, 1.2, 2.0, 8.0, 50.0):
@@ -264,7 +320,40 @@ class TestEmbedding(unittest.TestCase):
             coded = phys._proper_radial_distance(rs, rs, r)
             closed = proper_radial_distance_closed_form(rs, r)
             rel = abs(coded - closed) / closed
-            self.assertLess(rel, 1e-6, msg=f"r/rs={r_over_rs}: coded={coded}, closed={closed}")
+            self.assertLess(rel, 1e-10, msg=f"r/rs={r_over_rs}: coded={coded}, closed={closed}")
+
+    def test_proper_radial_distance_accepts_array_r_to(self):
+        # physics_bh._proper_radial_distance is now vectorized (used
+        # directly on the whole r array inside embedding_profile, instead
+        # of via a per-point Python loop); confirm the array path agrees
+        # with the scalar path pointwise.
+        m = 8.4
+        rs = phys.schwarzschild_radius(m)
+        r_over_rs = np.array([1.0, 1.0001, 1.01, 1.2, 2.0, 8.0, 50.0])
+        r = rs * r_over_rs
+        array_result = phys._proper_radial_distance(rs, rs, r)
+        scalar_result = np.array([phys._proper_radial_distance(rs, rs, rr) for rr in r])
+        np.testing.assert_allclose(array_result, scalar_result, rtol=1e-14)
+
+    def test_gaussian_curvature_matches_formula_and_is_negative(self):
+        # K(r) = -r_s/(2 r^3): negative everywhere, and finite (equal to
+        # -1/(2 r_s^2)) exactly at the throat, per this module's own
+        # derivation. Exposed as embedding_profile's new "K" field
+        # (Reviewer Audit round 1, Codex/Copilot EXP-18).
+        m = 10.0
+        rs = phys.schwarzschild_radius(m)
+        result = phys.embedding_profile(m_msun=m, r_max_rs=8.0, n_r=50)
+        r, K = result["r"], result["K"]
+        expected = -rs / (2.0 * r ** 3)
+        np.testing.assert_allclose(K, expected, rtol=1e-12)
+        self.assertTrue(np.all(K < 0.0))
+        self.assertAlmostEqual(K[0], -1.0 / (2.0 * rs ** 2), delta=abs(K[0]) * 1e-9)
+        self.assertAlmostEqual(result["summary"]["K_at_horizon"], K[0], delta=1e-30)
+
+    def test_gaussian_curvature_rejects_r_below_horizon(self):
+        rs = phys.schwarzschild_radius(10.0)
+        with self.assertRaises(ValueError):
+            phys.gaussian_curvature(rs, 0.5 * rs)
 
     def test_proper_radial_distance_exceeds_coordinate_difference(self):
         # Physical invariant: the curved-space proper distance from r_s to
@@ -345,13 +434,21 @@ class TestTidal(unittest.TestCase):
         # radial separation dr is d g/dr * dr (leading order), i.e.
         # -2GM/r^3 * dr in magnitude -> a_radial = 2GM dr / r^3. Coded
         # here from scratch, not by calling tidal_acceleration.
-        G, M_sun = phys.G, phys.M_sun
+        #
+        # GM is the literal IAU 2015 Resolution B3 nominal solar mass
+        # parameter (Reviewer Audit round 1, Codex P2-2), not
+        # phys.G/phys.M_sun: the previous version of this test reused
+        # those two module constants directly, so it was not actually
+        # independent of physics_bh's own (then-nonstandard) mass
+        # constant and could not have caught this defect.
+        GM_sun_nominal = 1.3271244e20   # m^3 s^-2, IAU 2015 Resolution B3
+        c = 2.99792458e8
         for m_msun, r_over_rs, dr in [(10.0, 5.0, 1.8), (1.0e6, 50.0, 2.5)]:
-            rs = phys.schwarzschild_radius(m_msun)
+            rs = 2.0 * m_msun * GM_sun_nominal / c ** 2
             r = r_over_rs * rs
-            M_kg = m_msun * M_sun
-            expected_radial = 2.0 * G * M_kg * dr / r ** 3
-            expected_tangential = G * M_kg * dr / r ** 3
+            GM = m_msun * GM_sun_nominal
+            expected_radial = 2.0 * GM * dr / r ** 3
+            expected_tangential = GM * dr / r ** 3
             a_r, a_t = phys.tidal_acceleration(m_msun, r, separation_m=dr)
             self.assertAlmostEqual(a_r / expected_radial, 1.0, delta=1e-12)
             self.assertAlmostEqual(a_t / expected_tangential, 1.0, delta=1e-12)
@@ -417,7 +514,13 @@ class TestTidal(unittest.TestCase):
         r, a_r = result["r"], result["a_radial"]
         idx = [0, 10, 25, 49]
         for i in idx:
-            expected = 2.0 * phys.G * (10.0 * phys.M_sun) * 1.8 / r[i] ** 3
+            # Uses phys.GM_SUN_NOMINAL, matching what tidal_acceleration
+            # itself is now computed from (Reviewer Audit round 1, Codex
+            # P2-2); the point of this test is checking the vectorized
+            # array path agrees with the scalar formula at each radius,
+            # not re-deriving the physics independently (that is
+            # test_matches_independent_Newtonian_derivation's job, below).
+            expected = 2.0 * 10.0 * phys.GM_SUN_NOMINAL * 1.8 / r[i] ** 3
             self.assertAlmostEqual(a_r[i] / expected, 1.0, delta=1e-10)
 
     # --- bounds / error handling -----------------------------------
@@ -446,6 +549,52 @@ class TestTidal(unittest.TestCase):
             phys.survival_radius(10.0, separation_m=-1.0, limit_g=100.0)
         with self.assertRaises(ValueError):
             phys.survival_radius(-10.0, separation_m=1.8, limit_g=100.0)
+
+    def test_tidal_acceleration_rejects_nonpositive_r(self):
+        # Reviewer Audit round 1, Codex P2-3 reproducer:
+        # tidal_acceleration(..., r_m=0) previously divided by zero with no
+        # validation at all, because this public helper is not gated
+        # behind tidal_profile's own validation.
+        with self.assertRaises(ValueError):
+            phys.tidal_acceleration(10.0, 0.0, separation_m=1.8)
+        with self.assertRaises(ValueError):
+            phys.tidal_acceleration(10.0, -1.0, separation_m=1.8)
+        with self.assertRaises(ValueError):
+            phys.tidal_acceleration(10.0, float("nan"), separation_m=1.8)
+        with self.assertRaises(ValueError):
+            phys.tidal_acceleration(10.0, np.array([1.0, 0.0, 2.0]), separation_m=1.8)
+
+    def test_tidal_r_max_rs_upper_bound_enforced(self):
+        # Reviewer Audit round 1, Codex P2-3/P2-7: tidal_profile previously
+        # had no upper bound on r_max_rs at all (unlike embedding_profile's
+        # 1000), so e.g. r_max_rs=1e308 produced a non-finite/invalid grid.
+        with self.assertRaises(ValueError):
+            phys.tidal_profile(m_msun=10.0, r_max_rs=1.0e300, n_r=20)
+        # A large but sane value, well beyond embedding_profile's tighter
+        # near-throat bound, must still be accepted (tidal is also used to
+        # verify the far-field 1/r^3 power law over a wide range).
+        phys.tidal_profile(m_msun=10.0, r_max_rs=1.0e6, n_r=20)
+
+    def test_tidal_linearization_warning_appears_for_extreme_separation(self):
+        # Reviewer Audit round 1, Codex P1-5 reproducer: at the CLI's
+        # allowed comparison-mass lower bound, r_s is a few millimetres, so
+        # the default 1.8 m separation is hundreds of horizon radii --
+        # nowhere near "infinitesimal," which the linearized geodesic-
+        # deviation approximation this program uses requires.
+        result = phys.tidal_profile(m_msun=1.0e-6, r_min_rs=1.01, r_max_rs=10.0,
+                                     n_r=20, separation_m=1.8)
+        s = result["summary"]
+        self.assertGreater(s["linearization_ratio"], phys.TIDAL_LINEARIZATION_RATIO_WARN)
+        self.assertTrue(any("linearized" in w for w in s["warnings"]))
+
+    def test_tidal_linearization_warning_absent_for_ordinary_case(self):
+        # A person-scale separation around a stellar-mass hole is utterly
+        # negligible next to the curvature scale; no warning expected.
+        result = phys.tidal_profile(m_msun=10.0, r_min_rs=1.01, r_max_rs=10.0,
+                                     n_r=20, separation_m=1.8)
+        s = result["summary"]
+        self.assertLess(s["linearization_ratio"], phys.TIDAL_LINEARIZATION_RATIO_WARN)
+        self.assertFalse(any("linearized" in w for w in s["warnings"]))
 
 
 # ======================================================================
@@ -557,31 +706,74 @@ class TestInfall(unittest.TestCase):
         rel = abs(tau_code - tau_closed) / tau_closed
         self.assertLess(rel, 1.0e-5)
 
-    def test_cycloid_benchmark_converges_and_plateaus(self):
+    def test_cycloid_benchmark_converges_without_plateau(self):
+        # CORRECTED ORACLE (Reviewer Audit round 1, Codex P1-3): the
+        # previous version of this test asserted that the RK4-vs-closed-
+        # form error *plateaus* around 1e-5 as --step_frac is refined
+        # below about 0.05, and treated that plateau as evidence the
+        # integrator was already "maximally accurate." Codex demonstrated
+        # that the plateau was not an RK4 accuracy floor at all: it was
+        # the omitted initial proper/coordinate-time interval between the
+        # exact release event r0 and this integrator's numerical seed
+        # point, assigned tau=0 by the previous implementation instead of
+        # its true (tiny but nonzero) value. A biased but *fixed* offset
+        # in tau_total cannot be reduced by shrinking --step_frac, which
+        # is exactly the "plateau" that was observed and had been
+        # mis-explained as convergence. Now that infall_radial seeds the
+        # numerical integration with the exact cycloid-derived (tau, t)
+        # for its seed point (see the startup comment in
+        # physics_bh.infall_radial), the error against this same
+        # independent closed form should fall roughly as step_frac^4
+        # (RK4) with no floor above floating-point/closed-form-evaluation
+        # noise, all the way from the coarsest allowed --step_frac (0.2)
+        # down to 0.01. This test would have FAILED against the previous
+        # implementation (whose error genuinely did plateau near 1.3e-6);
+        # it is not weakened, but the assertion itself is inverted to
+        # check for the presence of convergence instead of the absence of
+        # further improvement.
         m, r0_rs, r_stop_rs = 10.0, 6.0, 1.0005
         tau_closed = infall_cycloid_tau(m, r0_rs, r_stop_rs)
         rel_errs = []
-        for step_frac in (0.2, 0.1, 0.05, 0.02, 0.01):
+        for step_frac in (0.2, 0.1, 0.05, 0.02, 0.01, 0.005):
             result = phys.infall_radial(m_msun=m, r0_rs=r0_rs, r_stop_rs=r_stop_rs,
                                          n_points=4000, step_frac=step_frac)
             tau_code = result["summary"]["tau_total_s"]
             rel_errs.append(abs(tau_code - tau_closed) / tau_closed)
-        # All within the documented 1e-5 tolerance, at every step_frac
-        # from the coarsest allowed (0.2) down to 0.01 ...
+        # All comfortably inside the documented 1e-5 tolerance even at the
+        # coarsest allowed step size.
         for e in rel_errs:
             self.assertLess(e, 1.0e-5)
-        # ... and, among the finer step_fracs (0.05, 0.02, 0.01), the
-        # error has settled into a plateau rather than continuing to fall
-        # by orders of magnitude -- consistent with the two-sided step
-        # refinement already making even 0.2 highly accurate, so further
-        # refinement mostly meets the same RK4-vs-closed-form floor. (The
-        # coarsest step_frac=0.2 is not part of this particular
-        # comparison: its error can land anywhere below the 1e-5 ceiling
-        # already checked above, including -- as observed -- below the
-        # plateau itself, since a single coarse step size can happen to
-        # benefit from fortuitous truncation-error cancellation.)
-        fine = rel_errs[2:]  # step_frac = 0.05, 0.02, 0.01
-        self.assertLessEqual(max(fine), min(fine) * 5.0)
+        # Genuine convergence: refining step_frac from the coarsest (0.2)
+        # to a middling value (0.02) should reduce the error by at least
+        # two orders of magnitude (RK4 predicts (0.2/0.02)^4 = 1e4; 1e2 is
+        # a generous, robust floor). The old, bugged implementation
+        # instead showed *no* meaningful reduction here -- both ends of
+        # that range sat on the same ~1.3e-6 plateau.
+        self.assertLess(rel_errs[3], rel_errs[0] / 1.0e2)  # index 3 = 0.02
+        # And the finest step sizes should not have stopped improving
+        # either -- no repeat of the old plateau at the fine end.
+        self.assertLess(rel_errs[-1], rel_errs[3] / 3.0)
+
+    def test_release_point_is_exact(self):
+        # Reviewer Audit round 1, Copilot P2-1: the previous implementation
+        # stored r0*(1-1e-12) as the *first* sample, labelled tau=0, t=0,
+        # even though comments and the help file describe the first sample
+        # as the release point r0 itself. The exact release event is now
+        # prepended as its own (r0, tau=0, t=0) row, distinct from the
+        # numerical integrator's seed point.
+        result = phys.infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000,
+                                     r_stop_rs=1.0005, step_frac=0.02)
+        rs = result["summary"]["rs_m"]
+        self.assertEqual(result["tau"][0], 0.0)
+        self.assertEqual(result["t"][0], 0.0)
+        self.assertEqual(result["r"][0], 6.0 * rs)
+        self.assertEqual(result["v_local"][0], 0.0)
+        # At release the particle is momentarily at rest (no Doppler
+        # contribution), but r0 is still a finite radius, not infinity, so
+        # the ordinary gravitational redshift factor sqrt(1-rs/r0) still
+        # applies -- it is not 1.0.
+        self.assertAlmostEqual(result["redshift"][0], math.sqrt(1.0 - 1.0 / 6.0),
+                                delta=1e-12)
 
     def test_dtau_dt_matches_inverse_of_dtdtau_pointwise(self):
         m, r0_rs = 10.0, 6.0
@@ -605,6 +797,14 @@ class TestInfall(unittest.TestCase):
         for bad in (1.0, 0.9, -3.0):
             with self.assertRaises(ValueError):
                 phys.infall_radial(m_msun=10.0, r0_rs=bad, r_stop_rs=0.5 if bad < 1 else bad - 0.1)
+
+    def test_r0_rs_upper_bound_enforced(self):
+        # Reviewer Audit round 1, Codex P2-3 reproducer:
+        # infall_radial(..., r0_rs=1e308) previously reached a non-finite
+        # state deep inside the integrator instead of being rejected
+        # up front by input validation.
+        with self.assertRaises(ValueError):
+            phys.infall_radial(m_msun=10.0, r0_rs=1.0e308, r_stop_rs=1.0005)
 
     def test_r_stop_rs_must_lie_strictly_between_one_and_r0(self):
         with self.assertRaises(ValueError):
@@ -645,14 +845,22 @@ class TestHorizons(unittest.TestCase):
         warnings.resetwarnings()
 
     def test_apparent_horizon_equals_2M_of_v_pointwise(self):
+        # Reviewer Audit round 1, Copilot P2-3: the previous version of
+        # this test obtained its "expected" mass function by calling
+        # phys.vaidya_mass_of_v -- the very function whose output feeds
+        # r_AH inside vaidya_horizons -- so it could not catch a shared
+        # defect in that one function. The piecewise-linear ramp is
+        # reconstructed here from scratch (plain numpy clip arithmetic),
+        # independent of vaidya_mass_of_v itself.
         result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
                                        bisect_iters=30)
         s = result["summary"]
-        m0_geom = phys._mass_geom(s["m0_msun"])
-        m1_geom = phys._mass_geom(s["m1_msun"])
+        m0_geom = 0.5 * s["rs0_m"]
+        m1_geom = 0.5 * s["rs1_m"]
         v1 = s["v1_rs0"] * s["rs0_m"]
         v2 = s["v2_rs0"] * s["rs0_m"]
-        expected = phys.vaidya_mass_of_v(result["v"], m0_geom, m1_geom, v1, v2) * 2.0
+        frac = np.clip((result["v"] - v1) / (v2 - v1), 0.0, 1.0)
+        expected = 2.0 * (m0_geom + (m1_geom - m0_geom) * frac)
         np.testing.assert_allclose(result["r_AH"], expected, rtol=1e-12)
 
     def test_constant_mass_apparent_and_event_horizon_coincide(self):
@@ -699,6 +907,95 @@ class TestHorizons(unittest.TestCase):
                                        bisect_iters=50)
         self.assertTrue(np.all(np.diff(result["r_AH"]) >= -1.0e-9 * result["summary"]["rs0_m"]))
         self.assertTrue(np.all(np.diff(result["r_EH"]) >= -1.0e-6 * result["summary"]["rs0_m"]))
+
+    def test_small_growth_10_to_10p5_never_violates_r_EH_ge_r_AH(self):
+        # Reviewer Audit round 1, Copilot P1-2 (reproducer): at every
+        # DEFAULT setting -- no unusual --bisect_iters or margins needed --
+        # the previous forward-shooting-only construction returned an
+        # r_EH(v) that dipped BELOW r_AH(v) near v_end by about 3.9e-6
+        # r_s0 for this specific, mild mass-growth case (M0=10 -> M1=10.5),
+        # directly contradicting the documented invariant "r_EH >= r_AH
+        # always" that the same run's own summary text asserted
+        # unconditionally. This reproduces on the pre-fix code and passes
+        # on the current backward-integration-primary construction.
+        result = phys.vaidya_horizons(m0_msun=10.0, m1_msun=10.5)
+        min_diff_rs0 = float(np.min((result["r_EH"] - result["r_AH"])
+                                     / result["summary"]["rs0_m"]))
+        self.assertGreaterEqual(min_diff_rs0, -1.0e-9)
+
+    def test_low_bisect_iters_does_not_produce_false_event_horizon(self):
+        # Reviewer Audit round 1, Codex P1-1: at the low --bisect_iters
+        # values Exercise EXP-13 itself told students to try (10, 20, 30),
+        # the previous forward-shooting construction could return a
+        # candidate "event horizon" that had plunged to the small-radius
+        # cutoff, then interpolated a spectacularly wrong curve across
+        # nearly the entire run, while still being reported under the
+        # unconditional claim r_EH >= r_AH. Because r_EH(v) is now built
+        # by backward integration from the exact r(v2)=r_s1 boundary
+        # condition -- a construction that does not depend on
+        # bisect_iters at all -- the reported curve should be essentially
+        # IDENTICAL regardless of --bisect_iters, and should never violate
+        # r_EH >= r_AH, even at the settings that previously broke it.
+        default_M0, default_M1 = 5.0, 10.0
+        curves = {}
+        for iters in (10, 20, 30, 40, 60):
+            result = phys.vaidya_horizons(m0_msun=default_M0, m1_msun=default_M1,
+                                           n_steps=300, bisect_iters=iters)
+            s = result["summary"]
+            min_diff_rs0 = float(np.min((result["r_EH"] - result["r_AH"]) / s["rs0_m"]))
+            self.assertGreaterEqual(min_diff_rs0, -1.0e-9,
+                                     msg=f"bisect_iters={iters}")
+            curves[iters] = result["summary"]["r_crit_over_rs0"]
+        r_crit_values = list(curves.values())
+        for v in r_crit_values[1:]:
+            self.assertAlmostEqual(v, r_crit_values[0], delta=1e-9)
+
+    def test_shooting_vs_backward_diagnostic_fields_are_reported(self):
+        # The new secondary diagnostics introduced by the backward-
+        # integration architecture change: r_crit_shooting_over_rs0 (the
+        # old forward-shooting answer, kept only as a diagnostic) and
+        # shooting_vs_backward_rs0 (their actual difference), which is the
+        # genuinely meaningful accuracy comparison -- unlike residual_rs0,
+        # which measures only the bisection bracket's width (Reviewer
+        # Audit round 1, Codex P1-1/P2-1, Copilot P1-5).
+        result = phys.vaidya_horizons(m0_msun=10.0, m1_msun=10.5, bisect_iters=15)
+        s = result["summary"]
+        for key in ("r_crit_shooting_over_rs0", "shooting_vs_backward_rs0",
+                    "r_crit_over_rs0", "residual_rs0"):
+            self.assertIn(key, s)
+            self.assertTrue(math.isfinite(s[key]))
+        self.assertAlmostEqual(
+            s["shooting_vs_backward_rs0"],
+            abs(s["r_crit_shooting_over_rs0"] - s["r_crit_over_rs0"]),
+            delta=1e-12)
+        # At only 15 bisect_iters the forward-shooting bracket is coarse
+        # (see test_low_bisect_iters_does_not_produce_false_event_horizon
+        # for how badly this can miss the true horizon at even lower
+        # settings); the diagnostic should be capable of reflecting a
+        # nonzero difference, not hard-coded to zero.
+        self.assertGreaterEqual(s["shooting_vs_backward_rs0"], 0.0)
+
+    def test_ah_violation_postcondition_is_actually_enforced(self):
+        # Mutation-style check that the postcondition guard in
+        # vaidya_horizons (Reviewer Audit round 1, Codex P1-1: "verify ...
+        # r_EH >= r_AH within a stated numerical tolerance ... If those
+        # checks fail ... refuse to label/export the candidate") is live
+        # code, not a check that can never fire: temporarily corrupt the
+        # backward integrator's output so it undershoots r_AH, and confirm
+        # vaidya_horizons refuses to return a result rather than silently
+        # exporting a curve that violates its own documented invariant.
+        original = phys._integrate_event_horizon_backward
+
+        def _broken(v_bc, r_bc, v_target, m0, m1, v1, v2, **kw):
+            v_arr, r_arr = original(v_bc, r_bc, v_target, m0, m1, v1, v2, **kw)
+            return v_arr, r_arr * 0.999   # force a visible undershoot
+        phys._integrate_event_horizon_backward = _broken
+        try:
+            with self.assertRaises(RuntimeError):
+                phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=200,
+                                      bisect_iters=30)
+        finally:
+            phys._integrate_event_horizon_backward = original
 
     def test_bisection_residual_shrinks_with_more_iterations(self):
         residuals = []
@@ -751,10 +1048,40 @@ class TestHorizons(unittest.TestCase):
             phys.vaidya_horizons(m0_msun=10.0, m1_msun=5.0)
 
     def test_nonpositive_window_parameters_rejected(self):
-        for kwargs in (dict(v1_rs0=0.0), dict(duration_rs0=0.0),
+        # CORRECTED ORACLE (Reviewer Audit round 1, Codex P3-1): v1_rs0 is
+        # only the origin of the advanced-time axis, which is physically
+        # arbitrary (the Vaidya spacetime described here is invariant
+        # under shifting v by a constant); duration_rs0 and the two
+        # margins are the parameters with a physically required sign
+        # (they are literal lengths of a v-interval). v1_rs0 = 0.0 is
+        # therefore no longer expected to raise -- see
+        # test_v1_rs0_accepts_zero_and_negative_values below for the
+        # positive-path regression this correction enables.
+        for kwargs in (dict(duration_rs0=0.0),
                        dict(v_start_margin_rs0=0.0), dict(v_end_margin_rs0=0.0)):
             with self.assertRaises(ValueError):
                 phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, **kwargs)
+
+    def test_v1_rs0_accepts_zero_and_negative_values(self):
+        # Reviewer Audit round 1, Codex P3-1: v1 (where accretion begins)
+        # is an arbitrary origin on the advanced-time axis, not a
+        # physically constrained quantity, so v1_rs0 need not be positive.
+        # Shifting v1_rs0 (with v_start/v_end following along, since they
+        # are defined relative to v1/v2) should shift the whole solution
+        # rigidly and leave every v-independent physical quantity (here,
+        # the horizon displacement r_crit_over_rs0) unchanged.
+        common = dict(m0_msun=5.0, m1_msun=10.0, duration_rs0=10.0,
+                      v_start_margin_rs0=25.0, v_end_margin_rs0=15.0,
+                      n_steps=300, bisect_iters=40)
+        r_pos = phys.vaidya_horizons(v1_rs0=5.0, **common)
+        r_zero = phys.vaidya_horizons(v1_rs0=0.0, **common)
+        r_neg = phys.vaidya_horizons(v1_rs0=-5.0, **common)
+        for r in (r_pos, r_zero, r_neg):
+            self.assertIsInstance(r, dict)
+        self.assertAlmostEqual(r_zero["summary"]["r_crit_over_rs0"],
+                                r_pos["summary"]["r_crit_over_rs0"], delta=1e-9)
+        self.assertAlmostEqual(r_neg["summary"]["r_crit_over_rs0"],
+                                r_pos["summary"]["r_crit_over_rs0"], delta=1e-9)
 
     def test_n_steps_bisect_iters_n_family_bounds(self):
         with self.assertRaises(ValueError):
@@ -978,9 +1305,33 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, msg=proc.stderr)
             fname = [f for f in os.listdir(tmp) if f.endswith(".csv")][0]
             comments, header, rows = read_csv_rows(os.path.join(tmp, fname))
-            self.assertEqual(header, ["r_over_rs", "r_m", "z_m", "proper_radial_distance_m"])
+            # gaussian_curvature_K_per_m2 added this round (Reviewer Audit
+            # round 1, Codex/Copilot EXP-18: K(r) exposed as a genuine
+            # program output).
+            self.assertEqual(header, ["r_over_rs", "r_m", "z_m",
+                                       "proper_radial_distance_m",
+                                       "gaussian_curvature_K_per_m2"])
             self.assertEqual(len(rows), 37)
             self.assertAlmostEqual(float(rows[0][0]), 1.0, delta=1e-6)
+            self.assertLess(float(rows[0][4]), 0.0)   # K is negative everywhere
+
+    def test_embed_csv_values_round_trip_to_17_significant_digits(self):
+        # Reviewer Audit round 1, Codex P2-8: CSV columns previously used
+        # .6f/.6g formatting, which could truncate the precision actually
+        # computed. Confirm the CSV values now agree with the in-process
+        # result to full binary64 precision, not merely 6 digits.
+        result = phys.embedding_profile(m_msun=10.0, r_max_rs=5.0, n_r=25)
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(["--mode", "embed", "--no_plot", "--csvdir", tmp,
+                             "--M", "10.0", "--r_max_rs", "5.0", "--n_r", "25"])
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            fname = [f for f in os.listdir(tmp) if f.endswith(".csv")][0]
+            comments, header, rows = read_csv_rows(os.path.join(tmp, fname))
+            for i in (0, 5, 24):
+                self.assertAlmostEqual(float(rows[i][1]) / result["r"][i], 1.0, delta=1e-15)
+            self.assertEqual(float(rows[0][2]), 0.0)   # z(r_s) = 0 exactly
+            for i in (5, 24):
+                self.assertAlmostEqual(float(rows[i][2]) / result["z"][i], 1.0, delta=1e-12)
 
     def test_tidal_compare_masses_writes_second_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -994,6 +1345,69 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(header, ["M_Msun", "rs_km", "a_radial_horizon_g",
                                        "r_crit_over_rs", "survives_horizon"])
             self.assertEqual(len(rows), 2)
+
+    def test_tidal_compare_masses_are_sorted_numerically(self):
+        # Reviewer Audit round 1, Gemini finding 2: an unsorted
+        # --compare_masses list was passed straight through to
+        # compare_tidal_across_masses and then to plot_tidal, whose panels
+        # 3/4 connect points with continuous marker+line plots -- an
+        # unsorted x-axis draws a zig-zag rather than a clean curve. The
+        # masses are now sorted in driver_bh._run_tidal before use,
+        # regardless of the order given on the command line.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(["--mode", "tidal", "--no_plot", "--csvdir", tmp,
+                             "--compare_masses", "1000,10,1e6,100"])
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            compare_file = [f for f in os.listdir(tmp) if "compare" in f][0]
+            comments, header, rows = read_csv_rows(os.path.join(tmp, compare_file))
+            masses = [float(r[0]) for r in rows]
+            self.assertEqual(masses, sorted(masses))
+
+    def test_horizons_rejects_n_family_two(self):
+        # Reviewer Audit round 1, Codex "lower-level" observation: n_family
+        # =1 is a legitimate (differently presented) request, and
+        # n_family>=3 is a genuine bracketing family, but n_family=2 is
+        # neither -- it cannot symmetrically bracket r_crit the way the
+        # family-panel code intends.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(["--mode", "horizons", "--no_plot", "--csvdir", tmp,
+                             "--n_steps", "200", "--bisect_iters", "15",
+                             "--n_family", "2"])
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("n_family", proc.stderr)
+
+    def test_large_n_r_embed_plot_renders_without_error(self):
+        # Reviewer Audit round 1, Codex P2-4 reproducer: n_r at (or near)
+        # the documented MAX_POINTS ceiling previously formed several
+        # 140-by-n_r float64 arrays for the 3-D mesh (over 1 GB combined at
+        # n_r=200,000), a resource cost not mentioned anywhere the ceiling
+        # is documented. This actually renders a PNG (not --no_plot) at a
+        # large n_r and confirms it still completes and produces a
+        # reasonably-sized file, exercising the memory-safe downsampling
+        # in plot_bh.plot_embedding.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(["--mode", "embed", "--outdir", tmp,
+                             "--n_r", "50000"], timeout=180)
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
+            self.assertEqual(len(pngs), 1)
+            self.assertGreater(os.path.getsize(os.path.join(tmp, pngs[0])), 0)
+
+    def test_repeated_csv_writes_do_not_collide(self):
+        # Reviewer Audit round 1, Codex P2-5 reproducer: filenames with
+        # only one-second timestamp resolution could collide when the
+        # program (or a shell-loop parameter sweep, which --no_plot is
+        # explicitly advertised for) writes the same-prefix CSV more than
+        # once within the same wall-clock second, silently overwriting the
+        # earlier file. Three fast back-to-back runs into the same csvdir
+        # must produce three distinct files, not fewer.
+        with tempfile.TemporaryDirectory() as tmp:
+            for _ in range(3):
+                proc = run_cli(["--mode", "embed", "--no_plot", "--csvdir", tmp,
+                                 "--n_r", "15"])
+                self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            csv_files = [f for f in os.listdir(tmp) if f.endswith(".csv")]
+            self.assertEqual(len(csv_files), 3)
 
     def test_horizons_writes_main_and_family_csv(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -87,7 +87,13 @@ def parse_args():
                    help="black-hole mass [solar masses], shared by embed, "
                         "tidal and infall")
     g.add_argument("--r_max_rs", type=float, default=8.0, metavar="R/RS",
-                   help="outer radius of the embedding diagram, in units of r_s")
+                   help="outer radius plotted, in units of r_s -- SHARED "
+                        "between embed and tidal (Reviewer Audit round 1, "
+                        "Codex P2-7), but with different upper bounds for "
+                        "each: embed's picture is specifically about the "
+                        "near-horizon throat, so it is capped at 1000; "
+                        "tidal is also used to verify the far-field 1/r^3 "
+                        "power law (see EXP-8) and so is allowed up to 1e8")
     g.add_argument("--n_r", type=_positive_int, default=400, metavar="N",
                    help="radial points for embed or tidal")
 
@@ -125,23 +131,46 @@ def parse_args():
                    help="final black-hole mass, after accretion (must be >= M0)")
     g.add_argument("--v1_rs0", type=float, default=5.0, metavar="V/RS0",
                    help="advanced time at which accretion begins, in units "
-                        "of the initial light-crossing time r_s0/c")
+                        "of the initial light-crossing time r_s0/c; the "
+                        "advanced-time origin is arbitrary, so this may be "
+                        "any finite value, including zero or negative "
+                        "(only --duration_rs0 and the two margins below "
+                        "have a physically required positive sign)")
     g.add_argument("--duration_rs0", type=float, default=10.0, metavar="V/RS0",
                    help="duration of the accretion episode, in units of r_s0/c")
     g.add_argument("--v_start_margin_rs0", type=float, default=25.0, metavar="V/RS0",
-                   help="how far before --v1_rs0 the shooting method starts "
-                        "firing light rays; larger values reduce the residual "
-                        "error in the located event horizon before v1")
+                   help="how far before --v1_rs0 the displayed run starts, "
+                        "in units of r_s0/c; this selects WHICH EVENT on the "
+                        "event horizon is reported at the left edge of the "
+                        "plot, not a numerical accuracy setting -- the event "
+                        "horizon only equals r_s0 in the strict v -> "
+                        "-infinity limit, so every finite --v_start_margin_rs0 "
+                        "reports the horizon's true, physically nonzero "
+                        "displacement above r_s0 at that specific earlier "
+                        "event (smaller for larger margins, since that "
+                        "displacement itself decays exponentially into the "
+                        "static past), not a truncated estimate of a single "
+                        "fixed number converging as the margin grows")
     g.add_argument("--v_end_margin_rs0", type=float, default=15.0, metavar="V/RS0",
                    help="how far past the end of accretion the integration "
                         "and plot extend")
     g.add_argument("--n_steps", type=_positive_int, default=6000, metavar="N",
-                   help="output-grid resolution in advanced time")
+                   help="output-grid resolution in advanced time (sampling/"
+                        "plot resolution only; does not affect the accuracy "
+                        "of the underlying geodesic integration, which uses "
+                        "its own internal adaptive step size)")
     g.add_argument("--bisect_iters", type=_positive_int, default=60, metavar="N",
-                   help="bisection iterations used to locate the event horizon")
+                   help="bisection iterations for the SECONDARY, diagnostic "
+                        "forward-shooting search only; the reported event "
+                        "horizon itself is located by backward integration "
+                        "from the exact post-accretion boundary condition "
+                        "and does not depend on this setting")
     g.add_argument("--n_family", type=_positive_int, default=9, metavar="N",
                    help="number of nearby geodesics drawn around the "
-                        "event-horizon generator")
+                        "event-horizon generator for the family-of-"
+                        "trajectories panel; use 1 for no bracketing family "
+                        "(just the generator itself) or 3 or more for a "
+                        "genuine bracketing family (2 is rejected)")
 
     g = p.add_argument_group("Output")
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",

@@ -118,8 +118,21 @@ def _provenance(mode, kw):
 
 def _write_csv(csvdir, prefix, header, rows, comments=()):
     os.makedirs(csvdir, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Second-resolution timestamps collide whenever two CSVs with the same
+    # prefix are written inside the same wall-clock second -- e.g. two runs
+    # of the same mode issued back-to-back from a script or test harness.
+    # Microsecond resolution makes a same-second collision astronomically
+    # unlikely, and the explicit exists() loop below closes the remaining
+    # gap (identical microsecond tick, or a clock with coarser-than-us
+    # resolution on some platforms) by appending a disambiguating suffix
+    # instead of silently overwriting the earlier file
+    # (Reviewer Audit round 1).
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     path = os.path.join(csvdir, f"{prefix}_{stamp}.csv")
+    suffix = 1
+    while os.path.exists(path):
+        path = os.path.join(csvdir, f"{prefix}_{stamp}_{suffix}.csv")
+        suffix += 1
     with open(path, "w", newline="", encoding="utf-8") as fh:
         for line in comments:
             fh.write(f"# {line}\n")
@@ -172,6 +185,9 @@ def _print_embed_summary(s):
     print(f"  Schwarzschild radius: {s['rs_km']:.4g}  km")
     print(f"  Plotted out to      : {s['r_max_rs']:.3g}  r_s")
     print(f"  Points              : {s['n_points']:,}")
+    print(f"  Gaussian curvature K at r_s: {s['K_at_horizon']:.4e}  m^-2  "
+          "(negative; see the CSV's gaussian_curvature_K_per_m2 column "
+          "for K(r) at every plotted radius)")
     print(SEP)
     print(f"  {s['throat_note']}")
     print(SEP)
@@ -248,29 +264,37 @@ def _print_horizons_summary(s):
     print(f"  v range integrated  : {s['v_start_rs0']:.3g}  to  {s['v_end_rs0']:.3g}  r_s0")
     print(f"  r_s0/c              : {s['light_crossing_time_rs0_s']*1e6:.4g}  microseconds")
     print(SEP)
-    print(f"  Event-horizon generator located at r/r_s0 = "
-          f"{s['r_crit_over_rs0']:.8f} at v_start")
-    print(f"  Bisection bracket width : {s['residual_rs0']:.3e}  r_s0"
-          f"   ({s['bisect_iters']} iterations)")
-    print("      (this is only the bisection's own precision; it is not a")
-    print("       measure of the separate, generally larger error from the")
-    print("       finite --v_start_margin_rs0 -- see the help file and EXP-10)")
+    print(f"  Event horizon at v_start: r/r_s0 = {s['r_crit_over_rs0']:.8f}")
+    print("      (the PHYSICAL early-time displacement of the event horizon")
+    print("       above r_s0 at this v_start -- not a truncation error; see")
+    print("       the help file and EXP-10)")
+    print(f"  Diagnostic only -- forward bisection search (not used for the")
+    print(f"  reported curve): r/r_s0 = {s['r_crit_shooting_over_rs0']:.8f}"
+          f"  (bracket width {s['residual_rs0']:.3e} r_s0,"
+          f" {s['bisect_iters']} iterations)")
+    print(f"      differs from the reported (backward) result by "
+          f"{s['shooting_vs_backward_rs0']:.3e} r_s0 -- see EXP-13; the")
+    print("       bracket width above measures only bisection's own")
+    print("       precision, not this difference.")
     print(SEP)
     no_accretion = (s["m0_msun"] == s["m1_msun"])
     if no_accretion:
         print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
-        print("  alone.  Event horizon r_EH(v): global, found by shooting outgoing")
-        print("  light rays to the far future.  Here M0 = M1, so the hole never")
-        print("  accretes: the mass function is constant, and the apparent and")
-        print("  event horizons coincide at r = r_s0 for the whole run, as they")
-        print("  always do in a static (unchanging) spacetime.")
+        print("  alone.  Event horizon r_EH(v): global; constructed here by")
+        print("  integrating backward from the exact future boundary condition.")
+        print("  Here M0 = M1, so the hole never accretes: the mass function is")
+        print("  constant, and the apparent and event horizons coincide at")
+        print("  r = r_s0 for the whole run, as they always do in a static")
+        print("  (unchanging) spacetime.")
     else:
         print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
-        print("  alone.  Event horizon r_EH(v): global, found by shooting outgoing")
-        print("  light rays to the far future.  r_EH >= r_AH always; the two")
-        print("  coincide only once the mass has stopped growing (v > v2), and the")
-        print("  event horizon starts rising measurably *before* the accretion")
-        print("  begins (v < v1) -- it anticipates mass that has not arrived yet.")
+        print("  alone.  Event horizon r_EH(v): global; constructed here by")
+        print("  integrating backward from the exact future boundary condition")
+        print("  r(v2) = r_s1.  r_EH >= r_AH throughout this run (checked, not")
+        print("  merely asserted); the two coincide only once the mass has")
+        print("  stopped growing (v > v2), and the event horizon starts rising")
+        print("  measurably *before* the accretion begins (v < v1) -- it")
+        print("  anticipates mass that has not arrived yet.")
     print(SEP)
     _print_warnings(s)
 
@@ -284,13 +308,24 @@ def _run_embed(kw, outdir, csvdir, dpi, lw):
     _print_embed_summary(result["summary"])
     if csvdir is not None:
         s = result["summary"]
-        rows = [[f"{r/s['rs_m']:.6f}", f"{r:.6g}", f"{z:.6g}", f"{d:.6g}"]
-                for r, z, d in zip(result["r"], result["z"],
-                                    result["proper_radial_distance"])]
+        # 17 significant digits round-trips a binary64 float exactly;
+        # earlier .6f/.6g truncation made several exercises (e.g. EXP-5's
+        # percentage-difference comparison) less precise than the
+        # underlying calculation (Reviewer Audit round 1, Codex P2-8).
+        rows = [[f"{r/s['rs_m']:.17g}", f"{r:.17g}", f"{z:.17g}", f"{d:.17g}", f"{k:.17g}"]
+                for r, z, d, k in zip(result["r"], result["z"],
+                                       result["proper_radial_distance"], result["K"])]
         _write_csv(csvdir, f"bh_embed_{s['m_msun']:.2f}Msun",
-                   ["r_over_rs", "r_m", "z_m", "proper_radial_distance_m"],
+                   ["r_over_rs", "r_m", "z_m", "proper_radial_distance_m",
+                    "gaussian_curvature_K_per_m2"],
                    rows,
-                   comments=["Flamm's paraboloid embedding profile"]
+                   # K(r), the intrinsic Gaussian curvature of the slice, is
+                   # now a genuine program output (see physics_bh.
+                   # gaussian_curvature), not only discussed in prose --
+                   # Reviewer Audit round 1, Codex/Copilot EXP-18.
+                   comments=["Flamm's paraboloid embedding profile "
+                             "(K = intrinsic Gaussian curvature, negative "
+                             "everywhere; K(r_s) = -1/(2 r_s^2))"]
                    + _provenance("embed", kw))
     if not kw["no_plot"]:
         viz.plot_embedding(result, outdir=outdir, dpi=dpi, lw=lw)
@@ -315,14 +350,23 @@ def _run_tidal(kw, outdir, csvdir, dpi, lw):
     compare_masses = _parse_float_list("compare_masses", kw["compare_masses"],
                                        lo=1.0e-6, max_items=12)
     if compare_masses:
+        # Sort numerically so ax3/ax4 in plot_tidal (continuous marker+line
+        # plots vs. mass) trace a monotone x-axis instead of zig-zagging
+        # back and forth in whatever order the user typed the masses
+        # (Reviewer Audit round 1, Gemini finding 2).
+        compare_masses = sorted(compare_masses)
         compare_rows = phys.compare_tidal_across_masses(
             compare_masses, separation_m=kw["separation"], limit_g=kw["limit_g"])
         _print_tidal_compare(compare_rows, kw["separation"], kw["limit_g"])
 
     if csvdir is not None:
         s = result["summary"]
-        rows = [[f"{r/s['rs_m']:.6f}", f"{r:.6g}", f"{ar:.6e}", f"{ar/phys.g0:.6e}",
-                 f"{at:.6e}", f"{at/phys.g0:.6e}"]
+        # 17 significant digits round-trips a binary64 float exactly; the
+        # earlier .6f/.6g/.6e truncation made several exercises (e.g.
+        # EXP-5's percentage-difference comparison) less precise than the
+        # underlying calculation (Reviewer Audit round 1, Codex P2-8).
+        rows = [[f"{r/s['rs_m']:.17g}", f"{r:.17g}", f"{ar:.17g}", f"{ar/phys.g0:.17g}",
+                 f"{at:.17g}", f"{at/phys.g0:.17g}"]
                 for r, ar, at in zip(result["r"], result["a_radial"],
                                      result["a_tangential"])]
         _write_csv(csvdir, f"bh_tidal_{s['m_msun']:.2f}Msun",
@@ -332,8 +376,8 @@ def _run_tidal(kw, outdir, csvdir, dpi, lw):
                              "tidal acceleration vs. radius"]
                    + _provenance("tidal", kw))
         if compare_rows:
-            crows = [[f"{r['m_msun']:.6g}", f"{r['rs_km']:.6g}",
-                      f"{r['a_radial_horizon_g']:.6e}", f"{r['r_crit_over_rs']:.6g}",
+            crows = [[f"{r['m_msun']:.17g}", f"{r['rs_km']:.17g}",
+                      f"{r['a_radial_horizon_g']:.17g}", f"{r['r_crit_over_rs']:.17g}",
                       "yes" if r["survives_horizon"] else "no"]
                      for r in compare_rows]
             _write_csv(csvdir, "bh_tidal_compare",
@@ -355,8 +399,15 @@ def _run_infall(kw, outdir, csvdir, dpi, lw):
     _print_infall_summary(result["summary"])
     if csvdir is not None:
         s = result["summary"]
-        rows = [[f"{tau*1e3:.6g}", f"{t*1e3:.6g}", f"{r/s['rs_m']:.6f}",
-                 f"{v:.6f}", f"{z:.6e}", f"{d:.6f}"]
+        # 17 significant digits round-trips a binary64 float exactly. The
+        # earlier .6f formatting for dtau_dt in particular rendered as
+        # "0.000000" near the stopping radius, where dtau_dt decays
+        # exponentially toward zero, permanently destroying the resolution
+        # students need to study the coordinate-time divergence from the
+        # raw CSV (Reviewer Audit round 1, Gemini finding 3; also applied
+        # to the other columns here per Codex P2-8).
+        rows = [[f"{tau*1e3:.17g}", f"{t*1e3:.17g}", f"{r/s['rs_m']:.17g}",
+                 f"{v:.17g}", f"{z:.17g}", f"{d:.17g}"]
                 for tau, t, r, v, z, d in zip(
                     result["tau"], result["t"], result["r"],
                     result["v_local"], result["redshift"], result["dtau_dt"])]
@@ -383,29 +434,42 @@ def _run_horizons(kw, outdir, csvdir, dpi, lw):
     _print_horizons_summary(result["summary"])
     if csvdir is not None:
         s = result["summary"]
-        rows = [[f"{v/s['rs0_m']:.6f}", f"{v:.6g}",
-                 f"{rah/s['rs0_m']:.6f}", f"{reh/s['rs0_m']:.6f}",
-                 f"{rah:.6g}", f"{reh:.6g}"]
+        # 17 significant digits round-trips a binary64 float exactly
+        # (Reviewer Audit round 1, Codex P2-8).
+        rows = [[f"{v/s['rs0_m']:.17g}", f"{v:.17g}",
+                 f"{rah/s['rs0_m']:.17g}", f"{reh/s['rs0_m']:.17g}",
+                 f"{rah:.17g}", f"{reh:.17g}"]
                 for v, rah, reh in zip(result["v"], result["r_AH"], result["r_EH"])]
         _write_csv(csvdir, f"bh_horizons_{s['m0_msun']:.2f}to{s['m1_msun']:.2f}Msun",
                    ["v_over_rs0", "v_m", "r_AH_over_rs0", "r_EH_over_rs0",
                     "r_AH_m", "r_EH_m"], rows,
+                   # r_EH(v) here is constructed by backward-integrating the
+                   # outgoing null geodesic from the exact future boundary
+                   # condition r(v2) = 2*M1, not by forward shooting/bisection
+                   # (MODEL_VERSION 1.2.0; Reviewer Audit round 1, Copilot
+                   # P1-2 and Codex). The forward-shooting bracket, retained
+                   # only as a secondary diagnostic, is reported separately
+                   # in the run summary as r_crit_shooting_over_rs0 /
+                   # shooting_vs_backward_rs0, not in this CSV.
                    comments=["apparent horizon r_AH(v) = 2M(v) vs. the "
-                             "shooting-method event horizon r_EH(v)"]
+                             "event horizon r_EH(v), constructed by backward "
+                             "integration from r(v2)=2*M1"]
                    + _provenance("horizons", kw)
-                   + [f"event-horizon bisection residual = "
+                   + [f"forward-shooting bracket residual (diagnostic only, "
+                      f"not the event-horizon error) = "
                       f"{s['residual_rs0']:.3e} r_s0"])
         frows = []
         for j, fam in enumerate(result["family"]):
             for v, r in zip(fam["v"], fam["r"]):
-                frows.append([j, f"{fam['r_i_over_rs0']:.6f}",
+                frows.append([j, f"{fam['r_i_over_rs0']:.17g}",
                               "yes" if fam["escapes"] else "no",
-                              f"{v/s['rs0_m']:.6f}", f"{r/s['rs0_m']:.6f}"])
+                              f"{v/s['rs0_m']:.17g}", f"{r/s['rs0_m']:.17g}"])
         _write_csv(csvdir, "bh_horizons_family",
                    ["trajectory_id", "r_i_over_rs0", "escapes",
                     "v_over_rs0", "r_over_rs0"], frows,
                    comments=["family of outgoing null geodesics bracketing "
-                             "the event-horizon generator"]
+                             "the event-horizon generator (diagnostic/"
+                             "visualization only; not the reported r_EH(v))"]
                    + _provenance("horizons", kw))
     if not kw["no_plot"]:
         viz.plot_horizons(result, outdir=outdir, dpi=dpi, lw=lw)
