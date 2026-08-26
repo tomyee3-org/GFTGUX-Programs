@@ -49,7 +49,7 @@ gravity g.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -175,8 +175,34 @@ TRUSTED_MASS_HI = 5.0e10     # Msun -- above the most massive black holes known
 # at once.
 MAX_COMPUTABLE_MASS_MSUN = 1.0e80   # Msun -- computational ceiling, not physical
 
+# A symmetric floor at the other extreme. Unlike the ceiling above, the
+# failure mode here is not overflow to inf but silent UNDERFLOW to an
+# impossible exact zero deep in downstream arithmetic (e.g. GM/r**3
+# underflowing to 0.0 once r**3 itself has overflowed to inf) -- the same
+# failure class the gaussian_curvature fix (below) already guards against
+# for that one function, generalised here to a documented, enforced input
+# floor instead of leaving every mass-taking function to discover its own
+# underflow independently. 1e-38 Msun is chosen to sit just below the
+# Planck mass (~1.09e-38 Msun): below that scale a purely classical
+# treatment of spacetime is not expected to be meaningful regardless of
+# computability, so nothing pedagogically meaningful is excluded, and
+# schwarzschild_radius at this floor (~3e-35 m) stays many orders of
+# magnitude clear of double precision's subnormal range, keeping every
+# downstream quantity this program forms from it (including an r0_rs or
+# r_max_rs up to 1e8 times larger, or a duration_rs0 many orders larger
+# still) comfortably representable.
+MIN_COMPUTABLE_MASS_MSUN = 1.0e-38   # Msun -- computational floor, not physical
+
 MAX_POINTS = 200_000
 MAX_STEPS = 4_000_000
+
+# The backward event-horizon integrator's own step_frac/max_steps, factored
+# out to module level so vaidya_horizons can estimate, and check, the
+# number of steps a requested accretion window will need using the exact
+# same figures the integrator itself defaults to, instead of duplicating
+# (and risking drifting out of sync with) two hardcoded literals.
+_BACKWARD_STEP_FRAC = 0.01
+_BACKWARD_MAX_STEPS = 300_000
 
 
 # ======================================================================
@@ -225,11 +251,13 @@ def check_mass(name, m_msun):
     """
     Validate a black-hole mass in solar masses.  Returns (m_msun, warnings).
 
-    Any positive mass is accepted -- the Schwarzschild solution has no
-    intrinsic mass scale -- but masses outside the range of astrophysically
-    known black holes are flagged, because the pedagogical point of running
-    one (for example, a 1 solar-mass or a 1e12 solar-mass hole) is usually
-    precisely to see the numbers become extreme.
+    Every mass between MIN_COMPUTABLE_MASS_MSUN and MAX_COMPUTABLE_MASS_MSUN
+    is accepted -- the Schwarzschild solution itself has no intrinsic mass
+    scale, so those two bounds are computational, not physical, limits (see
+    their own module-level comments) -- but masses outside the range of
+    astrophysically known black holes are flagged, because the pedagogical
+    point of running one (for example, a 1 solar-mass or a 1e12 solar-mass
+    hole) is usually precisely to see the numbers become extreme.
     """
     m_msun = _require_positive(name, m_msun)
     if m_msun > MAX_COMPUTABLE_MASS_MSUN:
@@ -238,13 +266,30 @@ def check_mass(name, m_msun):
         # exactly and reported), it is "too large for this program's own
         # arithmetic to stay finite" (refused outright, with a clear reason,
         # rather than silently producing inf/-0/NaN or an uncaught
-        # OverflowError several calls deeper -- Reviewer Audit round 2,
-        # Codex P2-2).
+        # OverflowError several calls deeper). Both boundary values are
+        # formatted at full double precision (not the usual :g) so that a
+        # mass exactly at, or one ULP above, the ceiling is distinguishable
+        # in the message rather than both rendering as the same rounded
+        # figure.
         raise ValueError(
-            f"{name} = {m_msun:g} Msun exceeds {MAX_COMPUTABLE_MASS_MSUN:g} "
-            "Msun, the largest mass this program can compute with in double "
-            "precision without overflowing (this is a computational limit, "
-            "not a physical one -- see MAX_COMPUTABLE_MASS_MSUN)."
+            f"{name} = {m_msun:.17g} Msun exceeds "
+            f"{MAX_COMPUTABLE_MASS_MSUN:.17g} Msun, the largest mass this "
+            "program can compute with in double precision without "
+            "overflowing (this is a computational limit, not a physical "
+            "one -- see MAX_COMPUTABLE_MASS_MSUN)."
+        )
+    if m_msun < MIN_COMPUTABLE_MASS_MSUN:
+        # The low-mass mirror of the ceiling above: not "astrophysically
+        # implausible" (also just a warning, below) but "too small for this
+        # program's own downstream arithmetic to stay clear of subnormal
+        # underflow" -- see MIN_COMPUTABLE_MASS_MSUN's module-level comment.
+        raise ValueError(
+            f"{name} = {m_msun:.17g} Msun is below "
+            f"{MIN_COMPUTABLE_MASS_MSUN:.17g} Msun, the smallest mass this "
+            "program can compute with while keeping every downstream "
+            "quantity safely clear of double-precision subnormal underflow "
+            "(this is a computational limit, not a physical one -- see "
+            "MIN_COMPUTABLE_MASS_MSUN)."
         )
     warnings = []
     if m_msun < TRUSTED_MASS_LO:
@@ -269,9 +314,16 @@ def check_mass(name, m_msun):
 def schwarzschild_radius(m_msun):
     """r_s = 2GM/c^2, in metres, computed as 2*m_msun*GM_SUN_NOMINAL/c^2
     using the IAU nominal solar mass parameter directly rather than
-    separately-sourced G and kilogram values for the Sun (Reviewer Audit
-    round 1, Codex P2-2; see the GM_SUN_NOMINAL module-level comment)."""
-    m_msun = _require_positive("mass", m_msun)
+    separately-sourced G and kilogram values for the Sun (see the
+    GM_SUN_NOMINAL module-level comment). m_msun is validated with the same
+    check_mass() every other public mass-taking entry point uses, so the
+    MAX_COMPUTABLE_MASS_MSUN/MIN_COMPUTABLE_MASS_MSUN computational bounds
+    apply uniformly everywhere a mass enters this module, not only through
+    the higher-level *_profile functions; any warnings check_mass would
+    also return (e.g. for an astrophysically implausible but computable
+    mass) are intentionally not surfaced by this low-level helper -- callers
+    that need them call check_mass directly."""
+    m_msun, _ = check_mass("mass", m_msun)
     rs = 2.0 * m_msun * GM_SUN_NOMINAL / c**2
     if not math.isfinite(rs):
         # A finite input mass does not guarantee a finite result: an
@@ -421,22 +473,17 @@ def gaussian_curvature(rs, r_m):
 
     This is a public function callable directly (not only via
     embedding_profile), so it validates its own inputs and its own result
-    rather than relying on a caller to have done so first -- previously it
-    did neither, and would silently return -0.0 for r_m large enough that
-    r_m**3 overflows to inf (Reviewer Audit round 2, Codex P2-2).
+    rather than relying on a caller to have done so first: an r_m large
+    enough that r_m**3 overflows to inf would otherwise silently return
+    -0.0 instead of raising.
 
     An isfinite() check on K alone is NOT sufficient to catch that failure
-    mode: -rs / inf underflows to exactly -0.0, which IS finite, so an
-    isfinite-only guard (the first version of this fix) let the very
-    silent-zero bug its own docstring described straight through --
-    caught by this suite's own
-    test_gaussian_curvature_rejects_overflowing_r_m while exhaustively
-    sweeping for further defects after Audit round 2. K(r) = -r_s/(2 r^3)
-    is strictly negative for every finite rs > 0, r_m > 0, so an exact
-    zero (signed or not) is itself proof that overflow silently occurred,
-    and is checked for explicitly below, in addition to the isfinite
-    check (which still catches nan/inf results from other overflow
-    patterns this formula could in principle hit).
+    mode: -rs / inf underflows to exactly -0.0, which IS finite. K(r) =
+    -r_s/(2 r^3) is strictly negative for every finite rs > 0, r_m > 0, so
+    an exact zero (signed or not) is itself proof that overflow silently
+    occurred, and is checked for explicitly below, in addition to the
+    isfinite check (which still catches nan/inf results from other
+    overflow patterns this formula could in principle hit).
     """
     rs = _require_positive("rs", rs)
     r_m = np.asarray(r_m, dtype=float)
@@ -524,8 +571,8 @@ def tidal_acceleration(m_msun, r_m, separation_m=1.8):
     printed, plotted or labelled in a CSV column, rather than by a sign on
     the number itself.
 
-    Precision is warranted about exactly what is and is not exact here
-    (Reviewer Audit round 1, Codex P1-5). The curvature *components*
+    Precision is warranted about exactly what is and is not exact here.
+    The curvature *components*
     2GM/r^3 and GM/r^3 -- the coefficients multiplying `separation_m`
     above -- are exact results for Schwarzschild: a fact worth pausing on
     is that they are the *same* whether the observer is static or in
@@ -544,7 +591,7 @@ def tidal_acceleration(m_msun, r_m, separation_m=1.8):
     guarantee it -- see `TIDAL_LINEARIZATION_RATIO_WARN` and the warning
     `tidal_profile` adds when the ratio is not small.
     """
-    m_msun = _require_positive("mass", m_msun)
+    m_msun, _ = check_mass("mass", m_msun)
     separation_m = _require_positive("separation_m", separation_m)
     r_m = np.asarray(r_m, dtype=float)
     if not np.all(np.isfinite(r_m)):
@@ -552,18 +599,33 @@ def tidal_acceleration(m_msun, r_m, separation_m=1.8):
     if np.any(r_m <= 0.0):
         raise ValueError("r_m must be strictly positive.")
     # GM directly from the IAU nominal solar mass parameter, not G times a
-    # separately-sourced kilogram mass -- see GM_SUN_NOMINAL (Reviewer
-    # Audit round 1, Codex P2-2). tidal_acceleration is a public helper
-    # that tidal_profile does not gate behind its own validation, so this
-    # function validates its own inputs directly (Codex P2-3).
+    # separately-sourced kilogram mass -- see GM_SUN_NOMINAL.
+    # tidal_acceleration is a public helper that tidal_profile does not
+    # gate behind its own validation, so this function validates its own
+    # inputs (via check_mass, the same as every other public mass-taking
+    # entry point) directly.
     GM = m_msun * GM_SUN_NOMINAL
-    coeff = GM / r_m**3
+    with np.errstate(over="ignore"):
+        coeff = GM / r_m**3
     a_radial = 2.0 * coeff * separation_m
     a_tangential = coeff * separation_m
     if not (np.all(np.isfinite(a_radial)) and np.all(np.isfinite(a_tangential))):
         raise ValueError(
             "tidal_acceleration produced a non-finite result; m_msun, r_m "
             "and separation_m are too extreme in combination."
+        )
+    # a_radial = 2*GM*separation_m/r_m**3 is strictly positive for every
+    # finite, positive m_msun/r_m/separation_m, so an exact zero (a_radial
+    # or a_tangential, which share the same sign) is itself proof that an
+    # intermediate quantity silently underflowed -- most commonly r_m**3
+    # overflowing to inf and GM/inf rounding to exactly 0.0, which the
+    # isfinite check above cannot catch (0.0 is finite) -- the same failure
+    # class gaussian_curvature guards against for its own formula.
+    if np.any(a_radial == 0.0) or np.any(a_tangential == 0.0):
+        raise ValueError(
+            "tidal_acceleration underflowed to an impossible exact zero; "
+            "m_msun, r_m and separation_m are too extreme in combination "
+            "to compute with in double precision."
         )
     return a_radial, a_tangential
 
@@ -598,8 +660,7 @@ def tidal_profile(m_msun=10.0, r_min_rs=1.01, r_max_rs=10.0, n_r=400,
     example this program is meant to illustrate -- but it is not
     guaranteed by the code's own bounds on mass and separation, so a
     warning is added to the summary when separation_m exceeds
-    TIDAL_LINEARIZATION_RATIO_WARN times the smallest sampled radius
-    (Reviewer Audit round 1, Codex P1-5).
+    TIDAL_LINEARIZATION_RATIO_WARN times the smallest sampled radius.
     """
     m_msun, warn_m = check_mass("mass", m_msun)
     r_min_rs = _require_finite("r_min_rs", r_min_rs)
@@ -684,18 +745,26 @@ def survival_radius(m_msun, separation_m=1.8, limit_g=100.0):
     student to adopt a different one and see how little the qualitative
     conclusion changes.
     """
-    m_msun = _require_positive("mass", m_msun)
+    m_msun, _ = check_mass("mass", m_msun)
     separation_m = _require_positive("separation_m", separation_m)
     limit_g = _require_positive("limit_g", limit_g)
-    # GM from the IAU nominal solar mass parameter directly (Reviewer Audit
-    # round 1, Codex P2-2; see GM_SUN_NOMINAL).
+    # GM from the IAU nominal solar mass parameter directly -- see
+    # GM_SUN_NOMINAL.
     GM = m_msun * GM_SUN_NOMINAL
-    limit_a = limit_g * g0
-    r_crit = (2.0 * GM * separation_m / limit_a) ** (1.0 / 3.0)
-    if not math.isfinite(r_crit):
+    with np.errstate(over="ignore"):
+        limit_a = limit_g * g0
+        r_crit = (2.0 * GM * separation_m / limit_a) ** (1.0 / 3.0)
+    # r_crit is strictly positive for every finite, positive m_msun,
+    # separation_m and limit_g, so an exact zero is itself proof of a
+    # silent underflow somewhere upstream (e.g. limit_a overflowing to inf,
+    # so the cube root's own argument rounds to 0.0) -- the isfinite check
+    # alone cannot catch that, since 0.0 is finite (same failure class as
+    # tidal_acceleration/gaussian_curvature).
+    if not math.isfinite(r_crit) or r_crit <= 0.0:
         raise ValueError(
-            "survival_radius produced a non-finite result; m_msun, "
-            "separation_m and limit_g are too extreme in combination."
+            "survival_radius produced a non-finite or impossible zero "
+            "result; m_msun, separation_m and limit_g are too extreme in "
+            "combination to compute with in double precision."
         )
     return r_crit
 
@@ -710,9 +779,8 @@ def compare_tidal_across_masses(mass_list_msun, separation_m=1.8, limit_g=100.0)
 
     Each mass is validated the same way as the primary `--M` mass (via
     `check_mass`), so a comparison mass outside the astrophysically known
-    range is flagged in the returned row's `warnings`, not silently accepted
-    -- the earlier version of this function used a looser check that missed
-    this.
+    range is flagged in the returned row's `warnings`, not silently
+    accepted.
     """
     limit_g = _require_positive("limit_g", limit_g)
     rows = []
@@ -816,17 +884,25 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     version of the integrator, --step_frac 0.2 (the coarsest value allowed)
     already agrees with an exact closed-form (cycloid-parametrised) benchmark
     solution to a few parts in 10^6 for the default parameters (measured:
-    about 1.6e-6 relative error -- Reviewer Audit round 2, Codex P2-1 caught
-    the previous, more precise-sounding "better than one part in 10^6"
-    phrasing here disagreeing with its own measured 1.56e-6). Refining
-    --step_frac from there improves the agreement roughly as step_frac^3-4
-    down to about 0.005, where the shrinking RK4 truncation error and the
-    accumulated floating-point round-off from many more, individually
-    tinier steps become comparable; below that the relative error stays in
-    a tiny (sub-1e-8) floating-point-noise band but is not guaranteed to
-    keep improving monotonically step by step (see EXP-11, which was
-    previously overstated as a clean factor-of-16-per-halving convergence
-    all the way down).
+    about 1.56e-6 relative error at the coarsest allowed --step_frac of
+    0.2). Refining --step_frac from there improves the agreement roughly as
+    step_frac^3-4 down to about 0.005, where the shrinking RK4 truncation
+    error and the accumulated floating-point round-off from many more,
+    individually tinier steps become comparable; below that the relative
+    error does NOT settle into a monotonically non-increasing floor. It
+    drops to its smallest measured values (order 1e-10 to 1e-11) around
+    --step_frac 0.005-0.0002, then climbs back up through the accepted
+    logarithmic range as step_frac keeps shrinking (measured: about
+    4.7e-8 at 1e-4, 7.0e-8 at 5e-5, 2.0e-7 approaching the smallest
+    accepted values near 1e-5) as accumulated floating-point round-off
+    from ever more, ever tinier steps comes to dominate the shrinking RK4
+    truncation error. Even so, across the ENTIRE accepted (1e-5, 0.2]
+    --step_frac interval the relative error never exceeds its coarsest-
+    step-size value (about 1.56e-6, comfortably inside the documented
+    ~1e-5 tolerance): the non-monotonic tail at small step_frac is real,
+    but small relative to the coarse end, not a runaway (see EXP-11,
+    which documents this measured, non-monotonic behaviour explicitly
+    rather than claiming an unconditional floor).
 
     r_stop_rs must exceed 1: the Schwarzschild t coordinate, and this
     integrator's use of it, both break down at the horizon itself, which is
@@ -1247,7 +1323,8 @@ def _integrate_null_geodesic(v_start, r_start, v_end, m0, m1, v1, v2,
 
 
 def _integrate_event_horizon_backward(v_bc, r_bc, v_target, m0, m1, v1, v2,
-                                      step_frac=0.01, max_steps=300_000):
+                                      step_frac=_BACKWARD_STEP_FRAC,
+                                      max_steps=_BACKWARD_MAX_STEPS):
     """
     Construct the event-horizon generator r_EH(v) directly, by RK4
     integrating dr/dv = (1/2)(1-2M(v)/r) BACKWARD in v from the exact
@@ -1314,10 +1391,17 @@ def _integrate_event_horizon_backward(v_bc, r_bc, v_target, m0, m1, v1, v2,
         # Codex P1-1: --duration_rs0 600 produced a non-monotonic r_EH(v);
         # 850 and beyond produced one that dipped below r_AH(v)).
         dv = min(dv_r, step_frac * mass_scale)
-        dv = max(dv, 1.0e-9 * v_scale)
+        # This floor uses mass_scale, the SAME local scale as the cap two
+        # lines above -- not v_scale, which grows with --duration_rs0. A
+        # v_scale-based floor would, at sufficiently large duration,
+        # eventually exceed the mass_scale-based cap and override it,
+        # reintroducing (via the floor rather than the cap this time) the
+        # duration-dependent step blow-up this integrator's local cap
+        # exists to prevent.
+        dv = max(dv, 1.0e-9 * mass_scale)
         # Remaining-interval cap applied LAST so it always wins on the
-        # final step (Reviewer Audit round 2, Codex P3-1 / Gemini finding
-        # 1: the floor above previously could re-overshoot v_target).
+        # final step (the floor above could otherwise re-overshoot
+        # v_target).
         dv = min(dv, v - v_target)
         # Same hinge-alignment reasoning as the forward integrator: do not
         # let one RK4 step straddle v1 or v2, where M(v)'s derivative is
@@ -1350,11 +1434,26 @@ def _integrate_event_horizon_backward(v_bc, r_bc, v_target, m0, m1, v1, v2,
             )
 
     if v > v_target and steps >= max_steps:
+        # Report which of the two spans that make up (v_bc - v_target) is
+        # actually responsible, rather than always pointing at
+        # --v_start_margin_rs0: for a long accretion episode, the
+        # (v2-v1) duration span is typically what dominates, and shrinking
+        # a comparatively small start margin would not meaningfully help.
+        duration_span = max(v2 - v1, 0.0)
+        margin_span = max(v1 - v_target, 0.0)
         raise RuntimeError(
             f"The backward event-horizon integration hit the internal "
             f"step cap ({max_steps:,} steps) before reaching v_start "
-            f"(stopped at (v-v_target)/v_scale = {(v - v_target)/v_scale:.3g} "
-            "short). Try a smaller --v_start_margin_rs0."
+            f"(stopped at (v-v_target)/mass_scale = "
+            f"{(v - v_target)/mass_scale:.3g} short). This integrator "
+            "needs roughly (v_bc-v_target)/(step_frac*mass_scale) steps; "
+            f"of the span requested here, {duration_span/v_scale:.3g} "
+            "v_scale comes from the accretion duration (v2-v1) and "
+            f"{margin_span/v_scale:.3g} v_scale comes from how far before "
+            "accretion starts the run was asked to begin "
+            "(--v_start_margin_rs0) -- whichever is larger is the actual "
+            "bottleneck; shrink that one, or increase --M0/--M1. "
+            "--n_steps has no effect on this internal integration."
         )
 
     v_arr = np.asarray(v_list[::-1])
@@ -1380,44 +1479,38 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         escape to infinity.  It is generated by the one outgoing null
         geodesic that neither falls to r = 0 nor escapes to r -> infinity.
 
-    CHANGE OF METHOD as of MODEL_VERSION 1.2.0 (Reviewer Audit round 1:
-    Codex findings P1-1/P1-2/P2-1, Copilot findings P1-1/P1-2). The
-    reported r_EH(v) curve is now built by integrating the outgoing null
+    The reported r_EH(v) curve is built by integrating the outgoing null
     geodesic BACKWARD in v from the exact boundary condition r = 2 m1 at
     v = v2 (once accretion has finished the spacetime is exactly static
     with mass m1, so the event and apparent horizons coincide there
-    exactly, by definition, needing no search). This replaces the
-    previous round's forward "shooting" construction -- bisecting a
-    starting radius deep in the static era and integrating forward to
-    v_end -- as the PRIMARY source of the reported horizon. The forward
-    construction is retained below, but only as (a) the mechanism behind
-    the geodesic-family visualisation panel, and (b) a secondary
-    diagnostic (`shooting_vs_backward_rs0`) that quantifies its own
-    error, no longer as the thing being reported.
+    exactly, by definition, needing no search). This is the PRIMARY source
+    of the reported horizon. A forward "shooting" construction -- bisecting
+    a starting radius deep in the static era and integrating forward to
+    v_end -- is also computed, but only as (a) the mechanism behind the
+    geodesic-family visualisation panel, and (b) a secondary diagnostic
+    that quantifies its own error against the primary curve, never as the
+    thing being reported.
 
-    Why the change: r = 2M(v) is a fixed point of dr/dv = (1/2)(1-2M/r)
-    whenever M is locally constant (before v1, and again after v2).
-    Linearising an offset epsilon = r - 2M gives d(epsilon)/dv =
-    epsilon/(2M): the fixed point is UNSTABLE forward in v and STABLE
-    backward in v (same ODE, opposite direction). The forward shooting
-    construction inherits that instability -- any offset from the true
-    generator, even one at the single-ULP level that is all bisection can
-    ever remove, is amplified exponentially over however much v-range
+    Why backward rather than forward: r = 2M(v) is a fixed point of
+    dr/dv = (1/2)(1-2M/r) whenever M is locally constant (before v1, and
+    again after v2). Linearising an offset epsilon = r - 2M gives
+    d(epsilon)/dv = epsilon/(2M): the fixed point is UNSTABLE forward in v
+    and STABLE backward in v (same ODE, opposite direction). The forward
+    shooting construction inherits that instability -- any offset from the
+    true generator, even one at the single-ULP level that is all bisection
+    can ever remove, is amplified exponentially over however much v-range
     --v_start_margin_rs0/--v_end_margin_rs0 request -- while the backward
     construction, starting from an *exact* boundary condition, is
-    self-correcting in the same sense. Reviewer Audit round 1 demonstrated
-    concretely that the previous forward-only construction could return a
-    curve that numerically violates its own documented invariant
-    r_EH >= r_AH (reproduced with M0=10, M1=10.5 at every documented
-    default -- no unusual --bisect_iters or margin needed -- where the
-    forward r_EH undershot r_s1, and hence r_AH there, by several parts in
-    a million), and, at the low --bisect_iters values Exercise EXP-13
-    directly told students to try, could be wrong by *several r_s0* (the
-    M0==M1 case fixed in the previous round was, in retrospect, a special
-    case of this same general fragility, not an isolated defect of its
-    own -- the general backward construction below also gives the exact
-    M0==M1 answer, without needing that round's special case at all,
-    which is kept only as a fast path).
+    self-correcting in the same sense. A forward-only construction can
+    return a curve that numerically violates the documented invariant
+    r_EH >= r_AH (reproducible with M0=10, M1=10.5 at every documented
+    default -- no unusual --bisect_iters or margin needed -- where a
+    forward-only r_EH undershoots r_s1, and hence r_AH there, by several
+    parts in a million), and at the low --bisect_iters values Exercise
+    EXP-13 directly asks students to try, can be wrong by *several r_s0*.
+    The M0==M1 case is handled as a fast path (the exact algebraic answer
+    r_EH=r_AH=r_s0), but the general backward construction would also
+    recover it directly, without needing a special case, if asked to.
 
     `residual_rs0` (the forward bisection bracket's width) and
     `r_crit_shooting_over_rs0` (the forward-located critical radius
@@ -1426,18 +1519,35 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     halved, not the accuracy of the geodesic inside it, and it is driven
     to floating-point noise (~2^-60 relative) by `bisect_iters` alone,
     independent of everything else -- do not read a small residual as
-    evidence the forward-shooting horizon itself is accurate (Reviewer
-    Audit round 1, Codex P2-1 and Copilot P1-5). The genuinely useful
-    accuracy comparison is `shooting_vs_backward_rs0`, the actual
-    difference between the forward and backward constructions at
-    v_start: at generous settings the two agree to many significant
-    figures (a real, meaningful convergence check); at the settings
-    Exercise EXP-13 explores, they can differ by orders of r_s0, which is
-    the point of that exercise once correctly framed (see EXP-13 in the
-    help file).
+    evidence the forward-shooting horizon itself is accurate.
+    `shooting_vs_backward_rs0` compares only the two constructions'
+    STARTING radius at v_start; it is not, by itself, a curve-wise
+    accuracy comparison, and can read deceptively small even when the
+    forward-shooting trial has already plunged or escaped well before v2
+    and differs from the true (backward) horizon by order unity in r_s0
+    somewhere along its own track -- exactly what the low --bisect_iters
+    settings Exercise EXP-13 asks students to try produce. The genuinely
+    useful curve-wise diagnostics are `shooting_reached_v2` (whether the
+    forward trial even got as far as v2), `shooting_v2_boundary_residual_rs0`
+    (how far its own endpoint landed from r_s1, when it did reach v2), and
+    `shooting_vs_backward_curve_max_rs0` (the true maximum pointwise
+    difference between the two curves over whatever portion of
+    [v_start, v2] the forward trial actually covers, computed exactly on
+    the union of both curves' own integration nodes rather than a fixed
+    sampling grid). Use those three fields, not `shooting_vs_backward_rs0`
+    alone, to judge whether a forward-shooting trial has actually tracked
+    the true event horizon (see EXP-13 in the help file).
+    `shooting_v2_boundary_residual_rs0` is the Python float `nan` (not 0.0
+    and not omitted) whenever `shooting_reached_v2` is False, since "how
+    far the endpoint landed from r_s1" is undefined for a trial that never
+    reached v2 -- always check `shooting_reached_v2` first. `nan` is valid
+    in this dict's own return value and in the printed run summary, but is
+    not valid strict JSON; a caller serializing this field to JSON should
+    convert it (e.g. to `null`) explicitly rather than relying on a
+    JSON encoder's non-standard NaN extension.
 
-    `r_crit_over_rs0 - 1` (from the now-primary backward construction) is
-    the physical, not merely numerical, displacement of the true event
+    `r_crit_over_rs0 - 1` (from the primary backward construction) is the
+    physical, not merely numerical, displacement of the true event
     horizon above the static value r = 2 m0 at the chosen v_start: because
     the exact event horizon only equals 2 m0 in the strict v_start ->
     -infinity limit, every finite v_start asks for the horizon's radius
@@ -1446,9 +1556,16 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     earlier measures that physical displacement at an earlier event (where
     it is smaller, since the displacement itself decays exponentially into
     the static past); it does not converge a numerical error toward zero.
-    (Reviewer Audit round 1, Codex P1-2 and Copilot P1-1: the previous
-    docstring/help-file language calling this a "finite-v_start truncation
-    error" was a genuine conceptual mistake, now corrected throughout.)
+
+    v1_rs0 (where accretion begins) sits on an advanced-time axis whose
+    origin is arbitrary: the physical problem depends only on v-v1, the
+    duration, and the two margins, never on v1's own magnitude, and
+    v1_rs0 may legally be any finite value, including zero or a very large
+    positive or negative number. All integration below is therefore
+    carried out in a coordinate shifted so v1 sits at the origin, with the
+    arbitrary offset added back in only once, at the very end, to form the
+    returned/exported absolute-v arrays -- so that an extreme v1_rs0 never
+    by itself degrades the numerical conditioning of the result.
     """
     m0_msun, warn0 = check_mass("M0", m0_msun)
     m1_msun, warn1 = check_mass("M1", m1_msun)
@@ -1489,12 +1606,96 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     m1 = _mass_geom(m1_msun)
     rs0 = 2.0 * m0
     rs1 = 2.0 * m1
-    v1 = v1_rs0 * rs0
-    v2 = v1 + duration_rs0 * rs0
-    v_start = v1 - v_start_margin_rs0 * rs0
+
+    # All integration below is carried out in u = v - v1_abs, NOT in the
+    # absolute v1_rs0*rs0 coordinate directly: v1_rs0 is documented (and
+    # tested) as "any finite value, including zero or negative", but the
+    # physical problem depends only on v-v1, duration, and the two
+    # margins -- never on v1's own magnitude. At a large enough |v1_rs0|,
+    # subtracting an rs0-scale RK4 step dv from an absolute v of order
+    # v1_rs0*rs0 loses, or badly quantizes, that step in float64
+    # arithmetic, which can starve the backward integrator's step budget
+    # even though the physical scenario is identical to the one at
+    # v1_rs0=0. Working in u keeps every quantity actually stepped over at
+    # the rs0/duration/margin scale, however large v1_rs0 is; v1_abs is
+    # added back in only once, at the very end, to form the returned/
+    # exported absolute-v arrays. v1 itself is now the exact float 0.0 in
+    # this shifted coordinate, not merely close to it.
+    v1_abs = v1_rs0 * rs0
+    v1 = 0.0
+    v2 = duration_rs0 * rs0
+    v_start = -v_start_margin_rs0 * rs0
     v_end = v2 + v_end_margin_rs0 * rs0
+    # The rs0-relative summary quantities are computed directly from the
+    # inputs, not by dividing the (now u-space) v_start/v_end by rs0.
+    v1_rs0_summary = v1_rs0
+    v2_rs0_summary = v1_rs0 + duration_rs0
+    v_start_rs0_summary = v1_rs0 - v_start_margin_rs0
+    v_end_rs0_summary = v2_rs0_summary + v_end_margin_rs0
 
     no_accretion = (m0_msun == m1_msun)
+
+    if not no_accretion:
+        # duration_rs0 is already required strictly positive above, but a
+        # sufficiently tiny duration_rs0 leaves no SAFELY representable
+        # accretion interval, in either of two related ways: (a) at an
+        # extreme mass near MIN_COMPUTABLE_MASS_MSUN, rs0 itself is tiny
+        # enough that duration_rs0*rs0 can underflow to exactly 0.0 = v1,
+        # collapsing the interval outright; (b) at ANY mass, the mass
+        # fraction computed inside vaidya_mass_of_v is a RATIO of
+        # dimensionless, mass-independent quantities -- (v-v1)/(v2-v1),
+        # which for v at the far edge of the run is of order
+        # max(v_start_margin_rs0, v_end_margin_rs0)/duration_rs0 -- and
+        # this ratio can overflow double precision even when v2 itself is
+        # a perfectly ordinary, nonzero float (reproduced with the
+        # documented default M0=5, M1=10, --v_start_margin_rs0 25: an
+        # ordinary RuntimeWarning-turned-overflow at --duration_rs0 below
+        # about 1e-308, well before v2=duration_rs0*rs0 itself underflows
+        # to zero). Both failure modes are caught by the single check
+        # below, which is independent of rs0's absolute magnitude (and
+        # therefore of --M0/--M1) by construction, since it compares only
+        # dimensionless, rs0-relative quantities.
+        _margin_scale = max(v_start_margin_rs0, v_end_margin_rs0, 1.0)
+        _duration_margin_ratio = _margin_scale / duration_rs0
+        if not math.isfinite(_duration_margin_ratio) or _duration_margin_ratio > 1.0e250:
+            raise ValueError(
+                f"duration_rs0 = {duration_rs0:.17g} r_s0 is too small "
+                "relative to this run's own margins (--v_start_margin_rs0 = "
+                f"{v_start_margin_rs0:.6g}, --v_end_margin_rs0 = "
+                f"{v_end_margin_rs0:.6g}) to divide into safely in double "
+                "precision -- the mass-fraction ratio this integration "
+                "depends on would overflow. Increase --duration_rs0 (or "
+                "decrease the margins)."
+            )
+
+    # An explicit, checked bound on how long an accretion episode this
+    # program can resolve, rather than silently burning the internal
+    # step cap (a double-digit number of seconds) before failing: the
+    # backward integrator needs roughly
+    # (v2-v_start)/(_BACKWARD_STEP_FRAC*mass_scale) steps for a shallow,
+    # slowly varying mass ramp, where mass_scale = m0+m1 in this run's
+    # geometrized units, and (v2-v_start) is dominated by whichever of
+    # --duration_rs0 or --v_start_margin_rs0 is numerically larger.
+    if not no_accretion:
+        _mass_scale_estimate = max(m0 + m1, 1.0e-30)
+        _backward_span_estimate = v2 - v_start
+        _estimated_backward_steps = (
+            _backward_span_estimate / (_BACKWARD_STEP_FRAC * _mass_scale_estimate)
+        )
+        if _estimated_backward_steps > _BACKWARD_MAX_STEPS:
+            _duration_share = duration_rs0 * rs0
+            _margin_share = v_start_margin_rs0 * rs0
+            raise ValueError(
+                f"The requested accretion window needs roughly "
+                f"{_estimated_backward_steps:,.0f} backward-integration "
+                f"steps to resolve, more than the internal cap of "
+                f"{_BACKWARD_MAX_STEPS:,}. The needed step count scales as "
+                "(duration_rs0 + v_start_margin_rs0) / (M0+M1); of the "
+                f"span requested here, {_duration_share/rs0:.3g} r_s0 comes "
+                f"from --duration_rs0 and {_margin_share/rs0:.3g} r_s0 "
+                "from --v_start_margin_rs0 -- shrink whichever is larger, "
+                "or increase --M0/--M1."
+            )
 
     # --- primary construction: backward integration from the exact
     # boundary condition r(v2) = r_s1 -----------------------------------
@@ -1550,8 +1751,11 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         raise RuntimeError(
             f"The located event horizon fell below the apparent horizon "
             f"by up to {ah_violation_rs0:.3e} r_s0, which should not "
-            "happen with the backward construction; try a larger "
-            "--n_steps or check that --M0/--M1 and the accretion window "
+            "happen with the backward construction; this scenario has "
+            "exceeded the internal integration's accuracy, which a finer "
+            "--n_steps output-sampling grid cannot repair (it only "
+            "changes plot/CSV sampling, not the underlying adaptive "
+            "integration). Check that --M0/--M1 and the accretion window "
             "are physically reasonable."
         )
     monotonicity_violation_rs0 = (
@@ -1563,9 +1767,11 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             f"The located event horizon decreased somewhere along v by up "
             f"to {monotonicity_violation_rs0:.3e} r_s0, which should not "
             "happen -- the area theorem requires r_EH(v) to be "
-            "non-decreasing here, since M(v) itself is non-decreasing; "
-            "try a larger --n_steps or check that --M0/--M1 and the "
-            "accretion window are physically reasonable."
+            "non-decreasing here, since M(v) itself is non-decreasing. "
+            "This is not something a finer --n_steps output-sampling grid "
+            "can fix (it only changes plot/CSV sampling, not the "
+            "underlying adaptive integration); check that --M0/--M1 and "
+            "the accretion window are physically reasonable."
         )
 
     # --- secondary: forward bisection shooting, retained for the
@@ -1643,7 +1849,25 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         else:
             shooting_v2_boundary_residual_rs0 = float("nan")
             v_common_hi = float(v_shoot[-1])
-        v_common = np.linspace(v_start, v_common_hi, 400)
+        # Both curves are piecewise-linear between their OWN RK4 nodes
+        # (each integrator's own step points, hinge-aligned so v1/v2 are
+        # always forced nodes -- see the hinge-alignment logic in both
+        # integrators above), so the true maximum of their pointwise
+        # difference can only occur AT one of the two curves' own
+        # breakpoints, never strictly between them: linear interpolation
+        # is exact at every node of the curve it is taken from, and the
+        # difference of two piecewise-linear functions is itself
+        # piecewise-linear with breakpoints only at the union of both
+        # curves' own breakpoints. Evaluating both curves (each exactly,
+        # via linear interpolation) on the union of both curves' own
+        # v-nodes -- clipped to the common domain, with both explicit
+        # endpoints included -- therefore gives the EXACT maximum, not a
+        # resolution-limited estimate: a fixed sampling grid can miss a
+        # hinge-localized peak between two of its own samples by an
+        # arbitrarily large factor.
+        v_nodes = np.union1d(v_shoot, v_eh_back)
+        v_common = v_nodes[(v_nodes >= v_start) & (v_nodes <= v_common_hi)]
+        v_common = np.union1d(v_common, [v_start, v_common_hi])
         r_shoot_common = np.interp(v_common, v_shoot, r_shoot)
         r_back_common = np.interp(v_common, v_eh_back, r_eh_back)
         shooting_vs_backward_curve_max_rs0 = float(
@@ -1662,6 +1886,22 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     # separation before v_end. Search geometrically for the smallest
     # offset that clearly separates, so the family panel looks right
     # regardless of the mass ratio or the accretion duration chosen.
+    # The primary backward-derived curve, extended with a flat r_s1 tail
+    # from v2 to v_end: v_eh_back/r_eh_back (from the integrator above)
+    # only cover [v_start, v2], while the main reported event-horizon
+    # curve (r_eh_grid) continues exactly at r_s1 through v_end (an exact
+    # fixed point once accretion has finished -- see r_eh_grid's own
+    # construction above). Whenever the primary curve itself is exported
+    # (the family's primary member below, and v_eh_raw/r_eh_raw at the end
+    # of this function) it should span the same [v_start, v_end] range as
+    # the main curve, not stop short at v2.
+    if v_end > v2:
+        v_eh_back_full = np.append(v_eh_back, v_end)
+        r_eh_back_full = np.append(r_eh_back, rs1)
+    else:
+        v_eh_back_full = v_eh_back
+        r_eh_back_full = r_eh_back
+
     family = []
     if n_family == 1:
         # Use the primary backward-derived curve directly, rather than a
@@ -1670,15 +1910,13 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         # construction exists to avoid, and at wide margins it can drift
         # far from the true horizon while still being exported, and
         # described in the help file, as "the event-horizon generator
-        # itself" (Reviewer Audit round 2, Codex P2-3: reproduced with
-        # --v_start_margin_rs0 80 --v_end_margin_rs0 40, where the
-        # zero-offset forward trial plunged to 1.235e-4 r_s0 while the true
-        # horizon stayed near r_s0 throughout). `escapes` is left as None
-        # -- this is not a forward trial with an escape/plunge fate, it is
-        # the exact reported curve, and plot_bh.plot_horizons never reads
-        # `escapes` in the n_family=1 case for exactly this reason.
-        family.append(dict(r_i_over_rs0=r_crit / rs0, v=v_eh_back.copy(),
-                           r=r_eh_back.copy(), escapes=None,
+        # itself". `escapes` is left as None -- this is not a forward
+        # trial with an escape/plunge fate, it is the exact reported
+        # curve, and plot_bh.plot_horizons never reads `escapes` for a
+        # member flagged is_primary_backward_curve for exactly this
+        # reason.
+        family.append(dict(r_i_over_rs0=r_crit / rs0, v=v_eh_back_full.copy(),
+                           r=r_eh_back_full.copy(), escapes=None,
                            is_primary_backward_curve=True))
     else:
         spread = max(20.0 * residual_rs0 * rs0, 1.0e-6 * rs0)
@@ -1697,17 +1935,22 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         if n_family % 2 == 1:
             # The middle entry of an odd-count linspace lands exactly on
             # offset zero (the CLI default, --n_family 9, is odd) -- i.e.
-            # it is a forward-integrated trial starting from exactly
+            # it would be a forward-integrated trial starting from exactly
             # r_crit, subject to the very forward-shooting instability the
-            # backward construction exists to avoid, yet visually and
-            # numerically indistinguishable from "the generator" in the
-            # family CSV unless nudged away from it (Reviewer Audit round
-            # 2, Codex P2-3). Nudge it a small, genuinely nonzero distance
-            # rather than dropping it, so the family still has exactly
-            # n_family members and stays visually close to symmetric.
+            # backward construction exists to avoid. Rather than nudging
+            # it to a small nonzero offset (which broke the family's own
+            # "symmetric about r_crit" invariant: an odd count of
+            # forward-trial offsets straddling a nudged, off-centre point
+            # is not symmetric), the exact-zero entry is dropped outright,
+            # and the stable, exact primary backward curve is appended
+            # below as an explicit, distinctly labelled center member
+            # instead -- preserving the requested n_family count, EXACT
+            # pairwise symmetry among the remaining forward trials
+            # (dropping linspace's own middle sample leaves the rest
+            # symmetric by construction), and never forward-integrating
+            # from exactly r_crit at all.
             mid = n_family // 2
-            bin_width = offsets[1] - offsets[0] if n_family > 1 else spread
-            offsets[mid] = 0.25 * bin_width
+            offsets = np.delete(offsets, mid)
         for off in offsets:
             r_i = r_crit + off
             v_f, r_f = _integrate_null_geodesic(v_start, max(r_i, 1.0e-3 * rs0),
@@ -1715,6 +1958,10 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             family.append(dict(r_i_over_rs0=r_i / rs0, v=v_f, r=r_f,
                                escapes=bool(r_f[-1] > rs1),
                                is_primary_backward_curve=False))
+        if n_family % 2 == 1:
+            family.append(dict(r_i_over_rs0=r_crit / rs0,
+                               v=v_eh_back_full.copy(), r=r_eh_back_full.copy(),
+                               escapes=None, is_primary_backward_curve=True))
 
     warnings = list(warn0) + list(warn1)
     if no_accretion:
@@ -1736,22 +1983,45 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             f"the reported curve) located r_crit_shooting/r_s0 = "
             f"{r_crit_shooting/rs0:.8f} with bracket width residual_rs0 "
             f"= {residual_rs0:.2e} r_s0 ({bisect_iters} iterations) -- "
-            f"the two constructions differ by "
-            f"{shooting_vs_backward_rs0:.2e} r_s0 here; residual_rs0 "
-            "alone does not measure that difference (see EXP-13)."
+            f"the two constructions' STARTING radii differ by "
+            f"{shooting_vs_backward_rs0:.2e} r_s0 here; see "
+            "shooting_reached_v2 / shooting_v2_boundary_residual_rs0 / "
+            "shooting_vs_backward_curve_max_rs0 for the actual curve-wise "
+            "comparison (residual_rs0 alone measures neither)."
         )
+
+    # Shift every returned/exported v-array back from the internal u = v -
+    # v1_abs coordinate to absolute v, adding the arbitrary origin back in
+    # exactly once, here, at the very end -- see the docstring and the u-
+    # space setup near the top of this function.
+    v_grid_abs = v_grid + v1_abs
+    v_eh_raw_abs = v_eh_back_full + v1_abs
+    r_eh_raw_abs = r_eh_back_full
+    family_abs = []
+    for fam in family:
+        fam_abs = dict(fam)
+        fam_abs["v"] = fam["v"] + v1_abs
+        family_abs.append(fam_abs)
 
     return dict(
         kind="horizons",
-        v=v_grid, r_AH=r_ah, r_EH=r_eh_grid,
-        v_eh_raw=v_eh, r_eh_raw=r_eh,
-        family=family,
+        v=v_grid_abs, r_AH=r_ah, r_EH=r_eh_grid,
+        # v_eh_raw/r_eh_raw are the TRUE raw backward-integrator node
+        # arrays (extended with the flat r_s1 tail past v2, per
+        # v_eh_back_full/r_eh_back_full above), not the resampled n_steps+1
+        # output grid -- the same v_grid/r_eh_grid pair is already
+        # available, unresampled, as this dict's own "v"/"r_EH" fields, so
+        # these two are worth returning only if they actually are the raw
+        # adaptive-step nodes an independent accuracy check would want.
+        v_eh_raw=v_eh_raw_abs, r_eh_raw=r_eh_raw_abs,
+        family=family_abs,
         summary=dict(
             m0_msun=m0_msun, m1_msun=m1_msun,
             rs0_m=rs0, rs1_m=rs1,
             rs0_km=rs0 / 1.0e3, rs1_km=rs1 / 1.0e3,
-            v1_rs0=v1_rs0, v2_rs0=v1_rs0 + duration_rs0, duration_rs0=duration_rs0,
-            v_start_rs0=v_start / rs0, v_end_rs0=v_end / rs0,
+            v1_rs0=v1_rs0_summary, v2_rs0=v2_rs0_summary,
+            duration_rs0=duration_rs0,
+            v_start_rs0=v_start_rs0_summary, v_end_rs0=v_end_rs0_summary,
             r_crit_over_rs0=r_crit / rs0,
             r_crit_shooting_over_rs0=r_crit_shooting / rs0,
             shooting_vs_backward_rs0=shooting_vs_backward_rs0,

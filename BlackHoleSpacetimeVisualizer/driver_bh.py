@@ -478,29 +478,54 @@ def _run_horizons(kw, outdir, csvdir, dpi, lw):
                    + _provenance("horizons", kw)
                    + [f"forward-shooting bracket residual (diagnostic only, "
                       f"not the event-horizon error) = "
-                      f"{s['residual_rs0']:.3e} r_s0"])
+                      f"{s['residual_rs0']:.3e} r_s0",
+                      # Audit Round 3, Copilot CP3-6: the three curve-wise
+                      # shooting-vs-backward diagnostic fields (see the
+                      # vaidya_horizons docstring and EXP-13) were already
+                      # in the printed run summary and the Python return
+                      # dict, and documented in the HTML, but were missing
+                      # from this CSV's own metadata comments -- recorded
+                      # here too, with identical field names, so the CSV
+                      # alone carries the same diagnostic provenance as
+                      # the console output.
+                      f"shooting_reached_v2 = {s['shooting_reached_v2']}",
+                      f"shooting_v2_boundary_residual_rs0 = "
+                      f"{s['shooting_v2_boundary_residual_rs0']:.3e} r_s0 "
+                      "(nan if shooting_reached_v2 is False)",
+                      f"shooting_vs_backward_curve_max_rs0 = "
+                      f"{s['shooting_vs_backward_curve_max_rs0']:.3e} r_s0"])
         frows = []
         for j, fam in enumerate(result["family"]):
-            # n_family=1 exports the primary backward curve itself, not a
-            # forward-integrated trial ray -- "escapes" does not apply to
-            # it, and it must not be printed as "no" (which would read as
-            # "plunges") (Reviewer Audit round 2, Codex P2-3).
-            if fam.get("is_primary_backward_curve"):
-                fate = "n/a (primary backward curve, not a forward trial)"
-            else:
-                fate = "yes" if fam["escapes"] else "no"
+            # A family member flagged is_primary_backward_curve is the
+            # exact backward-integrated event-horizon curve itself, not a
+            # forward-integrated trial ray -- "escapes" (yes/no) does not
+            # apply to it. Rather than folding that explanation into the
+            # escapes column's own value (which then reads oddly next to
+            # plain yes/no rows), escapes stays a short, stable "n/a" and
+            # the explanation lives in its own trajectory_kind column: this
+            # happens for every --n_family 1 run (the family's sole member
+            # is the primary curve) and, for odd --n_family >= 3, exactly
+            # one member alongside its n_family-1 ordinary forward trials.
+            is_primary = bool(fam.get("is_primary_backward_curve"))
+            fate = "n/a" if is_primary else ("yes" if fam["escapes"] else "no")
+            kind = "primary_backward" if is_primary else "forward_trial"
             for v, r in zip(fam["v"], fam["r"]):
-                frows.append([j, f"{fam['r_i_over_rs0']:.17g}", fate,
+                frows.append([j, f"{fam['r_i_over_rs0']:.17g}", fate, kind,
                               f"{v/s['rs0_m']:.17g}", f"{r/s['rs0_m']:.17g}"])
         _write_csv(csvdir, "bh_horizons_family",
                    ["trajectory_id", "r_i_over_rs0", "escapes",
-                    "v_over_rs0", "r_over_rs0"], frows,
+                    "trajectory_kind", "v_over_rs0", "r_over_rs0"], frows,
                    comments=["family of outgoing null geodesics bracketing "
                              "the event-horizon generator (diagnostic/"
-                             "visualization only; not the reported r_EH(v)) "
-                             "-- with --n_family 1 this is instead the "
-                             "primary backward-integrated curve itself, "
-                             "labelled as such in the escapes column"]
+                             "visualization only; not the reported r_EH(v)); "
+                             "trajectory_kind = primary_backward identifies "
+                             "the exact backward-integrated event-horizon "
+                             "curve itself (escapes = n/a, not a forward "
+                             "trial: this is always true for --n_family 1, "
+                             "and true of exactly one member for odd "
+                             "--n_family >= 3), and forward_trial identifies "
+                             "an ordinary bracketing geodesic (escapes = "
+                             "yes/no)"]
                    + _provenance("horizons", kw))
     if not kw["no_plot"]:
         viz.plot_horizons(result, outdir=outdir, dpi=dpi, lw=lw)

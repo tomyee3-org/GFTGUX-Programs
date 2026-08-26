@@ -392,12 +392,20 @@ def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(13.5, 5.6)):
     # -- it is just the horizon generator itself, plotted once more -- and
     # is given its own presentation rather than the escape/plunge legend,
     # which would otherwise describe colours that are not actually shown
-    # (Reviewer Audit round 1, Codex "lower-level" observation; n_family=2
-    # is rejected outright by vaidya_horizons for the same reason, so it
-    # cannot reach this function).
-    single_trajectory = (len(result["family"]) == 1)
+    # (n_family=2 is rejected outright by vaidya_horizons for the same
+    # reason, so it cannot reach this function). For odd n_family >= 3 the
+    # family also contains one explicit primary-backward-curve member
+    # (escapes=None) alongside its n_family-1 ordinary forward trials: that
+    # member is excluded from the escape/plunge coloring loop below (its
+    # "escapes" is not a yes/no fate to color, and the black event-horizon
+    # generator line plotted a few lines down already draws it) rather than
+    # naively colored via `if fam["escapes"]`, which would silently plot it
+    # as a plunging (falsy-None) trial.
+    trial_members = [fam for fam in result["family"]
+                     if not fam.get("is_primary_backward_curve")]
+    single_trajectory = (len(trial_members) == 0)
     if not single_trajectory:
-        for fam in result["family"]:
+        for fam in trial_members:
             col = C_ESCAPE if fam["escapes"] else C_PLUNGE
             ax2.plot(fam["v"] / rs0, fam["r"] / rs0, color=col, lw=1.1, alpha=0.85)
     ax2.plot(v, r_eh, color=C_EH, lw=lw, label="event-horizon generator")

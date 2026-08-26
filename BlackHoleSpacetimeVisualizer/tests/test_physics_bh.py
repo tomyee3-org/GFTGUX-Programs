@@ -29,6 +29,7 @@ Design notes
 
 import csv
 import importlib.util
+import inspect
 import math
 import os
 import shutil
@@ -283,6 +284,65 @@ class TestSchwarzschildScales(unittest.TestCase):
         with self.assertRaises(ValueError):
             phys.schwarzschild_radius(1.0e300)
         self.assertTrue(math.isfinite(phys.schwarzschild_radius(1.0e10)))
+
+    def test_mass_ceiling_applies_at_every_public_entry_point(self):
+        # Audit Round 3, Codex P2-1 reproducer: check_mass's
+        # MAX_COMPUTABLE_MASS_MSUN ceiling was previously enforced only
+        # inside check_mass itself, not by schwarzschild_radius,
+        # light_crossing_time, tidal_acceleration, or survival_radius --
+        # all four accepted 1e100 Msun and returned a finite-looking
+        # answer even though 1e100 is far above the documented
+        # computational ceiling. All four now route their mass validation
+        # through check_mass and must reject it identically.
+        huge = 1.0e100
+        with self.assertRaises(ValueError):
+            phys.schwarzschild_radius(huge)
+        with self.assertRaises(ValueError):
+            phys.light_crossing_time(huge)
+        with self.assertRaises(ValueError):
+            phys.tidal_acceleration(huge, 1.0, separation_m=1.0)
+        with self.assertRaises(ValueError):
+            phys.survival_radius(huge, separation_m=1.0, limit_g=1.0)
+        # And a mass comfortably under the ceiling must still succeed at
+        # every one of the same four entry points.
+        self.assertTrue(math.isfinite(phys.schwarzschild_radius(10.0)))
+        self.assertTrue(math.isfinite(phys.light_crossing_time(10.0)))
+        self.assertTrue(all(math.isfinite(x) for x in
+                             phys.tidal_acceleration(10.0, 1.0e9, separation_m=1.0)))
+        self.assertTrue(math.isfinite(
+            phys.survival_radius(10.0, separation_m=1.0, limit_g=100.0)))
+
+    def test_mass_floor_rejects_subnormal_and_underflow_never_silent(self):
+        # Audit Round 3, Codex P2-1 reproducer: finite positive inputs
+        # previously could silently underflow to an impossible exact zero
+        # instead of raising -- tidal_acceleration(5e-324, 1e308, 1.0) ->
+        # (0.0, 0.0) and survival_radius(5e-324, 1e308, 1e308) -> 0.0 were
+        # both reproduced against the pre-fix code. The new
+        # MIN_COMPUTABLE_MASS_MSUN floor rejects the subnormal mass
+        # outright (the same computational-limit framing as the ceiling);
+        # confirm both the floor itself and, independently, that a mass
+        # comfortably above the floor still cannot silently underflow to
+        # zero through tidal_acceleration/survival_radius's own extreme
+        # r_m/limit_g arguments.
+        for bad in (5.0e-324, 1.0e-320, phys.MIN_COMPUTABLE_MASS_MSUN * 0.999):
+            with self.assertRaises(ValueError) as ctx:
+                phys.check_mass("mass", bad)
+            self.assertIn("below", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            phys.tidal_acceleration(5.0e-324, 1.0e308, separation_m=1.0)
+        with self.assertRaises(ValueError):
+            phys.survival_radius(5.0e-324, separation_m=1.0e308, limit_g=1.0e308)
+        # A mass just above the floor is accepted.
+        m, warn = phys.check_mass("mass", phys.MIN_COMPUTABLE_MASS_MSUN * 1.001)
+        self.assertEqual(len(warn), 1)   # still below TRUSTED_MASS_LO
+
+    def test_check_mass_docstring_matches_enforced_bounds(self):
+        # Audit Round 3, Codex P2-1: check_mass's own docstring previously
+        # said "Any positive mass is accepted" while the function actually
+        # rejected masses above MAX_COMPUTABLE_MASS_MSUN -- a direct
+        # self-contradiction visible to anyone reading help(check_mass).
+        doc = inspect.getdoc(phys.check_mass) or ""
+        self.assertNotIn("any positive mass is accepted", doc.lower())
 
     def test_require_finite_reports_overflow_as_value_error(self):
         # Reviewer Audit round 1, Codex P2-3: float() on a Python int with
@@ -876,6 +936,53 @@ class TestInfall(unittest.TestCase):
         for sf in (0.005, 0.002, 0.001):
             self.assertLess(rel_errs[sf], 5.0e-9, f"step_frac={sf}")
 
+        # EXTENDED (Audit Round 3, Codex P1-2, release-blocking): EXP-11 and
+        # this integrator's own docstring previously claimed that below
+        # step_frac=0.005 the relative error "settles into a band well
+        # under 1e-8" and "never climbs back out" -- and this regression
+        # stopped at step_frac=0.001, so it never exercised the lower 99%
+        # of the accepted (1e-5, 0.2] logarithmic range where that claim is
+        # demonstrably false. Reproduced with Codex's own step_fracs (same
+        # M/r0_rs/r_stop_rs as above): 5e-4 -> 8.6204e-10, 2e-4 -> 4.8920e-11
+        # (both still tiny), but 1e-4 -> 4.6704e-8, 5e-5 -> 6.9701e-8, and
+        # 2e-5 -> 2.0488e-7 -- climbing back OUT of the sub-1e-8 band the
+        # previous claim promised, as accumulated floating-point round-off
+        # from ever more, ever tinier steps comes to dominate the shrinking
+        # RK4 truncation error. The corrected claim (now also in the
+        # docstring and EXP-11) is different and weaker, but true: the
+        # error never exceeds its own coarsest-step-size (step_frac=0.2)
+        # value anywhere in the accepted range, i.e. refining --step_frac
+        # is never required for accuracy and can occasionally cost a little
+        # of it back, not that it is monotonically non-increasing below
+        # 0.005. This test would have FAILED against the previous
+        # (round-2) implementation's documented claim: 2.05e-7 is neither
+        # "well under 1e-8" nor part of a band the error, once reached,
+        # "never climbs back out" of (rel_errs[0.005] = 1.83e-10 is reached
+        # and then visibly departed).
+        extended_step_fracs = (1.0e-4, 5.0e-5, 2.0e-5)
+        for step_frac in extended_step_fracs:
+            result = phys.infall_radial(m_msun=m, r0_rs=r0_rs, r_stop_rs=r_stop_rs,
+                                         n_points=4000, step_frac=step_frac)
+            tau_code = result["summary"]["tau_total_s"]
+            rel_errs[step_frac] = abs(tau_code - tau_closed) / tau_closed
+        for sf in extended_step_fracs:
+            # Comfortably above the old (false) "well under 1e-8" claim,
+            # confirming the climb-back-out is real and not noise: each
+            # measured value is at least an order of magnitude above 1e-8.
+            self.assertGreater(rel_errs[sf], 1.0e-8, f"step_frac={sf}")
+            # But still small in absolute terms, and in particular never
+            # larger than the coarsest-step-size (step_frac=0.2) error --
+            # the actual, honest bound over the whole accepted range.
+            self.assertLess(rel_errs[sf], rel_errs[0.2], f"step_frac={sf}")
+            self.assertLess(rel_errs[sf], 5.0e-7, f"step_frac={sf}")
+        # And, across every step_frac measured in this test (the original
+        # 8-point sweep above plus this extension), the documented ~1e-5
+        # accepted tolerance is never violated -- this is the one claim
+        # EXP-11 and this function's docstring still make unconditionally,
+        # and it remains true throughout.
+        for sf, e in rel_errs.items():
+            self.assertLess(e, 1.0e-5, f"step_frac={sf}")
+
     def test_release_point_is_exact(self):
         # Reviewer Audit round 1, Copilot P2-1: the previous implementation
         # stored r0*(1-1e-12) as the *first* sample, labelled tau=0, t=0,
@@ -1428,25 +1535,69 @@ class TestHorizons(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(f0["v"])))
 
     def test_family_odd_count_avoids_exact_zero_offset(self):
-        # Reviewer Audit round 2, Codex P2-3: for odd n_family>=3,
-        # np.linspace(-spread, spread, n_family) lands its middle entry
-        # exactly on offset zero -- a forward-integrated trial starting
-        # from exactly r_crit, subject to the same instability as above,
-        # indistinguishable from "the generator" in the exported family
-        # CSV unless nudged away from zero. The full count (n_family
-        # entries, not n_family-1) must still be produced.
+        # CORRECTED ORACLE (Audit Round 3, Codex P2-5): the previous fix
+        # (round 2) nudged the exact-zero middle offset of an odd-count
+        # linspace by 0.25*bin_width instead of removing it, which avoided
+        # the unstable zero-offset forward trial but left the family
+        # asymmetric (for the CLI default n_family=9: four plunging rays,
+        # five escaping), directly contradicting this module's own
+        # "symmetric about r_crit" rationale (confirmed by Codex: the nine
+        # normalized offsets were -0.0488281, -0.0366211, -0.0244141,
+        # -0.0122070, +0.00305176, +0.0122070, +0.0244141, +0.0366211,
+        # +0.0488281 -- not symmetric about zero). The redesigned
+        # construction instead DROPS the exact-zero forward trial outright
+        # and appends the stable backward-derived primary curve itself as
+        # an explicit, distinctly labelled center member (reusing the same
+        # is_primary_backward_curve=True / escapes=None convention as
+        # --n_family 1) -- preserving the requested count, restoring EXACT
+        # pairwise symmetry among the forward trials, and never forward-
+        # integrating from exactly r_crit at all. This test would have
+        # FAILED against the previous (round-2) implementation, both on
+        # the exact-zero-offset check (still true: dropped, not merely
+        # nudged) and on the new symmetry/primary-member checks below,
+        # which the round-2 family shape did not satisfy.
         for n_family in (3, 5, 9):
             result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
                                            bisect_iters=40, n_family=n_family)
             fam = result["family"]
             self.assertEqual(len(fam), n_family)
             r_crit_rs0 = result["summary"]["r_crit_over_rs0"]
-            offsets = [f["r_i_over_rs0"] - r_crit_rs0 for f in fam]
+            primaries = [f for f in fam if f["is_primary_backward_curve"]]
+            trials = [f for f in fam if not f["is_primary_backward_curve"]]
+            self.assertEqual(len(primaries), 1, msg=f"n_family={n_family}")
+            self.assertEqual(len(trials), n_family - 1, msg=f"n_family={n_family}")
+            self.assertIsNone(primaries[0]["escapes"])
+            self.assertAlmostEqual(primaries[0]["r_i_over_rs0"], r_crit_rs0,
+                                    delta=1e-15)
+            offsets = sorted(f["r_i_over_rs0"] - r_crit_rs0 for f in trials)
             for off in offsets:
                 self.assertNotEqual(off, 0.0, msg=f"n_family={n_family}")
-            for f in fam:
-                self.assertFalse(f["is_primary_backward_curve"])
+            for f in trials:
                 self.assertIsInstance(f["escapes"], bool)
+            # Exact pairwise symmetry: for every positive offset there is a
+            # matching negative one of the same magnitude.
+            for lo, hi in zip(offsets, reversed(offsets)):
+                self.assertAlmostEqual(lo, -hi, delta=1e-12,
+                                        msg=f"n_family={n_family}")
+            # And an equal split of escaping vs. plunging forward trials,
+            # since each symmetric +/- pair straddles r_crit identically.
+            n_escape = sum(1 for f in trials if f["escapes"])
+            n_plunge = sum(1 for f in trials if not f["escapes"])
+            self.assertEqual(n_escape, n_plunge, msg=f"n_family={n_family}")
+
+    def test_family_even_count_unaffected_by_odd_count_redesign(self):
+        # Companion check: an even n_family never had an exact-zero-offset
+        # entry in the first place (np.linspace(-spread, spread, n_family)
+        # with an even count never lands on zero), so it takes the
+        # unmodified "else" branch -- no primary-curve member is added,
+        # and every entry is an ordinary forward trial.
+        result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
+                                       bisect_iters=40, n_family=4)
+        fam = result["family"]
+        self.assertEqual(len(fam), 4)
+        for f in fam:
+            self.assertFalse(f["is_primary_backward_curve"])
+            self.assertIsInstance(f["escapes"], bool)
 
     def test_curvewise_diagnostic_fields_reproduce_p1_2_pattern(self):
         # Reviewer Audit round 2, Codex P1-2 reproducer: at low
@@ -1486,6 +1637,157 @@ class TestHorizons(unittest.TestCase):
             self.assertLess(s["shooting_vs_backward_curve_max_rs0"], 1.0e-2,
                              msg=f"iters={iters}")
         self.assertGreater(low_curve_max, 0.5)
+
+    def test_shooting_vs_backward_curve_max_is_exact_not_undersampled(self):
+        # Audit Round 3, Codex P1-1 reproducer (release-blocking): the
+        # previous implementation computed shooting_vs_backward_curve_max_rs0
+        # on a FIXED 400-point np.linspace(v_start, v_common_hi, 400) grid,
+        # not the documented "maximum pointwise difference" -- both curves
+        # are piecewise-linear between their own RK4 nodes (hinge-aligned,
+        # so v1/v2 are forced nodes of each), so the true maximum can only
+        # occur at one of the two curves' own breakpoints, and a fixed
+        # 400-sample grid can miss a hinge-localized peak between two of
+        # its own samples. Reproduced with Codex's exact parameters
+        # (M0=5, M1=10, duration_rs0=0.1, bisect_iters=30, n_steps=200,
+        # n_family=1): the old 400-point grid returned 1.4023974705069702e-5
+        # r_s0; a dense (200,000-point) independent check found the true
+        # value to be 7.3895703853825250e-5 r_s0, a factor of >5 larger.
+        # The fixed implementation, using the exact union of both curves'
+        # own integration nodes instead of any fixed sample count, reaches
+        # 7.4428e-5 r_s0 here -- matching Codex's dense-grid check to
+        # within that check's own sampling resolution (not a coincidence:
+        # this construction is the exact maximum, not a finer estimate of
+        # it), and nowhere near the old, undersampled 1.40e-5 answer.
+        result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0,
+                                       duration_rs0=0.1, bisect_iters=30,
+                                       n_steps=200, n_family=1)
+        curve_max = result["summary"]["shooting_vs_backward_curve_max_rs0"]
+        self.assertGreater(curve_max, 5.0e-5)   # old undersampled value: 1.40e-5
+        self.assertAlmostEqual(curve_max, 7.39e-5, delta=1.0e-6)
+        # At the documented default settings (M0=5, M1=10, bisect_iters=60)
+        # the old 400-point grid under-reported by about 5.4% (3.9323e-5 vs
+        # a true value near 4.1555e-5, both per Codex's Audit 3 report);
+        # confirm the fix lands at the larger, true figure here too.
+        result2 = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, bisect_iters=60)
+        curve_max2 = result2["summary"]["shooting_vs_backward_curve_max_rs0"]
+        self.assertGreater(curve_max2, 4.0e-5)   # old undersampled value: 3.9323e-5
+        self.assertAlmostEqual(curve_max2, 4.156e-5, delta=1.0e-7)
+
+    def test_v1_rs0_translation_invariance_at_extreme_offsets(self):
+        # Audit Round 3, Codex P1-3 reproducer (release-blocking): the
+        # physical problem depends only on v-v1, duration, and the two
+        # margins, never on v1's own magnitude, and --v1_rs0's own help
+        # text promises "any finite value, including zero or negative".
+        # Before the fix, vaidya_horizons(..., v1_rs0=1e16, n_steps=200,
+        # bisect_iters=10, n_family=1) exhausted the 300,000-step backward
+        # integration budget after about 11.5s, reporting it was still 3.2
+        # problem scales short of v_start: at that magnitude, subtracting
+        # an rs0-scale RK4 step from an absolute v of order 1e16*rs0 lost
+        # or badly quantized the step in float64 arithmetic. Integrating
+        # in a v1-shifted coordinate instead (see the docstring) makes
+        # r_crit_over_rs0 -- a v1-independent physical quantity -- exactly
+        # (bit-for-bit) unaffected by v1_rs0's magnitude, across positive
+        # and negative offsets spanning 22 orders of magnitude, and every
+        # case completes promptly instead of hitting the step cap.
+        common = dict(m0_msun=5.0, m1_msun=10.0, duration_rs0=10.0,
+                      v_start_margin_rs0=25.0, v_end_margin_rs0=15.0,
+                      n_steps=300, bisect_iters=40)
+        baseline = phys.vaidya_horizons(v1_rs0=0.0, **common)
+        r_crit_baseline = baseline["summary"]["r_crit_over_rs0"]
+        for v1_rs0 in (5.0, -5.0, 1.0e6, -1.0e6, 1.0e12, -1.0e12, 1.0e16):
+            result = phys.vaidya_horizons(v1_rs0=v1_rs0, **common)
+            self.assertEqual(result["summary"]["r_crit_over_rs0"],
+                              r_crit_baseline, msg=f"v1_rs0={v1_rs0:g}")
+            # The exported v grid must still reflect the absolute origin
+            # (v/rs0 at v_start equals v1_rs0 - v_start_margin_rs0, up to
+            # ordinary float64 rounding). The tolerance is scaled to the
+            # magnitude of v1_rs0 itself, not a fixed 1e-6: at v1_rs0~1e12,
+            # v0_over_rs0 is an absolute quantity of that same magnitude,
+            # so double precision (~2.22e-16 relative) only guarantees
+            # agreement to ~1e12*2.22e-16 ~ 2e-4, not 1e-6. A fixed 1e-6
+            # delta here would itself be a bug for large offsets -- it
+            # would demand more precision than float64 can represent,
+            # regardless of correctness of the implementation.
+            v0_over_rs0 = result["v"][0] / result["summary"]["rs0_m"]
+            tol = max(1e-6, abs(v1_rs0) * 1e-12)
+            self.assertAlmostEqual(v0_over_rs0, v1_rs0 - 25.0, delta=tol,
+                                    msg=f"v1_rs0={v1_rs0:g}")
+        # Codex's exact reproducer: n_steps=200, bisect_iters=10, n_family=1
+        # at v1_rs0=1e16 must now succeed promptly rather than hitting the
+        # 300,000-step backward-integration cap.
+        result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=1.0e16,
+                                       n_steps=200, bisect_iters=10, n_family=1)
+        self.assertTrue(math.isfinite(result["summary"]["r_crit_over_rs0"]))
+
+    def test_v_eh_raw_fields_are_true_raw_integrator_nodes(self):
+        # Audit Round 3, Codex P2-6 reproducer: vaidya_horizons previously
+        # set v_eh_raw/r_eh_raw = v_grid/r_eh_grid.copy() -- the resampled
+        # n_steps+1-point OUTPUT grid (identical to the "v"/"r_EH" fields
+        # already in this same dict) -- not the actual raw backward-
+        # integrator node arrays, despite the "raw" name. v_grid is an
+        # exactly evenly-spaced np.linspace, so its own diffs are all
+        # equal; the true adaptive-step RK4 node spacing is not, which
+        # gives a simple, direct way to tell the two apart without
+        # depending on any private helper.
+        result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
+                                       bisect_iters=40, n_family=1)
+        self.assertNotEqual(len(result["v_eh_raw"]), len(result["v"]))
+        diffs = np.diff(result["v_eh_raw"])
+        self.assertGreater(float(np.std(diffs)), 0.0)
+        self.assertTrue(np.all(np.isfinite(result["v_eh_raw"])))
+        self.assertTrue(np.all(np.isfinite(result["r_eh_raw"])))
+        # The raw curve must span the SAME [v_start, v_end] range as the
+        # main reported curve (Codex P2-5's separate span-mismatch finding
+        # for the n_family=1 family export applies equally to v_eh_raw):
+        # previously it stopped at v2, short of v_end.
+        self.assertAlmostEqual(float(result["v_eh_raw"][0]),
+                                float(result["v"][0]), delta=1e-6)
+        self.assertAlmostEqual(float(result["v_eh_raw"][-1]),
+                                float(result["v"][-1]), delta=1e-6)
+        self.assertAlmostEqual(float(result["r_eh_raw"][-1]),
+                                result["summary"]["rs1_m"], delta=1e-6)
+
+    def test_duration_too_small_rejected_with_precise_message(self):
+        # Audit Round 3, Codex P2-2 reproducer, CORRECTED ORACLE: the
+        # original report described a duration_rs0 small enough (down to
+        # subnormal, e.g. 5e-324) rounding v2 back to exactly v1 once
+        # converted to metres. The P1-3 u-space refactor (v1 held at
+        # exactly 0.0 internally) architecturally eliminated *that*
+        # specific failure mode. Self-sweep testing during Round 3 found a
+        # distinct, previously-unreported failure mode with the same
+        # symptom (an unusable tiny duration_rs0): the dimensionless ratio
+        # max(v_start_margin_rs0, v_end_margin_rs0, 1) / duration_rs0 that
+        # feeds vaidya_mass_of_v's interpolation fraction overflows double
+        # precision once duration_rs0 is this small, independent of mass.
+        # This must still be rejected up front, with a message naming
+        # duration_rs0 and the margins/overflow, not left to surface as an
+        # uncaught RuntimeWarning/overflow deep inside the integrator.
+        for tiny in (5e-324, 1e-320, 1e-300):
+            with self.assertRaises(ValueError) as ctx:
+                phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0,
+                                      duration_rs0=tiny, n_steps=200,
+                                      bisect_iters=10)
+            msg = str(ctx.exception)
+            self.assertIn("duration_rs0", msg)
+            self.assertIn("margins", msg)
+            self.assertIn("overflow", msg)
+
+    def test_duration_too_large_rejected_naming_duration_not_margin(self):
+        # Audit Round 3, Codex P2-2 reproducer: duration_rs0=100000 (M0=5,
+        # M1=10, n_steps=200, bisect_iters=10, n_family=1) previously
+        # exhausted the 300,000-step backward cap after about 11s, with an
+        # error message recommending a smaller --v_start_margin_rs0 -- not
+        # the actual bottleneck, since the default 25-unit margin is
+        # negligible next to a 100,000-unit accretion span. This is now
+        # rejected immediately (an explicit, checked bound, not a burned
+        # step budget), and the message must name --duration_rs0, not only
+        # --v_start_margin_rs0.
+        with self.assertRaises(ValueError) as ctx:
+            phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0,
+                                  duration_rs0=100000.0, n_steps=200,
+                                  bisect_iters=10, n_family=1)
+        msg = str(ctx.exception)
+        self.assertIn("duration_rs0", msg)
 
     # --- bounds / error handling -----------------------------------
     def test_M1_less_than_M0_rejected(self):
@@ -1863,10 +2165,30 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(len(files), 2)
             family_file = [f for f in files if "family" in f][0]
             comments, header, rows = read_csv_rows(os.path.join(tmp, family_file))
+            # CORRECTED ORACLE (Audit Round 3, Codex P3-3): the escapes
+            # column previously held a long prose value for the primary
+            # member ("n/a (primary backward curve, not a forward
+            # trial)") instead of a short categorical value like ordinary
+            # rows' yes/no. escapes is now a plain "n/a"/"yes"/"no", and
+            # the explanation moved to its own trajectory_kind column.
             self.assertEqual(header, ["trajectory_id", "r_i_over_rs0", "escapes",
-                                       "v_over_rs0", "r_over_rs0"])
+                                       "trajectory_kind", "v_over_rs0",
+                                       "r_over_rs0"])
             traj_ids = sorted(set(int(r[0]) for r in rows))
             self.assertEqual(traj_ids, list(range(5)))
+            escapes_col = set(r[2] for r in rows)
+            self.assertTrue(escapes_col <= {"yes", "no", "n/a"})
+            kind_col = set(r[3] for r in rows)
+            self.assertTrue(kind_col <= {"forward_trial", "primary_backward"})
+            # n_family=5 is odd, so exactly one trajectory_id is the
+            # primary backward curve.
+            primary_ids = set(int(r[0]) for r in rows if r[3] == "primary_backward")
+            self.assertEqual(len(primary_ids), 1)
+            for r in rows:
+                if r[3] == "primary_backward":
+                    self.assertEqual(r[2], "n/a")
+                else:
+                    self.assertIn(r[2], ("yes", "no"))
 
     def test_infall_csv_summary_fields_agree_with_returned_arrays(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1941,18 +2263,39 @@ class TestCLI(unittest.TestCase):
         # printed CLI output, exported CSV comment lines, and the HTML)
         # must describe the CURRENT program as fact, not narrate
         # development/audit history or name reviewers -- that provenance
-        # belongs only in code comments/docstrings (developer-facing) and
-        # the Response_to_Audit* documents. This is a permanent guard
-        # against that regressing. (It also caught a real instance during
-        # the exhaustive self-sweep after Audit round 2: the
-        # bh_horizons_family CSV's own comments= string cited "Reviewer
-        # Audit round 2, Codex P2-3" -- CSV files are exported, student-
-        # facing data output exactly like printed CLI text, not developer-
-        # facing source, so that citation has been removed from the string
-        # itself.)
+        # belongs only in code comments (developer-facing) and the
+        # Response_to_Audit* documents. This is a permanent guard against
+        # that regressing. (It also caught a real instance during the
+        # exhaustive self-sweep after Audit round 2: the bh_horizons_family
+        # CSV's own comments= string cited "Reviewer Audit round 2, Codex
+        # P2-3" -- CSV files are exported, student-facing data output
+        # exactly like printed CLI text, not developer-facing source, so
+        # that citation has been removed from the string itself.)
+        #
+        # EXTENDED (Audit Round 3, Codex P2-4): inspect.getdoc()/help()
+        # expose Python docstrings as public API/teaching surface, distinct
+        # from private "#" source comments -- seven public functions
+        # (schwarzschild_radius, gaussian_curvature, tidal_acceleration,
+        # tidal_profile, compare_tidal_across_masses, infall_radial,
+        # vaidya_horizons) were reproduced to contain explicit reviewer/
+        # audit-round citations in their docstrings, naming Codex/Copilot
+        # and specific audit rounds, invisible to this test's previous
+        # scope (--help/HTML/CLI-output/CSV only). The forbidden-phrase
+        # list is also broadened to catch change-history narration the
+        # previous narrow blacklist missed in the HTML: "an earlier design
+        # note in this file once put it...", "An earlier version of this
+        # exercise asked...", "no longer supplies the reported event
+        # horizon", and "now a genuine program output" were all reproduced
+        # as present, uncaught, before this round's HTML fixes. This test
+        # would have FAILED against the pre-fix docstrings/HTML; it now
+        # scans every public (non-underscore) callable's docstring, not
+        # just a hardcoded list of seven, so a newly added function with a
+        # similar citation is caught automatically.
         forbidden = ("reviewer audit", "gemini", "codex", "copilot",
                      "first release", "earlier release",
-                     "response_to_audit", "review round")
+                     "response_to_audit", "review round",
+                     "earlier design note", "earlier version",
+                     "no longer supplies", "now a genuine program output")
 
         def _assert_clean(text, where):
             text_lower = text.lower()
@@ -1978,6 +2321,20 @@ class TestCLI(unittest.TestCase):
                 if fname.endswith(".csv"):
                     with open(os.path.join(tmp, fname), encoding="utf-8") as fh:
                         _assert_clean(fh.read(), f"CSV output ({fname})")
+
+        # Every public (non-underscore-prefixed) callable's docstring, not
+        # only a hardcoded shortlist -- this is the public teaching/API
+        # surface inspect.getdoc()/help() expose to a student, distinct
+        # from developer-facing "#" source comments (which legitimately
+        # cite audit findings throughout this codebase and are excluded).
+        for name in dir(phys):
+            if name.startswith("_"):
+                continue
+            obj = getattr(phys, name)
+            if callable(obj):
+                doc = inspect.getdoc(obj)
+                if doc:
+                    _assert_clean(doc, f"docstring of physics_bh.{name}")
 
 
 if __name__ == "__main__":
