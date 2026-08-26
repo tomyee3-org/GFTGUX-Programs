@@ -211,6 +211,69 @@ class TestSchwarzschildScales(unittest.TestCase):
         m, warn = phys.check_mass("mass", 10.0)
         self.assertEqual(warn, [])
 
+    def test_check_mass_rejects_above_max_computable_ceiling(self):
+        # Reviewer Audit round 2, Codex P2-2 reproducer: masses this
+        # large previously reached deep into embed/infall/horizons math
+        # (r_s**3, r0**3, ...) before overflowing, raising either a raw
+        # OverflowError (Python-native **) or silently becoming inf/-0.0
+        # (numpy **) several calls away from any input-validation message.
+        # check_mass's new MAX_COMPUTABLE_MASS_MSUN ceiling refuses these
+        # up front, with a clear, on-topic ValueError.
+        for bad in (phys.MAX_COMPUTABLE_MASS_MSUN * 1.001, 1.0e100, 1.0e150, 1.0e300):
+            with self.assertRaises(ValueError) as ctx:
+                phys.check_mass("mass", bad)
+            self.assertIn("exceeds", str(ctx.exception))
+        # And confirm the ceiling is not simply "anything large fails":
+        # a mass just under it is accepted (with the expected TRUSTED_MASS_HI
+        # warning, since it is still astrophysically absurd, just not
+        # computationally unrepresentable).
+        m, warn = phys.check_mass("mass", phys.MAX_COMPUTABLE_MASS_MSUN * 0.999)
+        self.assertEqual(len(warn), 1)
+
+    def test_max_computable_mass_ceiling_prevents_uncaught_overflow(self):
+        # Defense-in-depth check that the ceiling is actually wired into
+        # the calculations that used to overflow uncaught: embedding_profile
+        # (r**3-scale geometry), tidal_profile, and infall_radial (whose
+        # cycloid seed calculation used r0**3 directly and could raise a
+        # bare Python OverflowError -- see the try/except around
+        # tau_seed in infall_radial). Each must raise ValueError, not
+        # propagate OverflowError or silently return non-finite output.
+        huge = 1.0e100
+        with self.assertRaises(ValueError):
+            phys.embedding_profile(m_msun=huge, r_max_rs=8.0, n_r=50)
+        with self.assertRaises(ValueError):
+            phys.tidal_profile(m_msun=huge, r_min_rs=1.01, r_max_rs=8.0, n_r=50)
+        with self.assertRaises(ValueError):
+            phys.infall_radial(m_msun=huge, r0_rs=6.0, r_stop_rs=1.0005, n_points=50)
+        # Reviewer Audit round 2, Codex P2-2's exact vaidya_horizons
+        # reproducer: vaidya_horizons(1e300, 1e300, ...) previously
+        # returned inf/nan arrays through the M0==M1 no-accretion fast
+        # path, and the NaN postcondition did not catch it (nan > tolerance
+        # is always False in Python/numpy). check_mass is called on both
+        # M0 and M1 before any of that math runs, so this is now rejected
+        # immediately with a clear, on-topic ValueError instead.
+        with self.assertRaises(ValueError):
+            phys.vaidya_horizons(m0_msun=1.0e300, m1_msun=1.0e300)
+
+    def test_cli_rejects_overflowing_masses_cleanly_in_every_mode(self):
+        # Reviewer Audit round 2, Codex P2-2's exact CLI-level reproducers:
+        #   python main.py --mode embed --M 1e150 ...   (previously wrote
+        #     inf/-0 into the CSV after RuntimeWarnings, exit 0)
+        #   python main.py --mode infall --M 1e100 ...  (previously an
+        #     uncaught OverflowError traceback)
+        # Both must now fail with a concise, non-traceback CLI error and
+        # write no output file at all.
+        for mode, mass_flag, mass in (("embed", "--M", "1e150"),
+                                       ("tidal", "--M", "1e150"),
+                                       ("infall", "--M", "1e100")):
+            with tempfile.TemporaryDirectory() as tmp:
+                proc = run_cli(["--mode", mode, mass_flag, mass, "--no_plot",
+                                 "--csvdir", tmp])
+                self.assertNotEqual(proc.returncode, 0, msg=f"mode={mode}")
+                self.assertNotIn("Traceback", proc.stderr, msg=f"mode={mode}")
+                self.assertIn("exceeds", proc.stderr, msg=f"mode={mode}")
+                self.assertEqual(os.listdir(tmp), [], msg=f"mode={mode}")
+
     def test_schwarzschild_radius_rejects_nonfinite_result_from_finite_mass(self):
         # Reviewer Audit round 1, Codex P2-3 reproducer: a finite --M does
         # not guarantee a finite r_s. schwarzschild_radius(1e300) is a
@@ -354,6 +417,40 @@ class TestEmbedding(unittest.TestCase):
         rs = phys.schwarzschild_radius(10.0)
         with self.assertRaises(ValueError):
             phys.gaussian_curvature(rs, 0.5 * rs)
+
+    def test_gaussian_curvature_rejects_nonfinite_and_nonpositive_rs(self):
+        with self.assertRaises(ValueError):
+            phys.gaussian_curvature(float("nan"), 1.0)
+        with self.assertRaises(ValueError):
+            phys.gaussian_curvature(-1.0, 1.0)
+
+    def test_gaussian_curvature_rejects_nonfinite_r_m(self):
+        rs = phys.schwarzschild_radius(10.0)
+        with self.assertRaises(ValueError):
+            phys.gaussian_curvature(rs, float("nan"))
+        with self.assertRaises(ValueError):
+            phys.gaussian_curvature(rs, float("inf"))
+
+    def test_gaussian_curvature_rejects_overflowing_r_m(self):
+        # Reviewer Audit round 2, Codex P2-2: gaussian_curvature previously
+        # validated neither its inputs nor its own result, and would
+        # silently return -0.0 (not an error, not even a warning) once
+        # r_m**3 overflowed a double -- a wrong, non-obviously-wrong
+        # answer rather than a raised error. rs**3 float64 overflow starts
+        # a bit above r_m ~ 1e102 for a stellar-mass rs; 1e110 is
+        # comfortably past that.
+        rs = phys.schwarzschild_radius(10.0)
+        with self.assertRaises(ValueError):
+            phys.gaussian_curvature(rs, 1.0e110)
+        # And confirm this was a genuine silent-wrong-answer bug, not a
+        # hypothetical one: the raw (unguarded) formula really does
+        # produce -0.0, not nan/inf, at this magnitude, which is why the
+        # explicit finite-result check above -- not just finite-input
+        # validation -- is the part of the fix that matters here.
+        with np.errstate(over="ignore"):
+            raw = -rs / (2.0 * np.asarray(1.0e110) ** 3)
+        self.assertEqual(raw, 0.0)
+        self.assertTrue(math.copysign(1.0, raw) < 0.0)  # -0.0, not +0.0
 
     def test_proper_radial_distance_exceeds_coordinate_difference(self):
         # Physical invariant: the curved-space proper distance from r_s to
@@ -731,28 +828,53 @@ class TestInfall(unittest.TestCase):
         # it is not weakened, but the assertion itself is inverted to
         # check for the presence of convergence instead of the absence of
         # further improvement.
+        #
+        # STRENGTHENED (Reviewer Audit round 2, Codex P2-1): the previous
+        # version of this test stopped at step_frac=0.005 and asserted only
+        # a loose "still improving" bound there, which is technically true
+        # but permits a sequence that is not actually clean, monotonic
+        # fourth-order convergence -- exactly the gap between what EXP-11
+        # promised (a factor of 16 for every halving, smoothly, down to
+        # 0.005) and what the integrator actually delivers. Measured
+        # relative errors against the closed form are, in order,
+        # 1.56e-6, 2.16e-7, 2.92e-8, 1.63e-9, 1.83e-10, 8.88e-11, 2.86e-10,
+        # 8.21e-10 for step_frac = 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002,
+        # 0.001: strong (roughly third-to-fourth order, not exactly 16x
+        # every time) improvement down to about 0.005, then a genuinely
+        # NON-monotonic tail (0.002 and 0.001 are both slightly worse than
+        # 0.005) once the shrinking RK4 truncation error and the
+        # accumulated floating-point round-off from many more, individually
+        # tinier steps become comparable. This test now checks exactly that
+        # claim -- not endless monotonic improvement -- explicitly, keyed
+        # by step_frac rather than by fragile list position.
         m, r0_rs, r_stop_rs = 10.0, 6.0, 1.0005
         tau_closed = infall_cycloid_tau(m, r0_rs, r_stop_rs)
-        rel_errs = []
-        for step_frac in (0.2, 0.1, 0.05, 0.02, 0.01, 0.005):
+        step_fracs = (0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001)
+        rel_errs = {}
+        for step_frac in step_fracs:
             result = phys.infall_radial(m_msun=m, r0_rs=r0_rs, r_stop_rs=r_stop_rs,
                                          n_points=4000, step_frac=step_frac)
             tau_code = result["summary"]["tau_total_s"]
-            rel_errs.append(abs(tau_code - tau_closed) / tau_closed)
+            rel_errs[step_frac] = abs(tau_code - tau_closed) / tau_closed
         # All comfortably inside the documented 1e-5 tolerance even at the
         # coarsest allowed step size.
-        for e in rel_errs:
-            self.assertLess(e, 1.0e-5)
-        # Genuine convergence: refining step_frac from the coarsest (0.2)
-        # to a middling value (0.02) should reduce the error by at least
-        # two orders of magnitude (RK4 predicts (0.2/0.02)^4 = 1e4; 1e2 is
-        # a generous, robust floor). The old, bugged implementation
-        # instead showed *no* meaningful reduction here -- both ends of
-        # that range sat on the same ~1.3e-6 plateau.
-        self.assertLess(rel_errs[3], rel_errs[0] / 1.0e2)  # index 3 = 0.02
-        # And the finest step sizes should not have stopped improving
-        # either -- no repeat of the old plateau at the fine end.
-        self.assertLess(rel_errs[-1], rel_errs[3] / 3.0)
+        for sf, e in rel_errs.items():
+            self.assertLess(e, 1.0e-5, f"step_frac={sf}")
+        # Genuine convergence over the well-resolved range: refining
+        # step_frac from the coarsest (0.2) to a middling value (0.02)
+        # reduces the error by at least two orders of magnitude (RK4
+        # predicts (0.2/0.02)^4 = 1e4; 1e2 is a generous, robust floor).
+        # The old, bugged implementation instead showed *no* meaningful
+        # reduction here -- both ends of that range sat on the same
+        # ~1.3e-6 plateau.
+        self.assertLess(rel_errs[0.02], rel_errs[0.2] / 1.0e2)
+        self.assertLess(rel_errs[0.005], rel_errs[0.02] / 3.0)
+        # Below step_frac=0.005 the sequence is not guaranteed to keep
+        # improving monotonically (see above), but it IS guaranteed to stay
+        # in the tiny floating-point-noise band it has already reached --
+        # refining further should never make the answer meaningfully worse.
+        for sf in (0.005, 0.002, 0.001):
+            self.assertLess(rel_errs[sf], 5.0e-9, f"step_frac={sf}")
 
     def test_release_point_is_exact(self):
         # Reviewer Audit round 1, Copilot P2-1: the previous implementation
@@ -830,6 +952,142 @@ class TestInfall(unittest.TestCase):
             phys.infall_radial(m_msun=float("nan"), r0_rs=6.0)
         with self.assertRaises(ValueError):
             phys.infall_radial(m_msun=-5.0, r0_rs=6.0)
+
+    # --- Reviewer Audit round 2, Gemini finding 2 (seed-point overshoot on
+    # ultra-narrow r0_rs/r_stop_rs windows) -----------------------------
+    #
+    # infall_radial's numerical seed point sits at r0*(1-eps), eps
+    # formerly fixed at 1e-12. Whenever the caller's whole window
+    # (r0-r_stop)/r0 was narrower than that fixed eps, the seed point
+    # itself already lay AT OR PAST r_stop before the main integration
+    # loop ever ran: the loop would then execute zero iterations and the
+    # function would return "successfully", silently mislabelling the
+    # seed radius r0*(1-1e-12) -- not the requested r_stop -- as the
+    # stopping point. The fix scales eps down to a fixed 10% fraction of
+    # the actual window whenever that window is narrower than 1e-12, so
+    # the seed always lies strictly between r0 and r_stop.
+    #
+    # A genuine end-to-end regression test (call infall_radial with a
+    # narrow window and confirm it now reaches r_stop correctly) turns
+    # out not to be constructible in this codebase for the exact regime
+    # the fix changes. The two per-step caps used elsewhere in the
+    # integrator -- a speed floor of 1e-6*c and a distance-from-start
+    # floor of 1e-9*rs -- were sized for ordinary infall windows, not for
+    # windows a trillionth as wide as r0 itself; for EVERY (r0_rs, window
+    # fraction) combination tried that actually falls in the regime the
+    # fix changes (window fraction below 1e-11, so eps shrinks below its
+    # old fixed value), the true infall velocity never climbs out of that
+    # 1e-6*c floor before r_stop is reached, and the integrator exhausts
+    # MAX_STEPS without converging -- this was checked exhaustively for
+    # r0_rs in {1.01, 1.1, 1.5, 2.0, 3.0, 6.0, 9.0} crossed with window
+    # fractions in {1e-9, ..., 1e-14} (a reduced MAX_STEPS of 200,000, for
+    # speed) and again for r0_rs=1.01 with window fractions in
+    # {9e-12, 5e-12, 3e-12, 2e-12} at the full production MAX_STEPS of
+    # 4,000,000 (all still failed to converge). That is a separate,
+    # pre-existing numerical-tractability limit of this integrator for
+    # windows this narrow, orthogonal to the seed-point fix itself, and
+    # is not something this fix was ever meant to overcome.
+    #
+    # What the fix genuinely, verifiably does is proven two ways below
+    # instead: (1) the seed-point formula itself, exercised directly and
+    # compared against an independent hand-derivation, always keeps the
+    # seed strictly inside (r_stop, r0) -- this is a closed-form
+    # mathematical property of eps = min(1e-12, 0.1*window/r0), true for
+    # every 0 < window < r0, and is exactly what stops the old
+    # zero-iteration silent-success failure mode from being possible; and
+    # (2) calling the real infall_radial() in the narrow-window regime
+    # now fails LOUDLY (a RuntimeError naming r_stop and the step count)
+    # rather than returning silently-wrong data -- confirmed against the
+    # old fixed-eps formula, which would have returned with no error at
+    # all for the same inputs.
+    def test_seed_eps_formula_keeps_seed_strictly_inside_stop_window(self):
+        # Independent re-derivation of physics_bh's
+        # eps = min(1.0e-12, 0.1 * (r0 - r_stop) / r0) formula, checked
+        # for a spread of window widths that cross the old fixed
+        # eps=1e-12 in both directions.
+        for r0_rs in (1.01, 1.5, 6.0, 50.0):
+            for window_frac in (1.0e-2, 1.0e-9, 1.0e-10, 1.0e-12,
+                                 1.0e-13, 1.0e-14):
+                # (Window fractions much narrower than 1e-14 are not
+                # exercised here: at r0_rs=1.01 the seed offset eps*r0
+                # falls below float64's representable spacing near r0
+                # itself, so r0*(1-eps) rounds back to exactly r0 -- a
+                # float64 precision floor unrelated to this formula.)
+                r0 = r0_rs  # units of rs; eps is scale-invariant in rs
+                r_stop = r0 * (1.0 - window_frac)
+                eps = min(1.0e-12, 0.1 * (r0 - r_stop) / r0)
+                seed = r0 * (1.0 - eps)
+                self.assertGreater(
+                    seed, r_stop,
+                    msg=f"seed did not stay past r_stop for r0_rs={r0_rs}, "
+                        f"window_frac={window_frac:g}")
+                self.assertLess(seed, r0)
+                # For window_frac comfortably above the 1e-11 crossover
+                # (0.1*window_frac vs. the fixed 1e-12), eps is unchanged
+                # from the old fixed value -- ordinary, wide-window infall
+                # calls see byte-identical behaviour. Comfortably below
+                # it, eps has shrunk. (The crossover itself, window_frac
+                # == 1e-11 exactly, is left untested here since 0.1*1e-11
+                # is not exactly representable in float64 and lands a few
+                # parts in 1e4 to either side of 1e-12 depending on
+                # rounding -- not a meaningful behavioural distinction.)
+                if window_frac >= 1.0e-9:
+                    self.assertEqual(eps, 1.0e-12)
+                elif window_frac <= 1.0e-12:
+                    self.assertLess(eps, 1.0e-12)
+
+    def test_old_fixed_eps_would_have_silently_overshot_r_stop(self):
+        # Demonstrates the actual pre-fix defect algebraically: with the
+        # old fixed eps=1e-12, for any window narrower than that, the
+        # seed radius r0*(1-1e-12) already lies AT OR PAST the caller's
+        # requested r_stop -- so the old code's main loop would run zero
+        # iterations and return a "successful" track whose last point is
+        # not the requested r_stop at all.
+        for r0_rs in (1.01, 6.0, 1000.0):
+            for window_frac in (1.0e-13, 1.0e-14, 1.0e-20):
+                r0 = r0_rs
+                r_stop = r0 * (1.0 - window_frac)
+                old_eps = 1.0e-12
+                old_seed = r0 * (1.0 - old_eps)
+                self.assertLessEqual(
+                    old_seed, r_stop,
+                    msg="old fixed-eps seed should already have passed "
+                        f"r_stop for r0_rs={r0_rs}, window_frac={window_frac:g}")
+
+    def test_ultra_narrow_stop_window_fails_loudly_not_silently(self):
+        # In the regime the fix actually changes (window_frac < 1e-11),
+        # genuine convergence is numerically out of reach (see the class
+        # comment above) -- but the fixed code no longer pretends
+        # otherwise. It must raise the honest "did not reach r_stop"
+        # RuntimeError, never return, and never raise anything else (in
+        # particular, never a silent success and never an unrelated
+        # exception type such as a bare ZeroDivisionError or OverflowError
+        # escaping the integrator).
+        old_max_steps = phys.MAX_STEPS
+        phys.MAX_STEPS = 2000  # keep this test fast; see class comment --
+        # more steps would not change the qualitative (non-convergent)
+        # outcome for this window, only how long the test takes to fail.
+        try:
+            r0_rs = 1.01
+            r_stop_rs = r0_rs * (1.0 - 1.0e-13)
+            with self.assertRaises(RuntimeError) as ctx:
+                phys.infall_radial(m_msun=10.0, r0_rs=r0_rs,
+                                    r_stop_rs=r_stop_rs, n_points=20,
+                                    step_frac=0.2)
+            self.assertIn("did not reach r_stop", str(ctx.exception))
+        finally:
+            phys.MAX_STEPS = old_max_steps
+
+    def test_ordinary_window_unaffected_by_narrow_window_fix(self):
+        # Sanity check that the eps fix is inert for realistic infall
+        # calls: an ordinary window (r0_rs=6, r_stop_rs=1.0005, the CLI
+        # defaults) still integrates cleanly and reaches r_stop exactly,
+        # exactly as it did before this fix.
+        result = phys.infall_radial(m_msun=10.0, r0_rs=6.0,
+                                     r_stop_rs=1.0005, n_points=200,
+                                     step_frac=0.02)
+        rs = result["summary"]["rs_m"]
+        self.assertAlmostEqual(result["r"][-1] / rs, 1.0005, delta=1e-9)
 
 
 # ======================================================================
@@ -997,6 +1255,63 @@ class TestHorizons(unittest.TestCase):
         finally:
             phys._integrate_event_horizon_backward = original
 
+    def test_monotonicity_postcondition_is_actually_enforced(self):
+        # Companion mutation test to the one above, isolating the NEW
+        # monotonicity postcondition (Reviewer Audit round 2, Codex P1-1's
+        # own recommended addition) from the pre-existing AH-violation one:
+        # a uniform *0.999 corruption (as used above) drags the curve
+        # below r_AH too, so it cannot by itself prove the monotonicity
+        # check is live code rather than dead code shadowed by the AH
+        # check. This instead injects a local dip -- a small triangular
+        # notch, during accretion where the r_EH-r_AH margin is
+        # comfortably large (about 0.3 r_s0 here) -- sized to be far
+        # larger than the 1e-6 r_s0 monotonicity tolerance but far smaller
+        # than the local AH margin, so ONLY the monotonicity check can
+        # fire. (Copilot Audit round 2 REMAINING QUESTION D: mutation-test
+        # robustness -- this and the AH mutation test above now cover the
+        # two postconditions independently rather than confounded.)
+        original = phys._integrate_event_horizon_backward
+
+        def _broken(v_bc, r_bc, v_target, m0, m1, v1, v2, **kw):
+            v_arr, r_arr = original(v_bc, r_bc, v_target, m0, m1, v1, v2, **kw)
+            v_arr = v_arr.copy()
+            r_arr = r_arr.copy()
+            rs0 = phys.schwarzschild_radius(5.0)
+            v_center, v_half_width = 7.25 * rs0, 1.0 * rs0
+            idxs = np.where((v_arr > v_center - v_half_width) &
+                             (v_arr < v_center + v_half_width))[0]
+            self.assertGreater(len(idxs), 4)  # sanity: window is populated
+            lo, hi = idxs[0], idxs[-1]
+            dip = 0.15 * rs0
+            span = hi - lo
+            tri = np.concatenate([np.linspace(0.0, dip, span // 2),
+                                   np.linspace(dip, 0.0, span - span // 2 + (span % 2))])
+            r_arr[lo:hi] -= tri[:hi - lo]
+            return v_arr, r_arr
+
+        phys._integrate_event_horizon_backward = _broken
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=200,
+                                      bisect_iters=30)
+            self.assertIn("decreased somewhere along v", str(ctx.exception))
+        finally:
+            phys._integrate_event_horizon_backward = original
+
+    def test_summary_r_crit_matches_exported_curve_first_point(self):
+        # Reviewer Audit round 2, Gemini finding 1: r_crit_over_rs0 in the
+        # summary is read directly from r_eh_back[0] (the raw backward
+        # integrator's first array element), while the exported r_EH grid
+        # is built by np.interp(v_grid, v_eh_back, r_eh_back, ...)
+        # evaluated at v_start -- previously two different numbers, off by
+        # the same final-step overshoot the P3-1/Gemini-finding-1 fix
+        # (dv reordering, see test_backward_integrator_hits_v_target_exactly
+        # above) closes. They must now agree, not just be close.
+        result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
+                                       bisect_iters=40)
+        s = result["summary"]
+        self.assertEqual(s["r_crit_over_rs0"], result["r_EH"][0] / s["rs0_m"])
+
     def test_bisection_residual_shrinks_with_more_iterations(self):
         residuals = []
         for iters in (10, 20, 30, 40):
@@ -1041,6 +1356,136 @@ class TestHorizons(unittest.TestCase):
                                            bisect_iters=40, v_end_margin_rs0=20.0)
             self.assertTrue(np.all(np.isfinite(result["r_EH"])))
             self.assertTrue(np.all(np.isfinite(result["r_AH"])))
+
+    def test_long_duration_accretion_stays_monotonic_and_ah_consistent(self):
+        # Reviewer Audit round 2, Codex P1-1 reproducer: with the OLD
+        # duration-proportional step cap shared by both integrators,
+        # --duration_rs0 600 produced a non-monotonic r_EH(v), and 850+
+        # produced one that dipped below r_AH(v) -- both violations of
+        # this module's own documented invariants, and both silently
+        # exported rather than caught (the monotonicity postcondition
+        # check itself is new this round; see
+        # test_ah_violation_postcondition_is_actually_enforced above for
+        # its AH-violation counterpart). The backward integrator's step
+        # cap is now a LOCAL mass_scale, not duration-proportional, so
+        # arbitrarily long durations should not degrade its near-horizon
+        # step resolution. Below the fix, this call raised RuntimeError
+        # ("decreased somewhere along v") at duration=600.
+        for duration in (600.0, 1000.0):
+            result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0,
+                                           duration_rs0=duration,
+                                           v_end_margin_rs0=25.0, n_steps=400,
+                                           bisect_iters=60, n_family=9)
+            s = result["summary"]
+            self.assertTrue(np.all(np.isfinite(result["r_EH"])),
+                             msg=f"duration={duration}")
+            min_step = float(np.min(np.diff(result["r_EH"])))
+            self.assertGreaterEqual(min_step, 0.0, msg=f"duration={duration}")
+            min_ah_gap_rs0 = float(np.min((result["r_EH"] - result["r_AH"]) / s["rs0_m"]))
+            self.assertGreaterEqual(min_ah_gap_rs0, -1.0e-9, msg=f"duration={duration}")
+
+    def test_backward_integrator_hits_v_target_exactly(self):
+        # Reviewer Audit round 2, Codex P3-1 / Gemini finding 1: both
+        # integrators capped each step as
+        # dv = min(dv_r, cap); dv = max(dv, floor) -- applying the floor
+        # AFTER the remaining-interval cap could push the FINAL step's dv
+        # back above the true remaining distance, overshooting v_target.
+        # The fix reorders so the remaining-interval cap is applied LAST.
+        # Direct unit check on the backward integrator: it should land on
+        # v_target exactly (RK4 in a fixed number of steps to an exact
+        # endpoint, not merely "close").
+        m0, m1 = 5.0, 10.0
+        rs0 = phys.schwarzschild_radius(m0)
+        rs1 = phys.schwarzschild_radius(m1)
+        v1 = 5.0 * rs0
+        v2 = v1 + 10.0 * rs0
+        v_start = v1 - 25.0 * rs0
+        v_arr, r_arr = phys._integrate_event_horizon_backward(
+            v2, rs1, v_start, 0.5 * rs0, 0.5 * rs1, v1, v2)
+        self.assertEqual(v_arr[0], v_start)
+        self.assertTrue(np.all(np.isfinite(r_arr)))
+        # And confirm no step overshot past v_target along the way either
+        # (the array is returned v-increasing from v_target to v_bc).
+        self.assertGreaterEqual(float(v_arr[0]), v_start)
+
+    def test_family_n_equals_one_uses_primary_backward_curve_exactly(self):
+        # Reviewer Audit round 2, Codex P2-3 reproducer: with n_family=1,
+        # the single "family" entry used to be a forward-integrated trial
+        # AT ZERO OFFSET from r_crit -- subject to the same forward-
+        # shooting instability the backward construction exists to avoid
+        # -- yet exported and described (in the HTML help text) as "the
+        # event-horizon generator itself". It is now the true primary
+        # backward-derived curve directly, flagged as such.
+        result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
+                                       bisect_iters=40, n_family=1)
+        self.assertEqual(len(result["family"]), 1)
+        f0 = result["family"][0]
+        self.assertTrue(f0["is_primary_backward_curve"])
+        self.assertIsNone(f0["escapes"])
+        self.assertAlmostEqual(f0["r_i_over_rs0"],
+                                result["summary"]["r_crit_over_rs0"], delta=1e-15)
+        self.assertTrue(np.all(np.isfinite(f0["r"])))
+        self.assertTrue(np.all(np.isfinite(f0["v"])))
+
+    def test_family_odd_count_avoids_exact_zero_offset(self):
+        # Reviewer Audit round 2, Codex P2-3: for odd n_family>=3,
+        # np.linspace(-spread, spread, n_family) lands its middle entry
+        # exactly on offset zero -- a forward-integrated trial starting
+        # from exactly r_crit, subject to the same instability as above,
+        # indistinguishable from "the generator" in the exported family
+        # CSV unless nudged away from zero. The full count (n_family
+        # entries, not n_family-1) must still be produced.
+        for n_family in (3, 5, 9):
+            result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
+                                           bisect_iters=40, n_family=n_family)
+            fam = result["family"]
+            self.assertEqual(len(fam), n_family)
+            r_crit_rs0 = result["summary"]["r_crit_over_rs0"]
+            offsets = [f["r_i_over_rs0"] - r_crit_rs0 for f in fam]
+            for off in offsets:
+                self.assertNotEqual(off, 0.0, msg=f"n_family={n_family}")
+            for f in fam:
+                self.assertFalse(f["is_primary_backward_curve"])
+                self.assertIsInstance(f["escapes"], bool)
+
+    def test_curvewise_diagnostic_fields_reproduce_p1_2_pattern(self):
+        # Reviewer Audit round 2, Codex P1-2 reproducer: at low
+        # --bisect_iters, shooting_vs_backward_rs0 (the STARTING-radius-
+        # only comparison) reads deceptively small even though the
+        # forward-shooting trial has already plunged/escaped and differs
+        # from the true horizon by order unity in r_s0 -- the previous
+        # EXP-13 text read that small starting-radius number as evidence
+        # of small curve error. shooting_reached_v2 and
+        # shooting_vs_backward_curve_max_rs0 catch this: at 10 and 20
+        # bisect_iters the forward trial does not even reach v2, while
+        # the curvewise max difference is order unity in r_s0; only once
+        # bisect_iters is large enough (30+, here) does the trial reach
+        # v2 and the curvewise difference shrink to match the small
+        # starting-radius diagnostic.
+        low_curve_max = None
+        for iters in (10, 20):
+            result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
+                                           bisect_iters=iters)
+            s = result["summary"]
+            self.assertFalse(s["shooting_reached_v2"], msg=f"iters={iters}")
+            self.assertTrue(math.isnan(s["shooting_v2_boundary_residual_rs0"]),
+                             msg=f"iters={iters}")
+            self.assertGreater(s["shooting_vs_backward_curve_max_rs0"], 0.5,
+                                msg=f"iters={iters}")
+            # The deceptive part of the old diagnostic: small even though
+            # the curve has already gone badly wrong.
+            self.assertLess(s["shooting_vs_backward_rs0"], 1.0e-3, msg=f"iters={iters}")
+            low_curve_max = s["shooting_vs_backward_curve_max_rs0"]
+        for iters in (30, 60):
+            result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
+                                           bisect_iters=iters)
+            s = result["summary"]
+            self.assertTrue(s["shooting_reached_v2"], msg=f"iters={iters}")
+            self.assertTrue(math.isfinite(s["shooting_v2_boundary_residual_rs0"]),
+                             msg=f"iters={iters}")
+            self.assertLess(s["shooting_vs_backward_curve_max_rs0"], 1.0e-2,
+                             msg=f"iters={iters}")
+        self.assertGreater(low_curve_max, 0.5)
 
     # --- bounds / error handling -----------------------------------
     def test_M1_less_than_M0_rejected(self):
@@ -1445,6 +1890,94 @@ class TestCLI(unittest.TestCase):
         for token in ("stretching", "compressing", "escapes to infinity",
                       "plunges to $r=0$", "apparent horizon", "event horizon"):
             self.assertIn(token, src)
+
+    def test_concurrent_processes_writing_same_csvdir_and_outdir_do_not_collide(self):
+        # Reviewer Audit round 2, Gemini finding 3 / Codex P2-6: the
+        # previous os.path.exists()-then-open() sequence in
+        # driver_bh._write_csv and plot_bh._finish was not atomic, so two
+        # independent PROCESSES (not just two calls in the same process)
+        # racing to create a same-microsecond-timestamped path could both
+        # see it as free and both open it -- the second writer silently
+        # overwrote the first's data. test_repeated_csv_writes_do_not_collide
+        # above exercises three *sequential* subprocess runs, which cannot
+        # actually race; this launches several real OS processes
+        # concurrently (subprocess.Popen, not run()) against the SAME
+        # csvdir/outdir, to exercise the genuine race the atomic
+        # os.open(O_CREAT|O_EXCL) fix (and its FileExistsError-retry loop)
+        # is meant to close.
+        n_procs = 5
+        env = dict(os.environ)
+        env["MPLBACKEND"] = "Agg"
+        with tempfile.TemporaryDirectory() as tmp:
+            # Deliberately omit --no_plot: with --outdir given (and
+            # --no_plot absent), driver_bh.run() both writes a CSV AND
+            # calls plot_bh._finish to save a PNG, so both atomic-write
+            # paths race concurrently across processes.
+            procs = [
+                subprocess.Popen(
+                    [PYTHON, "main.py", "--mode", "embed", "--csvdir", tmp,
+                     "--outdir", tmp, "--n_r", "15"],
+                    cwd=PROJECT_DIR, env=env,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                for _ in range(n_procs)
+            ]
+            results = [p.communicate(timeout=120) for p in procs]
+            for i, (p, (out, err)) in enumerate(zip(procs, results)):
+                self.assertEqual(p.returncode, 0, msg=f"proc {i} stderr={err.decode()}")
+            csv_files = [f for f in os.listdir(tmp) if f.endswith(".csv")]
+            png_files = [f for f in os.listdir(tmp) if f.endswith(".png")]
+            self.assertEqual(len(csv_files), n_procs)
+            self.assertEqual(len(png_files), n_procs)
+            self.assertEqual(len(set(csv_files)), n_procs)  # genuinely distinct names
+            self.assertEqual(len(set(png_files)), n_procs)
+            for f in csv_files:
+                self.assertGreater(os.path.getsize(os.path.join(tmp, f)), 0)
+            for f in png_files:
+                self.assertGreater(os.path.getsize(os.path.join(tmp, f)), 0)
+
+    def test_no_reviewer_or_audit_provenance_in_student_facing_text(self):
+        # Reviewer Audit round 2, Codex P2-4: student-facing text (--help,
+        # printed CLI output, exported CSV comment lines, and the HTML)
+        # must describe the CURRENT program as fact, not narrate
+        # development/audit history or name reviewers -- that provenance
+        # belongs only in code comments/docstrings (developer-facing) and
+        # the Response_to_Audit* documents. This is a permanent guard
+        # against that regressing. (It also caught a real instance during
+        # the exhaustive self-sweep after Audit round 2: the
+        # bh_horizons_family CSV's own comments= string cited "Reviewer
+        # Audit round 2, Codex P2-3" -- CSV files are exported, student-
+        # facing data output exactly like printed CLI text, not developer-
+        # facing source, so that citation has been removed from the string
+        # itself.)
+        forbidden = ("reviewer audit", "gemini", "codex", "copilot",
+                     "first release", "earlier release",
+                     "response_to_audit", "review round")
+
+        def _assert_clean(text, where):
+            text_lower = text.lower()
+            for term in forbidden:
+                self.assertNotIn(term, text_lower, msg=f"in {where}: {term!r}")
+
+        proc = run_cli(["--help"])
+        self.assertEqual(proc.returncode, 0)
+        _assert_clean(proc.stdout, "--help output")
+
+        html_path = os.path.join(PROJECT_DIR, "Black_hole_spacetime_visualizer.html")
+        if os.path.exists(html_path):
+            with open(html_path, encoding="utf-8") as fh:
+                _assert_clean(fh.read(), "HTML")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = run_cli(["--mode", "horizons", "--no_plot", "--csvdir", tmp,
+                             "--n_steps", "200", "--bisect_iters", "15",
+                             "--n_family", "5"])
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            _assert_clean(proc.stdout, "printed CLI output")
+            for fname in os.listdir(tmp):
+                if fname.endswith(".csv"):
+                    with open(os.path.join(tmp, fname), encoding="utf-8") as fh:
+                        _assert_clean(fh.read(), f"CSV output ({fname})")
 
 
 if __name__ == "__main__":

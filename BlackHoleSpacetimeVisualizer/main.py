@@ -16,7 +16,10 @@ Four calculations share one program, chosen with --mode:
                speed, and the redshift of light it sends outward
     horizons   the event horizon vs. the apparent horizon of a black hole
                that gains mass by swallowing an infalling shell (a Vaidya
-               spacetime), located by a numerical shooting method
+               spacetime); the event horizon is constructed by integrating
+               backward in time from the exact post-accretion boundary
+               condition, the numerically well-conditioned direction for
+               this problem
 
 All four calculations are exact consequences of the Schwarzschild geometry
 (or, for horizons, the ingoing Vaidya generalisation of it) -- there is no
@@ -88,12 +91,12 @@ def parse_args():
                         "tidal and infall")
     g.add_argument("--r_max_rs", type=float, default=8.0, metavar="R/RS",
                    help="outer radius plotted, in units of r_s -- SHARED "
-                        "between embed and tidal (Reviewer Audit round 1, "
-                        "Codex P2-7), but with different upper bounds for "
-                        "each: embed's picture is specifically about the "
-                        "near-horizon throat, so it is capped at 1000; "
-                        "tidal is also used to verify the far-field 1/r^3 "
-                        "power law (see EXP-8) and so is allowed up to 1e8")
+                        "between embed and tidal, but with different upper "
+                        "bounds for each: embed's picture is specifically "
+                        "about the near-horizon throat, so it is capped at "
+                        "1000; tidal is also used to verify the far-field "
+                        "1/r^3 power law (see EXP-8) and so is allowed up "
+                        "to 1e8")
     g.add_argument("--n_r", type=_positive_int, default=400, metavar="N",
                    help="radial points for embed or tidal")
 

@@ -46,10 +46,6 @@ C_EH       = "#1c1c1c"
 # ----------------------------------------------------------------------
 # Output helpers
 # ----------------------------------------------------------------------
-def _timestamp_name(prefix):
-    return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-
-
 def _finish(fig, outdir, prefix, dpi):
     """
     Display the figure on screen, and -- if `outdir` is given -- ALSO save a
@@ -57,11 +53,30 @@ def _finish(fig, outdir, prefix, dpi):
     display, it does not replace it. To skip the figure (and hence the
     screen display) entirely, use --no_plot, which keeps this function from
     being called at all.
+
+    PNG filenames use the same microsecond-timestamp-plus-atomic-collision-
+    suffix scheme as driver_bh._write_csv, for the same reason: the
+    previous second-resolution timestamp with no collision handling at all
+    let two same-prefix plots saved within one wall-clock second silently
+    overwrite one another (Reviewer Audit round 2, Codex P2-6).
+    os.open(..., O_CREAT|O_EXCL) makes the existence check and the file
+    creation one atomic step, so this is safe against concurrent writers
+    too, not just same-process sequential ones.
     """
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        path = os.path.join(outdir, _timestamp_name(prefix))
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = os.path.join(outdir, f"{prefix}_{stamp}.png")
+        suffix = 1
+        while True:
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                break
+            except FileExistsError:
+                path = os.path.join(outdir, f"{prefix}_{stamp}_{suffix}.png")
+                suffix += 1
+        with open(fd, "wb") as fh:
+            fig.savefig(fh, format="png", dpi=dpi, bbox_inches="tight")
         print(f"[plot_bh] PNG saved -> {path}")
     print("[plot_bh] Displaying figure on screen ...")
     plt.show()

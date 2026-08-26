@@ -122,18 +122,29 @@ def _write_csv(csvdir, prefix, header, rows, comments=()):
     # prefix are written inside the same wall-clock second -- e.g. two runs
     # of the same mode issued back-to-back from a script or test harness.
     # Microsecond resolution makes a same-second collision astronomically
-    # unlikely, and the explicit exists() loop below closes the remaining
-    # gap (identical microsecond tick, or a clock with coarser-than-us
-    # resolution on some platforms) by appending a disambiguating suffix
-    # instead of silently overwriting the earlier file
-    # (Reviewer Audit round 1).
+    # unlikely (Reviewer Audit round 1), but checking os.path.exists() and
+    # then separately opening the file is not atomic: two independent
+    # *processes* (for example a multi-core parameter-sweep script) can
+    # both observe the same microsecond-stamped path as free and both open
+    # it, and the second writer silently overwrites the first's data
+    # (Reviewer Audit round 2, Gemini finding 3). os.open with
+    # O_CREAT|O_EXCL performs the existence check and the creation as one
+    # atomic kernel call, so this loop can no longer lose that race: on a
+    # collision it retries with a disambiguating suffix exactly as before,
+    # but a `FileExistsError` from a concurrent writer can never be missed
+    # between a separate check and a separate open the way the previous
+    # exists()-then-open() sequence could.
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     path = os.path.join(csvdir, f"{prefix}_{stamp}.csv")
     suffix = 1
-    while os.path.exists(path):
-        path = os.path.join(csvdir, f"{prefix}_{stamp}_{suffix}.csv")
-        suffix += 1
-    with open(path, "w", newline="", encoding="utf-8") as fh:
+    while True:
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            break
+        except FileExistsError:
+            path = os.path.join(csvdir, f"{prefix}_{stamp}_{suffix}.csv")
+            suffix += 1
+    with open(fd, "w", newline="", encoding="utf-8") as fh:
         for line in comments:
             fh.write(f"# {line}\n")
         writer = csv.writer(fh)
@@ -272,10 +283,20 @@ def _print_horizons_summary(s):
     print(f"  reported curve): r/r_s0 = {s['r_crit_shooting_over_rs0']:.8f}"
           f"  (bracket width {s['residual_rs0']:.3e} r_s0,"
           f" {s['bisect_iters']} iterations)")
-    print(f"      differs from the reported (backward) result by "
-          f"{s['shooting_vs_backward_rs0']:.3e} r_s0 -- see EXP-13; the")
-    print("       bracket width above measures only bisection's own")
-    print("       precision, not this difference.")
+    print(f"      differs from the reported (backward) result's STARTING "
+          f"radius only by {s['shooting_vs_backward_rs0']:.3e} r_s0 -- this")
+    print("       can look small even when the forward trial has gone badly")
+    print("       wrong further along its own track; see the three fields")
+    print("       below for the actual curve-wise comparison, and EXP-13.")
+    reached = s["shooting_reached_v2"]
+    print(f"      shooting_reached_v2 = {reached}"
+          + ("" if reached else "  (trial plunged/escaped before v2)"))
+    if reached:
+        print(f"      shooting_v2_boundary_residual_rs0 = "
+              f"{s['shooting_v2_boundary_residual_rs0']:.3e} r_s0")
+    print(f"      shooting_vs_backward_curve_max_rs0 = "
+          f"{s['shooting_vs_backward_curve_max_rs0']:.3e} r_s0  (the actual")
+    print("       curve-wise diagnostic -- not the starting-radius one above)")
     print(SEP)
     no_accretion = (s["m0_msun"] == s["m1_msun"])
     if no_accretion:
@@ -460,16 +481,26 @@ def _run_horizons(kw, outdir, csvdir, dpi, lw):
                       f"{s['residual_rs0']:.3e} r_s0"])
         frows = []
         for j, fam in enumerate(result["family"]):
+            # n_family=1 exports the primary backward curve itself, not a
+            # forward-integrated trial ray -- "escapes" does not apply to
+            # it, and it must not be printed as "no" (which would read as
+            # "plunges") (Reviewer Audit round 2, Codex P2-3).
+            if fam.get("is_primary_backward_curve"):
+                fate = "n/a (primary backward curve, not a forward trial)"
+            else:
+                fate = "yes" if fam["escapes"] else "no"
             for v, r in zip(fam["v"], fam["r"]):
-                frows.append([j, f"{fam['r_i_over_rs0']:.17g}",
-                              "yes" if fam["escapes"] else "no",
+                frows.append([j, f"{fam['r_i_over_rs0']:.17g}", fate,
                               f"{v/s['rs0_m']:.17g}", f"{r/s['rs0_m']:.17g}"])
         _write_csv(csvdir, "bh_horizons_family",
                    ["trajectory_id", "r_i_over_rs0", "escapes",
                     "v_over_rs0", "r_over_rs0"], frows,
                    comments=["family of outgoing null geodesics bracketing "
                              "the event-horizon generator (diagnostic/"
-                             "visualization only; not the reported r_EH(v))"]
+                             "visualization only; not the reported r_EH(v)) "
+                             "-- with --n_family 1 this is instead the "
+                             "primary backward-integrated curve itself, "
+                             "labelled as such in the escapes column"]
                    + _provenance("horizons", kw))
     if not kw["no_plot"]:
         viz.plot_horizons(result, outdir=outdir, dpi=dpi, lw=lw)

@@ -25,9 +25,11 @@ simplest dynamical generalisation, the ingoing Vaidya metric):
             horizon and the (global, teleological) event horizon of a
             black hole that gains mass by swallowing a shell of infalling
             null dust -- an ingoing Vaidya spacetime.  The event horizon is
-            located by a numerical shooting method: it is the one outgoing
-            null geodesic that neither escapes to large radius nor falls to
-            the singularity.
+            the one outgoing null geodesic that neither escapes to large
+            radius nor falls to the singularity; it is constructed here by
+            integrating backward in time from the exact boundary condition
+            fixed once accretion has finished, the numerically
+            well-conditioned direction for this particular geodesic.
 
 Every calculation here is an exact consequence of the Schwarzschild or
 Vaidya metric -- there is no equation of state to choose and no fitted
@@ -47,7 +49,7 @@ gravity g.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -153,6 +155,26 @@ MODES = ("embed", "tidal", "infall", "horizons")
 TRUSTED_MASS_LO = 2.0        # Msun -- below the observed mass gap
 TRUSTED_MASS_HI = 5.0e10     # Msun -- above the most massive black holes known
 
+# A separate, much larger ceiling: not astrophysical implausibility (that is
+# TRUSTED_MASS_HI above, which only warns) but the point past which this
+# program's own downstream arithmetic -- cubing a radius already inflated by
+# up to r_max_rs/r0_rs = 1e8 for tidal_profile/infall_radial, or up to 1000
+# for embedding_profile -- stops being representable in IEEE double
+# precision. Below this ceiling every mode's computation is guaranteed
+# finite (or raises a clear error from a more specific cause); above it,
+# check_mass() now refuses the run outright rather than let it fail deep in
+# some later expression as an uncaught OverflowError (infall_radial's
+# r0**3, native Python power, previously did exactly this at M=1e100 Msun)
+# or as a silent numpy overflow to inf/-0 written straight into a CSV
+# (embedding_profile's z(r) and K(r), previously, at M=1e150 Msun) (Reviewer
+# Audit round 2, Codex P2-2). 1e80 Msun is about 1e13 times the mass-energy
+# of the entire observable universe, so nothing pedagogically meaningful is
+# excluded; it exists purely so "any positive mass is accepted" (the
+# physical contract) and "every accepted input computes to a finite,
+# honestly-reported answer" (the computational contract) can both be true
+# at once.
+MAX_COMPUTABLE_MASS_MSUN = 1.0e80   # Msun -- computational ceiling, not physical
+
 MAX_POINTS = 200_000
 MAX_STEPS = 4_000_000
 
@@ -210,6 +232,20 @@ def check_mass(name, m_msun):
     precisely to see the numbers become extreme.
     """
     m_msun = _require_positive(name, m_msun)
+    if m_msun > MAX_COMPUTABLE_MASS_MSUN:
+        # Distinct from, and stricter than, the TRUSTED_MASS_HI warning
+        # below: this is not "astrophysically implausible" (still computed
+        # exactly and reported), it is "too large for this program's own
+        # arithmetic to stay finite" (refused outright, with a clear reason,
+        # rather than silently producing inf/-0/NaN or an uncaught
+        # OverflowError several calls deeper -- Reviewer Audit round 2,
+        # Codex P2-2).
+        raise ValueError(
+            f"{name} = {m_msun:g} Msun exceeds {MAX_COMPUTABLE_MASS_MSUN:g} "
+            "Msun, the largest mass this program can compute with in double "
+            "precision without overflowing (this is a computational limit, "
+            "not a physical one -- see MAX_COMPUTABLE_MASS_MSUN)."
+        )
     warnings = []
     if m_msun < TRUSTED_MASS_LO:
         warnings.append(
@@ -323,7 +359,21 @@ def embedding_profile(m_msun=10.0, r_max_rs=8.0, n_r=400):
 
     rs = schwarzschild_radius(m_msun)
     r = np.linspace(rs, rs * r_max_rs, n_r)
+    if not np.all(np.isfinite(r)):
+        raise ValueError(
+            "embedding_profile's radius grid is not finite; reduce --M or "
+            "--r_max_rs."
+        )
     z = 2.0 * np.sqrt(rs * (r - rs))
+    if not np.all(np.isfinite(z)):
+        # check_mass()'s MAX_COMPUTABLE_MASS_MSUN ceiling should already
+        # prevent this, but confirm rather than assume before the value is
+        # plotted or written to a CSV (Reviewer Audit round 2, Codex P2-2:
+        # M=1e150 Msun previously wrote `inf`/`-0` here after a silent numpy
+        # overflow warning).
+        raise ValueError(
+            "embedding_profile's z(r) is not finite; reduce --M or --r_max_rs."
+        )
 
     # Local proper circumference vs. the flat-space (Euclidean) expectation,
     # a second, purely geometric way to see the curvature: on the curved
@@ -331,6 +381,11 @@ def embedding_profile(m_msun=10.0, r_max_rs=8.0, n_r=400):
     # the circumference at r is still exactly 2*pi*r (a defining property of
     # the Schwarzschild r coordinate).
     proper_radial_distance = _proper_radial_distance(rs, rs, r)
+    if not np.all(np.isfinite(proper_radial_distance)):
+        raise ValueError(
+            "embedding_profile's proper_radial_distance is not finite; "
+            "reduce --M or --r_max_rs."
+        )
 
     # The intrinsic Gaussian curvature of the slice itself (see the module
     # docstring above for the derivation and its sign): exposed here as a
@@ -363,11 +418,41 @@ def gaussian_curvature(rs, r_m):
     constant-t Schwarzschild spatial slice (see the derivation in this
     module's docstring, and embedding_profile's docstring, above). Accepts
     a scalar or array r_m, both in metres, and requires r_m >= rs.
+
+    This is a public function callable directly (not only via
+    embedding_profile), so it validates its own inputs and its own result
+    rather than relying on a caller to have done so first -- previously it
+    did neither, and would silently return -0.0 for r_m large enough that
+    r_m**3 overflows to inf (Reviewer Audit round 2, Codex P2-2).
+
+    An isfinite() check on K alone is NOT sufficient to catch that failure
+    mode: -rs / inf underflows to exactly -0.0, which IS finite, so an
+    isfinite-only guard (the first version of this fix) let the very
+    silent-zero bug its own docstring described straight through --
+    caught by this suite's own
+    test_gaussian_curvature_rejects_overflowing_r_m while exhaustively
+    sweeping for further defects after Audit round 2. K(r) = -r_s/(2 r^3)
+    is strictly negative for every finite rs > 0, r_m > 0, so an exact
+    zero (signed or not) is itself proof that overflow silently occurred,
+    and is checked for explicitly below, in addition to the isfinite
+    check (which still catches nan/inf results from other overflow
+    patterns this formula could in principle hit).
     """
+    rs = _require_positive("rs", rs)
     r_m = np.asarray(r_m, dtype=float)
+    if not np.all(np.isfinite(r_m)):
+        raise ValueError("gaussian_curvature requires a finite r_m.")
     if np.any(r_m < rs):
         raise ValueError("gaussian_curvature is defined only for r >= r_s.")
-    return -rs / (2.0 * r_m**3)
+    with np.errstate(over="ignore"):
+        K = -rs / (2.0 * r_m**3)
+    if not np.all(np.isfinite(K)) or np.any(K == 0.0):
+        raise ValueError(
+            "gaussian_curvature's result is not finite (or silently "
+            "underflowed to zero); r_m is too large relative to rs to "
+            "compute with in double precision."
+        )
+    return K
 
 
 def _proper_radial_distance(rs, r_from, r_to):
@@ -546,6 +631,11 @@ def tidal_profile(m_msun=10.0, r_min_rs=1.01, r_max_rs=10.0, n_r=400,
             "--r_max_rs."
         )
     a_r, a_t = tidal_acceleration(m_msun, r, separation_m)
+    if not (np.all(np.isfinite(a_r)) and np.all(np.isfinite(a_t))):
+        raise ValueError(
+            "tidal_profile's acceleration values are not finite; reduce "
+            "--M, --separation, or --r_max_rs."
+        )
 
     a_r_horizon, a_t_horizon = tidal_acceleration(m_msun, rs, separation_m)
 
@@ -725,7 +815,18 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     the distance to r_stop, restores full fourth-order behaviour: with this
     version of the integrator, --step_frac 0.2 (the coarsest value allowed)
     already agrees with an exact closed-form (cycloid-parametrised) benchmark
-    solution to better than one part in 10^6 for the default parameters.
+    solution to a few parts in 10^6 for the default parameters (measured:
+    about 1.6e-6 relative error -- Reviewer Audit round 2, Codex P2-1 caught
+    the previous, more precise-sounding "better than one part in 10^6"
+    phrasing here disagreeing with its own measured 1.56e-6). Refining
+    --step_frac from there improves the agreement roughly as step_frac^3-4
+    down to about 0.005, where the shrinking RK4 truncation error and the
+    accumulated floating-point round-off from many more, individually
+    tinier steps become comparable; below that the relative error stays in
+    a tiny (sub-1e-8) floating-point-noise band but is not guaranteed to
+    keep improving monotonically step by step (see EXP-11, which was
+    previously overstated as a clean factor-of-16-per-halving convergence
+    all the way down).
 
     r_stop_rs must exceed 1: the Schwarzschild t coordinate, and this
     integrator's use of it, both break down at the horizon itself, which is
@@ -802,10 +903,39 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     # dt/dtau is, to relative accuracy O(eta0^2) ~ O(eps) ~ 1e-12 -- far
     # below any other error in this calculation -- just its release-point
     # value dt/dtau|_{r=r0} = E/(1-rs/r0) = 1/E, giving t_seed = tau_seed/E.
-    eps = 1.0e-12
+    # eps sets how far inside r0 the numerical seed point sits, as a
+    # fraction of r0. The fixed eps = 1e-12 used before this round assumed
+    # r0 - r_stop is never itself anywhere near that small a fraction of
+    # r0; a caller may legally request a window narrower than that (r0_rs
+    # and r_stop_rs need only satisfy 1 < r_stop_rs < r0_rs), in which case
+    # the seed radius r0*(1-eps) could fall at or past r_stop before the
+    # main loop below ever runs, silently truncating the recorded track at
+    # the seed point while the summary still claimed it reached r_stop
+    # (Reviewer Audit round 2, Gemini finding 2). Scaling eps down to a
+    # generous fraction of the actual (r0-r_stop)/r0 window, whenever that
+    # window is narrower than the usual 1e-12, keeps the seed strictly
+    # between r0 and r_stop in every case while leaving the ordinary,
+    # wide-window default behaviour (eps = 1e-12) unchanged.
+    eps = min(1.0e-12, 0.1 * (r0 - r_stop) / r0)
     eta0 = 2.0 * math.asin(math.sqrt(eps))
     m_geom = 0.5 * rs
-    tau_seed = (math.sqrt(r0**3 / (8.0 * m_geom)) * (eta0 + math.sin(eta0))) / c
+    try:
+        tau_seed = (math.sqrt(r0**3 / (8.0 * m_geom)) * (eta0 + math.sin(eta0))) / c
+    except OverflowError as exc:
+        # Native Python ** on a large-enough float raises OverflowError
+        # directly (unlike numpy, which would silently return inf) --
+        # previously uncaught here, producing a raw traceback instead of
+        # this program's normal concise error message (Reviewer Audit
+        # round 2, Codex P2-2: M=1e100 Msun with the default r0_rs
+        # triggered this at r0**3). check_mass()'s MAX_COMPUTABLE_MASS_MSUN
+        # ceiling should already prevent any accepted mass from reaching
+        # this, but this is the actual site of the previous failure, so it
+        # is guarded directly as well.
+        raise ValueError(
+            "infall_radial's cycloid seed calculation overflowed; --M and "
+            "--r0_rs are too large in combination to compute with in "
+            "double precision."
+        ) from exc
     t_seed = tau_seed / E
 
     r = r0 * (1.0 - eps)
@@ -897,6 +1027,21 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     redshift = np.array([outgoing_redshift_factor(rs, r0, E, rr) for rr in r_arr])
     dtau_dt = (1.0 - rs / r_arr) / E   # instantaneous d(proper time)/d(coordinate time)
 
+    if not all(np.all(np.isfinite(a)) for a in
+              (tau_arr, t_arr, r_arr, v_local, redshift, dtau_dt)):
+        # A last, blanket check on everything about to be returned (and, in
+        # the CLI, plotted or written to CSV) -- catches any non-finite
+        # value regardless of exactly which upstream expression produced it
+        # (Reviewer Audit round 2, Codex P2-2: "check every returned array/
+        # summary field for finiteness before printing, plotting, or
+        # exporting").
+        raise ValueError(
+            "infall_radial produced a non-finite result somewhere in its "
+            "output arrays; --M, --r0_rs, --r_stop_rs and --step_frac are "
+            "too extreme in combination to compute with in double "
+            "precision."
+        )
+
     warnings = list(warn_m)
     warnings.append(
         f"integration was stopped at r = {r_stop_rs:g} r_s, just outside the "
@@ -930,7 +1075,16 @@ def _mass_geom(m_msun):
     """GM/c^2 for a mass in solar masses, i.e. half the Schwarzschild radius,
     in metres, using the IAU nominal solar mass parameter directly (Reviewer
     Audit round 1, Codex P2-2; see GM_SUN_NOMINAL)."""
-    return m_msun * GM_SUN_NOMINAL / c**2
+    m_geom = m_msun * GM_SUN_NOMINAL / c**2
+    if not math.isfinite(m_geom):
+        # Defense in depth: check_mass()'s MAX_COMPUTABLE_MASS_MSUN ceiling
+        # should already have refused any m_msun that could reach here with
+        # a non-finite result, but this public-adjacent helper is cheap to
+        # make self-protecting too (Reviewer Audit round 2, Codex P2-2).
+        raise ValueError(
+            f"_mass_geom is not finite for mass = {m_msun:g} Msun."
+        )
+    return m_geom
 
 
 def vaidya_mass_of_v(v, m0, m1, v1, v2):
@@ -994,8 +1148,33 @@ def _integrate_null_geodesic(v_start, r_start, v_end, m0, m1, v1, v2,
 
         deriv = f(v, r)
         dv_r = step_frac * r / max(abs(deriv), 1.0e-12)
-        dv = min(dv_r, step_frac * v_scale, v_end - v)
+        # This step cap is intentionally left tied to v_scale (which grows
+        # with --duration_rs0), NOT switched to the local mass_scale cap
+        # used by the backward integrator below (Reviewer Audit round 2,
+        # Codex P1-1 fixed _integrate_event_horizon_backward's identical
+        # bug). Two reasons: (1) this forward construction is now only a
+        # secondary diagnostic and the family-panel driver, not the
+        # reported r_EH(v) -- its own accuracy at long durations and low
+        # --bisect_iters is exactly what EXP-13 is meant to expose, not
+        # paper over; (2) unlike the backward integrator (called once per
+        # run), this one is called roughly bisect_iters + 2*(bracket-search
+        # iterations) + n_family times per run -- giving it the same
+        # duration-proportional step COUNT as the backward integrator would
+        # multiply that already-large call count by another factor of
+        # --duration_rs0, which was measured to take over a minute at
+        # --duration_rs0 1000 with the CLI's default --bisect_iters 60 and
+        # --n_family 9. The backward integrator's one-time cost at the same
+        # duration is a fraction of a second.
+        dv = min(dv_r, step_frac * v_scale)
         dv = max(dv, 1.0e-9 * v_scale)
+        # The remaining-interval cap is applied LAST, after the floor
+        # above, so it always wins on the final step: previously the floor
+        # could push dv back up past the true remaining distance on that
+        # last step, overshooting v_end (Reviewer Audit round 2, Codex
+        # P3-1; independently reported with the same fix by Gemini finding
+        # 1, for the backward integrator, where the same reordering
+        # applies).
+        dv = min(dv, v_end - v)
         # Align the step to land exactly on v1 or v2 if it would otherwise
         # straddle one of them (Reviewer Audit round 1, Gemini finding 1).
         # M(v) is only C0, not C1, at these two hinges (a piecewise-linear
@@ -1004,7 +1183,9 @@ def _integrate_null_geodesic(v_start, r_start, v_end, m0, m1, v1, v2,
         # first-order accurate across that one step, however small
         # --step_frac is. Forcing a fresh step to start exactly at the
         # hinge restores the integrator's normal fourth-order behaviour
-        # immediately on the other side.
+        # immediately on the other side. (Always safe after the cap above:
+        # v1 and v2 both lie at or before v_end, so this can only shrink dv
+        # further, never undo the remaining-interval cap.)
         if v < v1 < v + dv:
             dv = v1 - v
         elif v < v2 < v + dv:
@@ -1110,7 +1291,8 @@ def _integrate_event_horizon_backward(v_bc, r_bc, v_target, m0, m1, v1, v2,
     Audit round 1 is what established that it is not merely cleaner but
     necessary for a correct default-parameter result.
     """
-    v_scale = max(v2 - v1, m0 + m1, 1.0e-30)
+    v_scale = max(v2 - v1, m0 + m1, 1.0e-30)   # problem-wide scale: floor/messages only
+    mass_scale = max(m0 + m1, 1.0e-30)         # LOCAL scale: the actual step cap
 
     v_list = [v_bc]
     r_list = [r_bc]
@@ -1122,11 +1304,25 @@ def _integrate_event_horizon_backward(v_bc, r_bc, v_target, m0, m1, v1, v2,
 
         deriv = f(v, r)
         dv_r = step_frac * r / max(abs(deriv), 1.0e-12)
-        dv = min(dv_r, step_frac * v_scale, v - v_target)
+        # Local step cap, not a duration-dependent one -- see the long
+        # comment in _integrate_null_geodesic, which this backward
+        # integrator shared the same bug with. It matters more here: this
+        # is the PRIMARY construction, and the integration literally BEGINS
+        # at r = r_bc = 2*m1, exactly the fixed point where the derivative
+        # is zero, so the very first step was the one most exposed to the
+        # old cap's duration-proportional blow-up (Reviewer Audit round 2,
+        # Codex P1-1: --duration_rs0 600 produced a non-monotonic r_EH(v);
+        # 850 and beyond produced one that dipped below r_AH(v)).
+        dv = min(dv_r, step_frac * mass_scale)
         dv = max(dv, 1.0e-9 * v_scale)
+        # Remaining-interval cap applied LAST so it always wins on the
+        # final step (Reviewer Audit round 2, Codex P3-1 / Gemini finding
+        # 1: the floor above previously could re-overshoot v_target).
+        dv = min(dv, v - v_target)
         # Same hinge-alignment reasoning as the forward integrator: do not
         # let one RK4 step straddle v1 or v2, where M(v)'s derivative is
-        # discontinuous.
+        # discontinuous. (Safe after the cap above, for the same reason as
+        # in the forward integrator.)
         if v - dv < v2 < v:
             dv = v - v2
         elif v - dv < v1 < v:
@@ -1333,7 +1529,22 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     # something about the requested physical scenario or resolution is
     # genuinely outside what this integrator can resolve, and it is
     # better to say so than to export a curve that contradicts its own
-    # documented invariants (Reviewer Audit round 1, Codex P1-1).
+    # documented invariants (Reviewer Audit round 1, Codex P1-1). Checked
+    # in this order deliberately: finiteness FIRST, because a NaN silently
+    # satisfies "not > tolerance" in ordinary Python/numpy comparisons
+    # (nan > x is always False) -- the AH-violation check below would not
+    # by itself have caught a NaN result (Reviewer Audit round 2, Codex
+    # P2-2); then the documented invariant r_EH >= r_AH; then monotonicity,
+    # which the area theorem requires here since M(v) itself is
+    # non-decreasing (Reviewer Audit round 2, Codex P1-1's own recommended
+    # addition, alongside the step-size fix above that was the actual
+    # cause of the one case where this was previously violated).
+    if not (np.all(np.isfinite(r_ah)) and np.all(np.isfinite(r_eh_grid))):
+        raise RuntimeError(
+            "The located apparent or event horizon contains non-finite "
+            "values; check that --M0/--M1 and the accretion window are "
+            "physically reasonable."
+        )
     ah_violation_rs0 = float(np.max((r_ah - r_eh_grid) / rs0))
     if ah_violation_rs0 > 1.0e-6:
         raise RuntimeError(
@@ -1342,6 +1553,19 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             "happen with the backward construction; try a larger "
             "--n_steps or check that --M0/--M1 and the accretion window "
             "are physically reasonable."
+        )
+    monotonicity_violation_rs0 = (
+        max(0.0, -float(np.min(np.diff(r_eh_grid)))) / rs0
+        if r_eh_grid.size > 1 else 0.0
+    )
+    if monotonicity_violation_rs0 > 1.0e-6:
+        raise RuntimeError(
+            f"The located event horizon decreased somewhere along v by up "
+            f"to {monotonicity_violation_rs0:.3e} r_s0, which should not "
+            "happen -- the area theorem requires r_EH(v) to be "
+            "non-decreasing here, since M(v) itself is non-decreasing; "
+            "try a larger --n_steps or check that --M0/--M1 and the "
+            "accretion window are physically reasonable."
         )
 
     # --- secondary: forward bisection shooting, retained for the
@@ -1387,6 +1611,44 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
 
     shooting_vs_backward_rs0 = abs(r_crit_shooting - r_crit) / rs0
 
+    # shooting_vs_backward_rs0 above compares ONLY the two constructions'
+    # STARTING radius at v_start. That is a legitimate comparison as far as
+    # it goes, but it does not detect the forward-shooting CURVE going
+    # wrong anywhere between v_start and v2 -- including never reaching v2
+    # at all (Reviewer Audit round 2, Codex P1-2: at --bisect_iters 10 with
+    # the documented default M0=5, M1=10, shooting_vs_backward_rs0 reads
+    # about 7.3e-4 -- small -- while the forward trial has, in fact,
+    # already plunged well before v2 and differs from the true horizon by
+    # about 2 r_s0 wherever both are defined; the previous EXP-13 and
+    # Response_to_Audit1 text incorrectly read that small starting-radius
+    # number itself as evidence of large curve error). These three fields
+    # give the actual curvewise comparison instead: whether the accepted
+    # shooting candidate reached v2 at all, its boundary residual there if
+    # it did, and the maximum pointwise difference between the two curves
+    # over whatever portion of [v_start, v2] the shooting trial actually
+    # covers (never extending a plunged/escaped track as though it were
+    # complete, per Codex's explicit warning).
+    if no_accretion:
+        shooting_reached_v2 = True
+        shooting_v2_boundary_residual_rs0 = 0.0
+        shooting_vs_backward_curve_max_rs0 = 0.0
+    else:
+        v_shoot, r_shoot = _integrate_null_geodesic(
+            v_start, r_crit_shooting, v_end, m0, m1, v1, v2)
+        shooting_reached_v2 = bool(v_shoot[-1] >= v2 - 1.0e-9 * rs0)
+        if shooting_reached_v2:
+            r_shoot_at_v2 = float(np.interp(v2, v_shoot, r_shoot))
+            shooting_v2_boundary_residual_rs0 = abs(r_shoot_at_v2 - rs1) / rs0
+            v_common_hi = v2
+        else:
+            shooting_v2_boundary_residual_rs0 = float("nan")
+            v_common_hi = float(v_shoot[-1])
+        v_common = np.linspace(v_start, v_common_hi, 400)
+        r_shoot_common = np.interp(v_common, v_shoot, r_shoot)
+        r_back_common = np.interp(v_common, v_eh_back, r_eh_back)
+        shooting_vs_backward_curve_max_rs0 = float(
+            np.max(np.abs(r_shoot_common - r_back_common))) / rs0
+
     # --- a family of nearby geodesics, for the "how the horizon is found"
     # panel: some inside the critical radius (fall in), some outside
     # (escape), forward-integrated and centred on the primary (backward-
@@ -1401,7 +1663,24 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     # offset that clearly separates, so the family panel looks right
     # regardless of the mass ratio or the accretion duration chosen.
     family = []
-    if n_family > 1:
+    if n_family == 1:
+        # Use the primary backward-derived curve directly, rather than a
+        # single forward-integrated trial at zero offset: that trial is
+        # subject to exactly the forward-shooting instability the backward
+        # construction exists to avoid, and at wide margins it can drift
+        # far from the true horizon while still being exported, and
+        # described in the help file, as "the event-horizon generator
+        # itself" (Reviewer Audit round 2, Codex P2-3: reproduced with
+        # --v_start_margin_rs0 80 --v_end_margin_rs0 40, where the
+        # zero-offset forward trial plunged to 1.235e-4 r_s0 while the true
+        # horizon stayed near r_s0 throughout). `escapes` is left as None
+        # -- this is not a forward trial with an escape/plunge fate, it is
+        # the exact reported curve, and plot_bh.plot_horizons never reads
+        # `escapes` in the n_family=1 case for exactly this reason.
+        family.append(dict(r_i_over_rs0=r_crit / rs0, v=v_eh_back.copy(),
+                           r=r_eh_back.copy(), escapes=None,
+                           is_primary_backward_curve=True))
+    else:
         spread = max(20.0 * residual_rs0 * rs0, 1.0e-6 * rs0)
         for _ in range(60):
             _, r_hi = _integrate_null_geodesic(v_start, r_crit + spread, v_end,
@@ -1415,14 +1694,27 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             if spread > 0.5 * rs0:
                 break
         offsets = np.linspace(-spread, spread, n_family)
-    else:
-        offsets = [0.0]
-    for off in offsets:
-        r_i = r_crit + off
-        v_f, r_f = _integrate_null_geodesic(v_start, max(r_i, 1.0e-3 * rs0),
-                                            v_end, m0, m1, v1, v2)
-        family.append(dict(r_i_over_rs0=r_i / rs0, v=v_f, r=r_f,
-                           escapes=bool(r_f[-1] > rs1)))
+        if n_family % 2 == 1:
+            # The middle entry of an odd-count linspace lands exactly on
+            # offset zero (the CLI default, --n_family 9, is odd) -- i.e.
+            # it is a forward-integrated trial starting from exactly
+            # r_crit, subject to the very forward-shooting instability the
+            # backward construction exists to avoid, yet visually and
+            # numerically indistinguishable from "the generator" in the
+            # family CSV unless nudged away from it (Reviewer Audit round
+            # 2, Codex P2-3). Nudge it a small, genuinely nonzero distance
+            # rather than dropping it, so the family still has exactly
+            # n_family members and stays visually close to symmetric.
+            mid = n_family // 2
+            bin_width = offsets[1] - offsets[0] if n_family > 1 else spread
+            offsets[mid] = 0.25 * bin_width
+        for off in offsets:
+            r_i = r_crit + off
+            v_f, r_f = _integrate_null_geodesic(v_start, max(r_i, 1.0e-3 * rs0),
+                                                v_end, m0, m1, v1, v2)
+            family.append(dict(r_i_over_rs0=r_i / rs0, v=v_f, r=r_f,
+                               escapes=bool(r_f[-1] > rs1),
+                               is_primary_backward_curve=False))
 
     warnings = list(warn0) + list(warn1)
     if no_accretion:
@@ -1463,6 +1755,9 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             r_crit_over_rs0=r_crit / rs0,
             r_crit_shooting_over_rs0=r_crit_shooting / rs0,
             shooting_vs_backward_rs0=shooting_vs_backward_rs0,
+            shooting_reached_v2=shooting_reached_v2,
+            shooting_v2_boundary_residual_rs0=shooting_v2_boundary_residual_rs0,
+            shooting_vs_backward_curve_max_rs0=shooting_vs_backward_curve_max_rs0,
             residual_rs0=residual_rs0,
             bisect_iters=bisect_iters, n_steps=n_steps,
             light_crossing_time_rs0_s=rs0 / c,
