@@ -26,6 +26,7 @@ Instead each quantity is cross-checked against at least one of:
 
 import ast
 from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import html
 from html.parser import HTMLParser
@@ -89,6 +90,14 @@ def read_gw_csv(path):
     assume csv.reader's rows[0] is the header row -- "#"-prefixed lines
     are stripped out here before csv parsing, mirroring how a human (or
     any '#'-comment-aware CSV consumer) would read the file.
+
+    Audit3 (Codex P3-4) asked that a duplicate metadata key be explicitly
+    handled rather than silently overwritten by a plain dict. This helper
+    now raises AssertionError the moment a "# key: ..." line repeats a key
+    already seen in this file -- a real writer bug (two meta_lines entries
+    for the same field) would otherwise be invisible to every test that
+    only inspects the resulting dict, since the second value would just
+    silently win.
     """
     import csv as csv_module
     meta = {}
@@ -99,7 +108,13 @@ def read_gw_csv(path):
                 stripped = line[1:].strip()
                 if ":" in stripped:
                     key, _, value = stripped.partition(":")
-                    meta[key.strip()] = value.strip()
+                    key = key.strip()
+                    assert key not in meta, (
+                        f"duplicate CSV metadata key {key!r} in {path!r} -- "
+                        f"first value {meta.get(key)!r}, repeated value "
+                        f"{value.strip()!r}"
+                    )
+                    meta[key] = value.strip()
             else:
                 data_lines.append(line)
     rows = list(csv_module.reader(data_lines))
@@ -317,7 +332,29 @@ class TestModuleDiscovery(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             find_module_dir(Path(MODULE_DIR.anchor))
 
-    def test_complete_suite_runs_from_a_flattened_layout(self):
+    def test_can_run_from_a_flattened_layout(self):
+        """Confirms this test file can locate and run against its target
+        modules when copied beside them in a flat directory (not the
+        canonical tests/ layout) -- e.g. an upload interface that presents
+        every file as a single flat list.
+
+        Audit3: the user's own words are the reason this changed --
+        "I ONLY specified the need to run in a flattened folder because
+        multiple AIs were complaining about test_physics_xxx.py not being
+        able to find its target files from a flat folder... Human end-users
+        would only be interested in running test_physics_xxx.py from within
+        the tests/ folder." Prior to this round, this test re-ran the
+        *entire* 141-test suite a second time as a subprocess from the flat
+        copy, which silently doubled the cost of every validation pass
+        without the user having asked for that -- it only ever needed to
+        prove that module discovery itself works from a flat layout, which
+        test_finds_flattened_layout above already checks in-process. This
+        version instead runs just that one trivial, dependency-free test
+        as a subprocess from a real flat copy on disk, as an end-to-end
+        smoke check that nothing about a *literal file copy* (as opposed to
+        the in-process Path arithmetic test_finds_flattened_layout checks)
+        breaks discovery -- without re-running the rest of the suite.
+        """
         if os.environ.get("GW_FLATTENED_TEST_CHILD") == "1":
             return
 
@@ -332,16 +369,18 @@ class TestModuleDiscovery(unittest.TestCase):
             environment["GW_FLATTENED_TEST_CHILD"] = "1"
             environment["MPLBACKEND"] = "Agg"
             result = subprocess.run(
-                [sys.executable, str(flat_test)],
+                [sys.executable, str(flat_test),
+                 "TestModuleDiscovery.test_finds_flattened_layout"],
                 cwd=flat_dir,
                 env=environment,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=30,
                 check=False,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("OK", result.stdout + result.stderr)
+            self.assertIn("Ran 1 test", result.stdout + result.stderr)
 
 
 # ===========================================================================
@@ -349,7 +388,12 @@ class TestModuleDiscovery(unittest.TestCase):
 # ===========================================================================
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_model_version(self):
-        self.assertEqual(physics.MODEL_VERSION, "1.2.0")
+        # Audit3 round: bumped 1.2.0 -> 1.3.0 for this round's behavior
+        # changes (CSV export_timestamp_utc field rename, atomic
+        # publish-or-cleanup write semantics for both CSV and PNG output,
+        # and the corrected chirp_mass_from_fdot() subnormal-boundary
+        # error message).
+        self.assertEqual(physics.MODEL_VERSION, "1.3.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -580,13 +624,25 @@ class TestChirpMassFromFdot(unittest.TestCase):
 
     def test_matches_default_run_via_finite_difference_of_two_samples(self):
         """Emulates the EXP-7 student workflow: two (t, f) samples from the
-        unmodified default run (as a student would read from --csvdir
-        output), a two-point finite-difference fdot estimate, then
-        inversion -- must recover the run's own printed chirp mass."""
-        result = physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
+        default binary run at EXP-7's documented --f_start 100 (as a
+        student would read from --csvdir output), a two-point finite-
+        difference fdot estimate, then inversion -- must recover the run's
+        own printed chirp mass. Audit3 (Codex P2-2) moved EXP-7's
+        documented data-generation command from the default f_start=20 Hz
+        (a 789,004-row/~78 MiB export) to --f_start 100 (a ~10,788-row/
+        ~1 MiB export); this test follows that same command so it keeps
+        emulating what a student following the Help text would actually
+        run, not a larger export nobody is instructed to generate."""
+        result = physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=100.0)
         t, f = result["t"], result["f"]
         f1, f2 = f[0], f[10]
         t1, t2 = t[0], t[10]
+        # These are also the exact two rows EXP-7's copyable snippet uses --
+        # the run and the two-point spacing (dt=2e-4, indices 0 and 10, i.e.
+        # 0.002 s apart) are identical, so this pins down the Help text's
+        # own numbers, not merely a similar independent scenario.
+        self.assertEqual((t1, f1), (0.0, 100.0))
+        self.assertEqual((t2, f2), (0.0020000000000000005, 100.03476529382071))
         fdot_est = (f2 - f1) / (t2 - t1)
         f_mid = 0.5 * (f1 + f2)
         Mc_kg = physics.chirp_mass_from_fdot(f_mid, fdot_est)
@@ -658,6 +714,75 @@ class TestChirpMassFromFdot(unittest.TestCase):
         self.assertTrue(math.isfinite(physics._LOG_FLOAT_MAX))
         self.assertTrue(math.isfinite(physics._LOG_FLOAT_MIN))
         self.assertLess(physics._LOG_FLOAT_MIN, physics._LOG_FLOAT_MAX)
+
+    def test_lower_bound_is_exercised_immediately_below_and_above_float_min(self):
+        """Audit3 (Codex P3-2): pin the exact deterministic boundary between
+        a rejected (sub-float_info.min) and accepted (normal-range) result,
+        rather than only testing far-away extreme values. f_hz=1e200 and the
+        two fdot values below straddle the point where the implied chirp
+        mass in kg crosses sys.float_info.min -- the smallest positive
+        *normal* double -- to within one ULP in the log domain. This also
+        pins down the reworded error message (previously the factually
+        wrong "too small to represent"; a positive value this small *is*
+        representable, just only as a reduced-precision subnormal float)."""
+        f_hz = 1e200
+        fdot_just_below = 6.990590547523025e+163   # implied Mc just under float_info.min: rejected
+        fdot_just_above = 6.9906045287181e+163     # implied Mc just over float_info.min: accepted
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "below this program's supported normal-precision range",
+        ) as ctx:
+            physics.chirp_mass_from_fdot(f_hz, fdot_just_below)
+        self.assertNotRegex(str(ctx.exception), "too small to represent")
+
+        Mc_kg = physics.chirp_mass_from_fdot(f_hz, fdot_just_above)
+        self.assertTrue(math.isfinite(Mc_kg))
+        self.assertGreater(Mc_kg, 0.0)
+        self.assertGreaterEqual(Mc_kg, sys.float_info.min)
+        # Barely above the normal-float floor, not some unrelated magnitude.
+        self.assertLess(Mc_kg, sys.float_info.min * 1.01)
+
+
+class TestLowLevelHelperDomainContract(unittest.TestCase):
+    """chirp_mass(), dfdt(), strain_amplitude(), f_isco(), qnm_params(), and
+    inspiral_time() are documented (Audit3 Codex P3-3) as low-level helpers
+    that deliberately perform no input validation of their own -- validation
+    lives in integrate_inspiral(), which is on the only path a CLI user or
+    the public integration API can reach these functions through. Adding a
+    validation check to each of these would add per-call overhead on a hot
+    path: dfdt() alone is called 4 times per RK4 step, so a multi-hundred-
+    thousand-step integration would pay that cost roughly a million times
+    for a safety net integrate_inspiral() already provides. These tests
+    pin down -- not endorse as "correct" -- exactly what happens today when
+    these helpers are called directly with out-of-domain inputs, so a
+    future accidental change in that undefined behavior is caught."""
+
+    def test_chirp_mass_of_negative_masses_returns_complex_not_an_exception(self):
+        result = physics.chirp_mass(-1.0, -1.0)
+        self.assertIsInstance(result, complex)
+        self.assertAlmostEqual(result.real, 0.7042902001692477, places=9)
+        self.assertAlmostEqual(result.imag, -0.5116967824803669, places=9)
+
+    def test_dfdt_of_negative_chirp_mass_returns_complex_not_an_exception(self):
+        result = physics.dfdt(-1.0, 1.0)
+        self.assertIsInstance(result, complex)
+
+    def test_f_isco_of_zero_total_mass_raises_zero_division_error(self):
+        with self.assertRaises(ZeroDivisionError):
+            physics.f_isco(0.0)
+
+    def test_qnm_params_of_zero_remnant_mass_raises_zero_division_error(self):
+        with self.assertRaises(ZeroDivisionError):
+            physics.qnm_params(0.0)
+
+    def test_strain_amplitude_of_zero_distance_raises_zero_division_error(self):
+        with self.assertRaises(ZeroDivisionError):
+            physics.strain_amplitude(20.0, 1.0, 0.0)
+
+    def test_inspiral_time_of_zero_chirp_mass_raises_zero_division_error(self):
+        with self.assertRaises(ZeroDivisionError):
+            physics.inspiral_time(20.0, 20.0, 0.0)
 
 
 class TestDefaultAndBBHReferenceCase(unittest.TestCase):
@@ -1428,20 +1553,48 @@ class TestDriverRun(unittest.TestCase):
             self.assertEqual(len(rows) - 1, result["summary"]["inspiral_steps"])
             self.assertEqual(float(rows[1][0]), 0.0)
             self.assertEqual(float(rows[1][1]), 20.0)
-            # Full double precision is preserved (not truncated/rounded).
-            self.assertAlmostEqual(float(rows[-1][1]), result["f"][-1], places=9)
-            self.assertAlmostEqual(float(rows[-1][3]), result["h"][-1], places=9)
-            self.assertAlmostEqual(float(rows[-1][4]), result["phase"][-1], places=9)
-            # Metadata block: cross-check against the run's own summary.
+            # Audit3 (Codex P3-4): .17g is a round-trip-exact format for a
+            # binary64 value (verified empirically: 100,000 random samples
+            # across a wide magnitude range round-tripped with zero
+            # mismatches), so parsed-back A/h values -- including strain
+            # near 1e-23, where an absolute places= tolerance is meaningless
+            # -- must compare exactly equal, not merely "almost".
+            self.assertEqual(float(rows[-1][1]), result["f"][-1])
+            self.assertEqual(float(rows[-1][2]), result["A"][-1])
+            self.assertEqual(float(rows[-1][3]), result["h"][-1])
+            self.assertEqual(float(rows[-1][4]), result["phase"][-1])
+            # Metadata block: exact key set (Audit3 Codex P3-4 asked for the
+            # *complete* set, not just a handful of fields) plus a
+            # cross-check of every value against the run's own summary.
+            self.assertEqual(
+                set(meta.keys()),
+                {
+                    "model_version", "build_id", "export_timestamp_utc",
+                    "m1_msun", "m2_msun", "d_mpc", "dt_s", "f_start_hz",
+                    "include_ringdown", "n_ringdown_tau", "ringdown_pts",
+                    "f_qnm_hz", "tau_qnm_ms", "ringdown_model", "columns",
+                },
+            )
             self.assertEqual(meta["model_version"], result["summary"]["model_version"])
             self.assertEqual(meta["build_id"], result["summary"]["build_id"])
             self.assertAlmostEqual(float(meta["m1_msun"]), 1.4, places=9)
             self.assertAlmostEqual(float(meta["m2_msun"]), 1.4, places=9)
+            self.assertAlmostEqual(float(meta["d_mpc"]), 400.0, places=9)
             self.assertAlmostEqual(float(meta["dt_s"]), 2e-4, places=12)
             self.assertAlmostEqual(float(meta["f_start_hz"]), 20.0, places=9)
             self.assertEqual(meta["include_ringdown"], "False")
             self.assertEqual(meta["n_ringdown_tau"], "n/a")
             self.assertEqual(meta["ringdown_pts"], "n/a")
+            self.assertEqual(meta["f_qnm_hz"], "n/a")
+            self.assertEqual(meta["tau_qnm_ms"], "n/a")
+            self.assertEqual(meta["ringdown_model"], "n/a")
+            # export_timestamp_utc must be a genuinely parseable UTC instant
+            # (Audit3 Codex P3-4), not merely a non-empty string.
+            parsed = datetime.strptime(
+                meta["export_timestamp_utc"], "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+            self.assertLessEqual(abs((now_utc_naive - parsed).total_seconds()), 120)
 
     def test_csv_metadata_distinguishes_runs_that_differ_only_by_dt(self):
         """Audit2 (Codex P1-1) specifically calls out EXP-8: four CSVs that
@@ -1466,7 +1619,7 @@ class TestDriverRun(unittest.TestCase):
         import matplotlib.pyplot as plt
         with tempfile.TemporaryDirectory() as csvdir:
             with mock.patch.object(plt, "show"):
-                driver.run(
+                result = driver.run(
                     m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
                     dt=1e-4, f_start=20.0, csvdir=csvdir,
                     include_ringdown=True, n_ringdown_tau=6, ringdown_pts=4000,
@@ -1483,15 +1636,50 @@ class TestDriverRun(unittest.TestCase):
                 self.assertNotEqual(row[0], "")  # t always present
                 self.assertNotEqual(row[3], "")  # h always present
                 self.assertNotEqual(row[4], "")  # phase always present
+            # Audit3 (Codex P3-4): exact metadata-key set, plus the QNM
+            # fields the earlier version of this test never checked at all.
+            self.assertEqual(
+                set(meta.keys()),
+                {
+                    "model_version", "build_id", "export_timestamp_utc",
+                    "m1_msun", "m2_msun", "d_mpc", "dt_s", "f_start_hz",
+                    "include_ringdown", "n_ringdown_tau", "ringdown_pts",
+                    "f_qnm_hz", "tau_qnm_ms", "ringdown_model", "columns",
+                },
+            )
+            s = result["summary"]
             self.assertEqual(meta["include_ringdown"], "True")
             self.assertEqual(meta["n_ringdown_tau"], "6")
             self.assertEqual(meta["ringdown_pts"], "4000")
+            self.assertAlmostEqual(float(meta["f_qnm_hz"]), s["f_qnm_hz"], places=6)
+            self.assertAlmostEqual(float(meta["tau_qnm_ms"]), s["tau_qnm_ms"], places=6)
+            self.assertIn("illustrative Schwarzschild QNM", meta["ringdown_model"])
+            self.assertIn("not a physical merger", meta["ringdown_model"])
 
     def test_csv_timestamp_filename_has_microsecond_resolution(self):
         """P3-4 regression, driver-layer counterpart to the plot_gw check:
         the CSV filename must also carry microsecond resolution."""
         name = driver._timestamp_fname()
         self.assertRegex(name, r"^gw_inspiral_\d{8}_\d{6}_\d{6}\.csv$")
+
+    def test_read_gw_csv_helper_rejects_a_duplicated_metadata_key(self):
+        """Audit3 (Codex P3-4): read_gw_csv() must not silently let a
+        repeated "# key: ..." line overwrite an earlier value -- that would
+        hide a real _write_csv() regression (e.g. an accidentally
+        duplicated meta_lines entry) from every other CSV test, since they
+        only ever inspect the resulting dict. This directly tests the test
+        helper's own contract with a synthetic file, independent of
+        driver.run()."""
+        with tempfile.TemporaryDirectory() as csvdir:
+            bad_path = Path(csvdir) / "bad.csv"
+            bad_path.write_text(
+                "# model_version: 1.2.0\n"
+                "# model_version: 1.3.0\n"
+                "t_s,f_hz,A,h,phase_rad\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(AssertionError):
+                read_gw_csv(bad_path)
 
     def test_reserve_unique_path_does_not_overwrite_on_timestamp_collision(self):
         """Audit2 (Copilot A2-3): a repeated (e.g. mocked, or genuinely
@@ -1516,6 +1704,85 @@ class TestDriverRun(unittest.TestCase):
             for p in (p1, p2, p3):
                 self.assertTrue(os.path.exists(p))
             self.assertEqual(len(list(Path(d).glob("*.csv"))), 3)  # nothing overwritten
+
+    def test_frozen_timestamp_two_complete_writes_both_survive_intact(self):
+        """Audit3 (Codex P2-1, required regression #5): the collision test
+        above only proves _reserve_unique_path() claims three distinct
+        empty placeholders. This proves the stronger claim that matters --
+        two full, real _write_csv() runs that land on the exact same frozen
+        timestamp each publish their own complete, distinguishable content
+        rather than one clobbering the other or either being left
+        truncated by the atomic-publish rename."""
+        fixed = driver.datetime(2026, 1, 1, 12, 0, 0, 123456)
+
+        class FrozenDatetime(driver.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed if tz is None else fixed.astimezone(tz)
+
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(driver, "datetime", FrozenDatetime):
+                with mock.patch.object(plt, "show"):
+                    driver.run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
+                               dt=2e-4, f_start=20.0, csvdir=csvdir)
+                    driver.run(m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
+                               dt=2e-4, f_start=20.0, csvdir=csvdir)
+            saved = sorted(Path(csvdir).glob("*.csv"))
+            self.assertEqual(len(saved), 2)  # "_1" suffix, not an overwrite
+            m1_values = set()
+            for path in saved:
+                meta, rows = read_gw_csv(path)
+                self.assertGreater(len(rows), 1)  # a real header + data rows
+                m1_values.add(meta["m1_msun"])
+            self.assertEqual(len(m1_values), 2)  # both runs' content survived distinctly
+
+    def test_csv_write_failure_leaves_no_csv_behind(self):
+        """Audit3 (Codex P2-1 / Copilot A3-2, required regression): inject a
+        mid-write failure inside the csv.writer and confirm the atomic
+        publish-or-cleanup path removes the temporary file and the
+        pre-reserved placeholder, leaving zero .csv files -- not the
+        empty/partial file Audit3 originally reported."""
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(plt, "show"):
+                with mock.patch.object(
+                    driver.csv, "writer", side_effect=OSError("simulated disk error")
+                ):
+                    with self.assertRaises(OSError):
+                        driver.run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
+                                   dt=2e-4, f_start=20.0, csvdir=csvdir)
+            self.assertEqual(list(Path(csvdir).glob("*.csv")), [])
+            self.assertEqual(list(Path(csvdir).glob("*.csv.tmp")), [])
+            self.assertEqual(list(Path(csvdir).iterdir()), [])
+
+    def test_outdir_as_existing_regular_file_leaves_no_csv_behind(self):
+        """Audit3 (Codex P2-1) exact reproducer: a valid --csvdir plus an
+        --outdir path that is already an existing regular file (so
+        os.makedirs(outdir) fails with FileExistsError). The early
+        directory pre-validation in driver.run() now checks/creates
+        --csvdir *and* --outdir before writing either artifact, so this
+        fails before the CSV write is ever attempted -- no CSV is left
+        behind. (The csvdir directory itself may still be created as a
+        side effect of the pre-validation step, same as a bare
+        os.makedirs(csvdir) would do; what must never happen is a
+        completed CSV export sitting next to a hard failure caused by an
+        unrelated, later plotting mistake -- the surprising behavior this
+        reproducer originally exposed.)"""
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as tmp:
+            csvdir = os.path.join(tmp, "csvout")
+            outdir_as_file = os.path.join(tmp, "not_a_directory")
+            with open(outdir_as_file, "w", encoding="utf-8") as handle:
+                handle.write("occupied")
+            with mock.patch.object(plt, "show"):
+                with self.assertRaises(OSError):
+                    driver.run(m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
+                               dt=1e-4, f_start=20.0,
+                               csvdir=csvdir, outdir=outdir_as_file)
+            self.assertEqual(
+                list(Path(csvdir).glob("*.csv")) if os.path.isdir(csvdir) else [], []
+            )
 
     def test_no_csvdir_does_not_write_a_csv_file(self):
         import matplotlib.pyplot as plt
@@ -1686,6 +1953,49 @@ class TestPlotting(unittest.TestCase):
                 self.assertTrue(os.path.exists(p))
             self.assertEqual(len(list(Path(d).glob("*.png"))), 3)
 
+    def test_savefig_failure_leaves_no_png_behind(self):
+        """Audit3 (Codex P2-1 / Copilot A3-3, required regression): patch
+        Figure.savefig to raise mid-write and confirm the atomic
+        publish-or-cleanup path removes the temporary file and the
+        pre-reserved placeholder -- zero .png files remain, not the
+        zero-byte placeholder Audit3 originally reported. Also confirms
+        the figure is still closed (finally block) despite the failure."""
+        import matplotlib.figure
+        import matplotlib.pyplot as plt
+        result = _synthetic_result(include_ringdown=False)
+        before = set(plt.get_fignums())
+        with tempfile.TemporaryDirectory() as outdir:
+            with mock.patch.object(
+                matplotlib.figure.Figure, "savefig",
+                side_effect=OSError("simulated disk error"),
+            ):
+                with self.assertRaises(OSError):
+                    plotting.plot_inspiral(result, outdir=outdir)
+            self.assertEqual(list(Path(outdir).glob("*.png")), [])
+            self.assertEqual(list(Path(outdir).glob("*.png.tmp")), [])
+            self.assertEqual(list(Path(outdir).iterdir()), [])
+        # No figure leaked into pyplot's registry despite the exception.
+        self.assertEqual(set(plt.get_fignums()), before)
+
+    def test_show_failure_still_closes_the_figure_after_a_completed_png(self):
+        """Audit3 (Codex P2-1, required regression): if plt.show() itself
+        raises -- e.g. a headless/broken display -- after a --outdir PNG
+        has already been completely and atomically saved, that saved PNG
+        must survive (the failure is unrelated to the save), and the
+        finally block must still close the figure so no live figure leaks
+        into pyplot's registry."""
+        import matplotlib.pyplot as plt
+        result = _synthetic_result(include_ringdown=False)
+        before = set(plt.get_fignums())
+        with tempfile.TemporaryDirectory() as outdir:
+            with mock.patch.object(plt, "show", side_effect=RuntimeError("no display")):
+                with self.assertRaises(RuntimeError):
+                    plotting.plot_inspiral(result, outdir=outdir)
+            saved = list(Path(outdir).glob("*.png"))
+            self.assertEqual(len(saved), 1)  # the completed save is not rolled back
+            self.assertGreater(saved[0].stat().st_size, 0)
+        self.assertEqual(set(plt.get_fignums()), before)
+
     def test_zoom_interval_rejects_an_empty_window(self):
         # A window fully outside the data range collapses to empty (hi<=lo):
         with self.assertRaisesRegex(ValueError, "no plotted data"):
@@ -1816,6 +2126,33 @@ class TestCLI(unittest.TestCase):
             self.assertIn(f"model_version: {physics.MODEL_VERSION}", meta_text)
             self.assertIn(f"build_id: {physics.BUILD_ID}", meta_text)
             self.assertIn("dt_s:", meta_text)
+
+    def test_exp7_revised_command_produces_a_small_csv_end_to_end(self):
+        """Audit3 (Codex P2-2, recommended regression): the revised EXP-7
+        data-generation command (--f_start 100, in place of the old
+        default --f_start 20 which produces a 789,004-row/~78 MiB export)
+        must actually produce a small file end-to-end through the real
+        CLI, and the exact two-point method described in the Help snippet
+        must recover 1.2188 from rows this real run actually wrote --
+        not merely from a direct physics_gw.integrate_inspiral() call."""
+        with tempfile.TemporaryDirectory() as csvdir:
+            result = self._run(["--f_start", "100", "--csvdir", csvdir], timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            saved = list(Path(csvdir).glob("*.csv"))
+            self.assertEqual(len(saved), 1)
+            meta, rows = read_gw_csv(saved[0])
+            data_rows = rows[1:]
+            # A generous ceiling: comfortably above the documented ~10,788
+            # rows, but two orders of magnitude below the old 789,004-row
+            # default-f_start export this exercise used to require.
+            self.assertLess(len(data_rows), 50_000)
+            self.assertLess(saved[0].stat().st_size, 5 * 1024 * 1024)  # < 5 MiB
+            t1, f1 = float(data_rows[0][0]), float(data_rows[0][1])
+            t2, f2 = float(data_rows[10][0]), float(data_rows[10][1])
+            fdot_est = (f2 - f1) / (t2 - t1)
+            f_mid = 0.5 * (f1 + f2)
+            Mc_kg = physics.chirp_mass_from_fdot(f_mid, fdot_est)
+            self.assertEqual(f"{Mc_kg / physics.M_sun:.4f}", "1.2188")
 
     def test_n_tau_huge_value_fails_cleanly_end_to_end(self):
         """Audit2 (Codex P2-2) reproducer, CLI-level: --n_tau is parsed as
@@ -1964,6 +2301,37 @@ class TestHelpFile(unittest.TestCase):
         parameter and referenced from the chirp-mass-extraction and
         convergence exercises."""
         self.assertIn("--csvdir", self.html)
+
+    def test_csv_schema_wording_is_synchronized_across_cli_help_and_html(self):
+        """Audit3 (Codex P2-3 / Copilot A3-1): the module docstring, the
+        live "python main.py --help" text, and this Help file all
+        previously described the CSV export as a bare four-column
+        "t, f, A, h" table, while the real writer emits a commented
+        metadata preamble plus a five-column t_s,f_hz,A,h,phase_rad table.
+        This must never regress on any of the three student-facing
+        surfaces at once."""
+        proc = subprocess.run(
+            [sys.executable, "main.py", "--help"],
+            cwd=MODULE_DIR, capture_output=True, text=True, timeout=15, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        help_text = proc.stdout
+        # Every "t_s,f_hz,A,h" column-list mention must be the full,
+        # current five-column form -- never the stale bare four-column one.
+        bare_four_column = re.compile(r"t_s,f_hz,A,h(?!,phase_rad)")
+        for label, text in (
+            ("live --help", help_text),
+            ("main.py source", (MODULE_DIR / "main.py").read_text(encoding="utf-8")),
+            ("Help HTML", self.html),
+        ):
+            with self.subTest(surface=label):
+                self.assertIn("phase_rad", text)
+                self.assertNotIn("t, f, A, h", text)
+                self.assertNotIn("CSV of t, f, A, h", text)
+                self.assertIsNone(
+                    bare_four_column.search(text),
+                    f"{label} still describes the stale 4-column CSV schema",
+                )
 
     def test_exp7_pre_snippet_executes_and_prints_documented_result(self):
         """Extract the exact copyable Python snippet from the EXP-7 <pre>

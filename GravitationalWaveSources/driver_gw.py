@@ -91,7 +91,13 @@ def _timestamp_fname(prefix="gw_inspiral", ext="csv"):
     # same microsecond, or a clock adjustment can still repeat a value).
     # _reserve_unique_path() below is what actually guarantees no silent
     # overwrite; this function only picks the first candidate name.
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    #
+    # Audit3 (Gemini): this uses UTC (not local time) so a filename's
+    # embedded timestamp can be compared directly against the UTC
+    # export_timestamp_utc field inside the CSV's own metadata block,
+    # without a reader needing to know or convert the local timezone this
+    # program happened to run in.
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     return f"{prefix}_{ts}.{ext}"
 
 
@@ -105,8 +111,23 @@ def _reserve_unique_path(directory, prefix, ext, max_attempts=1000):
     processes, or a clock adjustment can still repeat a value) -- and an
     ordinary open(path, "w") would then silently overwrite the earlier
     file. This claims the path with O_CREAT|O_EXCL, which fails atomically
-    (no TOCTOU race) if the path already exists, and retries with a "_1",
-    "_2", ... suffix until an unclaimed name is found.
+    if the path already exists, and retries with a "_1", "_2", ... suffix
+    until an unclaimed name is found.
+
+    This only reserves the *name*: it guarantees no two callers walk away
+    believing they each own the same final path, but the reserved file
+    itself is empty. Audit3 (Codex P2-1 / Copilot A3-6) correctly pointed
+    out that an earlier version of this project both reserved the name AND
+    treated that as the file to write content into later by reopening its
+    path -- which is a real gap (a failure between reservation and the
+    later open/write leaves an empty file with no cleanup) and also made
+    the "no TOCTOU race" claim overstated (the guarantee covers claiming
+    the name, not a later reopen of that same path). Callers must not
+    write content directly into the path this function returns; write into
+    a temporary path derived from it instead, and atomically replace it
+    into place only once the content write has fully succeeded -- see
+    _write_csv() and plot_gw.plot_inspiral() for that pattern, and
+    _publish_or_cleanup() below for the shared cleanup half of it.
     """
     base = _timestamp_fname(prefix=prefix, ext=ext)
     stem = base[: -(len(ext) + 1)]  # strip the trailing ".<ext>"
@@ -123,6 +144,41 @@ def _reserve_unique_path(directory, prefix, ext, max_attempts=1000):
         f"Could not reserve a unique output filename in {directory!r} "
         f"after {max_attempts} attempts."
     )
+
+
+def _publish_or_cleanup(write_fn, fpath):
+    """Run write_fn(tmp_path) to build the artifact at a private temporary
+    path beside fpath, then atomically publish it to fpath -- or, on any
+    failure, remove every trace (the temp file and the empty reservation
+    placeholder at fpath) and re-raise.
+
+    Audit3 (Codex P2-1; Copilot A3-2/A3-3): before this, both _write_csv()
+    and plot_gw.plot_inspiral() reopened the already-reserved fpath
+    directly and wrote content into it in place, so a failure partway
+    through (a mid-write exception, a disk-full condition, a patched
+    writer/savefig raising) left a truncated or zero-byte file permanently
+    occupying that filename -- indistinguishable, by its presence alone,
+    from a genuinely completed export. Writing to a same-directory
+    temporary file first and renaming it into place with os.replace() only
+    after the write fully succeeds means fpath is never observably partial:
+    from the outside, it is either absent or complete. os.replace() is
+    atomic on the same filesystem and here always overwrites only the
+    empty placeholder this run itself created via _reserve_unique_path(),
+    never a concurrent writer's file (each reservation is independently
+    unique).
+    """
+    tmp_path = fpath + ".tmp"
+    try:
+        write_fn(tmp_path)
+        os.replace(tmp_path, fpath)
+    except BaseException:
+        for stray in (tmp_path, fpath):
+            try:
+                os.remove(stray)
+            except OSError:
+                pass
+        raise
+    return fpath
 
 
 def _write_csv(result, csvdir):
@@ -144,14 +200,25 @@ def _write_csv(result, csvdir):
     --dt, with nothing in the files themselves saying which is which). A
     commented metadata block (mirroring the convention Gemini/Codex point
     to in StellarEvolutionTracks) is written before the header row, naming
-    MODEL_VERSION, BUILD_ID, the UTC run timestamp, and every input
-    parameter that affected this run (Audit2 Copilot A2-6 additionally
-    asked for the phase array, which is now a fifth data column).
+    MODEL_VERSION, BUILD_ID, a UTC export timestamp, and every input
+    parameter that affects the numerical waveform this run produced (Audit2
+    Copilot A2-6 additionally asked for the phase array, which is now a
+    fifth data column). This records masses, distance, dt, f_start, and the
+    ringdown settings -- not plotting/output-only options such as
+    --t_before, --lw, or --dpi, which do not change the numerical arrays
+    themselves (Audit3 Copilot A3-4).
+
+    The metadata field is named export_timestamp_utc, not run_timestamp_utc
+    (Audit3 Copilot A3-5): it is captured here, when the export actually
+    happens, which for a long integration can be measurably later than when
+    the run itself began -- the field is named for what it actually
+    measures rather than implying it marks run start.
     """
     os.makedirs(csvdir, exist_ok=True)
     fpath = _reserve_unique_path(csvdir, "gw_inspiral", "csv")
     s = result["summary"]
     include_rd = s["include_ringdown"]
+    export_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     def _fmt(value):
         return f"{float(value):.17g}" if value is not None else "n/a"
@@ -160,7 +227,7 @@ def _write_csv(result, csvdir):
         "# GravitationalWaveSources CSV export",
         f"# model_version: {s['model_version']}",
         f"# build_id: {s['build_id']}",
-        f"# run_timestamp_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}",
+        f"# export_timestamp_utc: {export_timestamp}",
         f"# m1_msun: {_fmt(s['m1_msun'])}",
         f"# m2_msun: {_fmt(s['m2_msun'])}",
         f"# d_mpc: {_fmt(s['d_mpc'])}",
@@ -176,18 +243,24 @@ def _write_csv(result, csvdir):
          f"physical merger" if include_rd else "# ringdown_model: n/a"),
         "# columns: t_s,f_hz,A,h,phase_rad -- f_hz/A are blank on ringdown-only rows",
     ]
-    with open(fpath, "w", newline="", encoding="utf-8") as handle:
-        for line in meta_lines:
-            handle.write(line + "\n")
-        writer = csv.writer(handle)
-        writer.writerow(["t_s", "f_hz", "A", "h", "phase_rad"])
-        for t, f, A, h, phase in zip(
-            result["t"], result["f"], result["A"], result["h"], result["phase"]
-        ):
-            writer.writerow([
-                f"{float(v):.17g}" if math.isfinite(v) else ""
-                for v in (t, f, A, h, phase)
-            ])
+
+    def _do_write(tmp_path):
+        with open(tmp_path, "w", newline="", encoding="utf-8") as handle:
+            for line in meta_lines:
+                handle.write(line + "\n")
+            writer = csv.writer(handle)
+            writer.writerow(["t_s", "f_hz", "A", "h", "phase_rad"])
+            for t, f, A, h, phase in zip(
+                result["t"], result["f"], result["A"], result["h"], result["phase"]
+            ):
+                writer.writerow([
+                    f"{float(v):.17g}" if math.isfinite(v) else ""
+                    for v in (t, f, A, h, phase)
+                ])
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    _publish_or_cleanup(_do_write, fpath)
     print(f"[driver_gw] CSV saved -> {fpath}")
     return fpath
 
@@ -224,9 +297,38 @@ def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
     # so a failed run's exit code did not match what was left on disk. This
     # duplicates a cheap check (plot_inspiral() below still performs its
     # own, so calling plot_inspiral() directly without going through run()
-    # is equally safe), buying a clean all-or-nothing failure here instead.
+    # is equally safe), buying a clean failure here before either output
+    # file is written.
     viz._xlim(result["t_isco"], t_before, t_after, result["t"][0], result["t"][-1])
 
+    # Validate/create both requested output directories up front, before
+    # writing either artifact. Audit3 (Codex P2-1) found that an invalid
+    # --outdir (e.g. a path that already exists as a regular file, so
+    # os.makedirs() raises FileExistsError) was previously only discovered
+    # inside plot_inspiral(), by which point a --csvdir export had already
+    # completed and been left on disk -- a plotting-only mistake caused an
+    # unrelated, already-successful CSV export to look like a failed run.
+    # Checking both directories here, before either write begins, prevents
+    # that specific ordering problem outright rather than cleaning up after
+    # it. (plot_inspiral() still performs its own os.makedirs(outdir, ...)
+    # too, so it remains safe to call directly without going through run().)
+    if csvdir is not None:
+        os.makedirs(csvdir, exist_ok=True)
+    if outdir is not None:
+        os.makedirs(outdir, exist_ok=True)
+
+    # Transaction contract (Audit3 Codex P2-1, item 4): each requested
+    # artifact is independently atomic -- _write_csv()/plot_inspiral() each
+    # either produce their complete file or leave none behind (see
+    # _publish_or_cleanup() above and its plot_gw counterpart). This is
+    # NOT a cross-artifact all-or-nothing guarantee: if both --csvdir and
+    # --outdir are requested and the CSV export succeeds but the PNG save
+    # then fails, the completed CSV is kept, not retroactively deleted.
+    # Rolling back a genuinely successful, independent export because a
+    # later, unrelated artifact failed would discard correct data the user
+    # may still want, for no real safety benefit -- so a run that requests
+    # multiple artifacts can complete some and fail others; it is only
+    # each individual artifact that is guaranteed never to be partial.
     if csvdir is not None:
         _write_csv(result, csvdir)
 

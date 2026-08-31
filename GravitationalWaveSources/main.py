@@ -17,8 +17,10 @@ Examples
   # Also save a timestamped PNG (in addition to the on-screen display)
   python main.py --outdir ./runs
 
-  # Also save a timestamped CSV of t, f, A, h (e.g. for the chirp-mass-
-  # extraction exercise, or the EXP-8 fixed-time convergence comparison)
+  # Also save a timestamped, self-documenting CSV -- a commented metadata
+  # header (model version, build, and every run parameter) followed by
+  # t_s,f_hz,A,h,phase_rad columns -- e.g. for the chirp-mass-extraction
+  # exercise, or the EXP-8 fixed-time convergence comparison
   python main.py --csvdir ./runs
 
 Requires Python 3.10 or later; see the GFTGU Python Setup Guide.
@@ -82,8 +84,9 @@ def parse_args():
                    help="also save a timestamped PNG in PATH, in addition to "
                         "displaying it on screen (default: display only)")
     g.add_argument("--csvdir", type=str, default=None, metavar="PATH",
-                   help="also save a timestamped CSV of t_s,f_hz,A,h in PATH "
-                        "(default: no CSV)")
+                   help="also save a timestamped, self-documenting CSV "
+                        "(metadata header; t_s,f_hz,A,h,phase_rad columns) "
+                        "in PATH (default: no CSV)")
     return p.parse_args()
 
 

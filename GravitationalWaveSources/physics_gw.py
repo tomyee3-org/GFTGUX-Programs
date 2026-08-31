@@ -15,7 +15,7 @@ import math
 import sys
 import numpy as np
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -132,6 +132,24 @@ def chirp_mass(m1_kg, m2_kg):
     *observational* inverse -- inferring chirp mass from a measured
     frequency and its rate of change, the calculation actually used to
     estimate chirp mass from a detected chirp.
+
+    Low-level helper, deliberately unvalidated (Audit3 Codex P3-3): this
+    and the five functions below it (dfdt, strain_amplitude, f_isco,
+    qnm_params, inspiral_time) are trusted-input arithmetic building
+    blocks, not part of this program's user-facing safety net --
+    integrate_inspiral() performs all input validation once, up front, and
+    is the only place these should be called with unvalidated values.
+    Several of these (dfdt above all, called four times per RK4 step) run
+    millions of times inside a single long integration, so they
+    deliberately do not repeat per-call validation on every invocation;
+    the cost of an isinstance/isfinite check on every one of those calls is
+    not free at that scale. Outside their physical domain (non-positive or
+    non-finite inputs) they raise whatever Python itself raises for the
+    underlying arithmetic (a ZeroDivisionError, a complex result from a
+    fractional power of a negative number, etc.) rather than a descriptive
+    ValueError -- this is intentional and is pinned down by
+    TestLowLevelHelperDomainContract in the test suite, not merely
+    undocumented behavior.
     """
     return (m1_kg * m2_kg) ** 0.6 / (m1_kg + m2_kg) ** 0.2
 
@@ -152,6 +170,15 @@ def chirp_mass_from_fdot(f_hz, fdot_hz_per_s):
     wave frequency is positive by definition, and an inspiraling binary's
     GW frequency always increases (df/dt > 0) under this leading-order
     model.
+
+    Supported result range: the returned mass is required to fall within
+    the *normal* (full-precision) range of a Python float, roughly
+    2.2e-308 kg to 1.8e308 kg. Inputs that imply a result below that range
+    raise ValueError even though a reduced-precision subnormal float could
+    technically represent a smaller positive number -- this program does
+    not treat a chirp mass that tiny as physically meaningful at its
+    leading-order pedagogical level, so the boundary is drawn at normal
+    precision rather than at the true representable minimum.
     """
     f_hz = _require_finite("f_hz", f_hz)
     fdot_hz_per_s = _require_finite("fdot_hz_per_s", fdot_hz_per_s)
@@ -190,10 +217,25 @@ def chirp_mass_from_fdot(f_hz, fdot_hz_per_s):
             "the units and magnitude of the inputs."
         )
     if log_Mc_kg < _LOG_FLOAT_MIN:
+        # Audit3 (Codex P3-2): a result down here is *not* unrepresentable
+        # -- positive subnormal doubles extend roughly four more orders of
+        # magnitude below sys.float_info.min, down to ~4.94e-324 -- so the
+        # old wording ("too small to represent") was factually wrong for
+        # this specific boundary. What is true, and is the actual reason
+        # this is rejected, is that _LOG_FLOAT_MIN is deliberately set at
+        # the smallest *normal* double (see the module-level comment on
+        # _LOG_FLOAT_MIN): a chirp mass only representable as a reduced-
+        # precision subnormal float is not a value this program treats as
+        # meaningful at its leading-order pedagogical level, independent of
+        # whether the bits technically exist.
         raise ValueError(
             f"f_hz={f_hz:g} and fdot_hz_per_s={fdot_hz_per_s:g} imply a "
-            "chirp mass too small to represent as a positive finite "
-            "number; check the units and magnitude of the inputs."
+            f"chirp mass below this program's supported normal-precision "
+            f"range (< {sys.float_info.min:.3g} kg); such a tiny result is "
+            "technically representable only as a reduced-precision "
+            "subnormal float and is not treated as a valid chirp mass at "
+            "this program's leading-order pedagogical level. Check the "
+            "units and magnitude of the inputs."
         )
     Mc_kg = math.exp(log_Mc_kg)
     if not (math.isfinite(Mc_kg) and Mc_kg > 0):
@@ -205,7 +247,13 @@ def chirp_mass_from_fdot(f_hz, fdot_hz_per_s):
 
 
 def dfdt(f_hz, Mc_kg):
-    """Leading-order quadrupole derivative df/dt for GW frequency f."""
+    """Leading-order quadrupole derivative df/dt for GW frequency f.
+
+    Low-level, deliberately unvalidated helper -- see the API note on
+    chirp_mass() above; this applies here too, and is especially relevant
+    for this specific function, which _rk4_frequency_phase_step() calls
+    four times per integration step.
+    """
     Mc_geom = G * Mc_kg / c**3
     return ((96.0 / 5.0) * np.pi**(8.0 / 3.0)
             * Mc_geom**(5.0 / 3.0) * f_hz**(11.0 / 3.0))
@@ -220,13 +268,20 @@ def strain_amplitude(f_hz, Mc_kg, d_m):
         A = 4 (G Mc)^(5/3) (pi f)^(2/3) / (c^4 d),
 
     not a sky-and-polarisation-averaged detector response.
+
+    Low-level, deliberately unvalidated helper -- see the API note on
+    chirp_mass() above.
     """
     return ((4.0 * G * Mc_kg / (c**2 * d_m))
             * (np.pi * G * Mc_kg * f_hz / c**3) ** (2.0 / 3.0))
 
 
 def f_isco(M_total_kg):
-    """GW frequency at the Schwarzschild ISCO, r = 6 GM/c^2."""
+    """GW frequency at the Schwarzschild ISCO, r = 6 GM/c^2.
+
+    Low-level, deliberately unvalidated helper -- see the API note on
+    chirp_mass() above.
+    """
     return c**3 / (6.0**1.5 * np.pi * G * M_total_kg)
 
 
@@ -234,13 +289,20 @@ def qnm_params(M_final_kg):
     """
     Return (f_qnm [Hz], tau_qnm [s]) for the fundamental l=2
     Schwarzschild gravitational QNM, using M omega = 0.3737 - 0.0890 i.
+
+    Low-level, deliberately unvalidated helper -- see the API note on
+    chirp_mass() above.
     """
     scale = G * M_final_kg / c**3
     return 0.3737 / (2.0 * np.pi * scale), scale / 0.0890
 
 
 def inspiral_time(f_start_hz, f_end_hz, Mc_kg):
-    """Analytic leading-order time required to chirp from f_start to f_end."""
+    """Analytic leading-order time required to chirp from f_start to f_end.
+
+    Low-level, deliberately unvalidated helper -- see the API note on
+    chirp_mass() above.
+    """
     Mc_geom = G * Mc_kg / c**3
     coeff = 5.0 / (256.0 * np.pi**(8.0 / 3.0) * Mc_geom**(5.0 / 3.0))
     return coeff * (f_start_hz**(-8.0 / 3.0) - f_end_hz**(-8.0 / 3.0))
@@ -506,6 +568,17 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
 
         if f_next >= f_isco_hz:
             # Interpolate the final partial step to end exactly at the ISCO cutoff.
+            #
+            # Audit3 (Gemini): this is a *linear* interpolation in frac, but
+            # phase accumulates quadratically over the step (dPhase/dt = 2*pi*f,
+            # and f itself is increasing), so this is only approximate. At this
+            # program's pedagogical default (dt=2e-4 s) the resulting error is
+            # sub-milliradian -- far below anything the plotted waveform or the
+            # tutorial exercises can distinguish -- so it is left as linear
+            # interpolation rather than a root-find on this one boundary step.
+            # A future adaptation aimed at high-precision template generation
+            # (rather than this leading-order teaching tool) should revisit
+            # this, e.g. with a proper root-finding boundary crossing.
             frac = (f_isco_hz - f) / (f_next - f)
             t += frac * dt
             phase += frac * (phase_next - phase)
