@@ -5,11 +5,23 @@ Orchestration layer for GravitationalWaveSources.
 """
 
 import math
+import numpy as np
 import physics_gw as phys
 import plot_gw as viz
 
 
 def _finite_number(name, value):
+    """Return value as float after giving a consistent user-facing error.
+
+    ``bool`` (and ``numpy.bool_``) are rejected explicitly even though
+    ``float(True) == 1.0`` would otherwise convert silently -- see the
+    matching guard in ``physics_gw._require_finite`` for the rationale.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"{name} must be a finite number; got {value!r} (a bool is not "
+            "an accepted numeric value)."
+        )
     try:
         value = float(value)
     except (TypeError, ValueError) as exc:
@@ -17,6 +29,16 @@ def _finite_number(name, value):
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite.")
     return value
+
+
+def version_info():
+    """Return the program's model version and build identifier.
+
+    Exposed at the driver layer (mirroring the physics-layer constants) so
+    callers and tests can query provenance without reaching into
+    ``physics_gw`` directly.
+    """
+    return {"model_version": phys.MODEL_VERSION, "build_id": phys.BUILD_ID}
 
 
 def _validate_plot_inputs(t_before, t_after, lw, dpi):

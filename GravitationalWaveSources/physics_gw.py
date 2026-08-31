@@ -14,7 +14,7 @@ masses and megaparsecs.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -76,7 +76,19 @@ MAX_RINGDOWN_POINTS = 500_000
 
 
 def _require_finite(name, value):
-    """Return value as float after giving a consistent user-facing error."""
+    """Return value as float after giving a consistent user-facing error.
+
+    ``bool`` (and ``numpy.bool_``) are rejected explicitly even though
+    ``float(True) == 1.0`` would otherwise convert silently: a Boolean flag
+    is never a meaningful mass, distance, timestep, or frequency, and
+    accepting one without complaint would let a programmatic caller (e.g. a
+    notebook) pass a stray flag into a physical quantity unnoticed.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"{name} must be a finite number; got {value!r} (a bool is not "
+            "an accepted numeric value)."
+        )
     try:
         value = float(value)
     except (TypeError, ValueError) as exc:
