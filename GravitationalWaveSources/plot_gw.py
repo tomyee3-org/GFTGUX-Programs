@@ -33,11 +33,42 @@ def _sci_y(ax):
 
 
 def _timestamp_fname(prefix="gw_inspiral"):
-    # Microsecond resolution avoids two rapid saves in the same directory
-    # (e.g. a scripted parameter sweep) silently colliding and overwriting
-    # each other under the previous second-resolution timestamp.
+    # Microsecond resolution makes two rapid saves in the same directory
+    # (e.g. a scripted parameter sweep) collide far less often than under
+    # the previous second-resolution timestamp, but does not make a
+    # collision impossible (a coarser OS clock, two calls landing in the
+    # same microsecond, or a clock adjustment can still repeat a value).
+    # _reserve_unique_path() below is what actually guarantees no silent
+    # overwrite; this function only picks the first candidate name.
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return f"{prefix}_{ts}.png"
+
+
+def _reserve_unique_path(directory, prefix="gw_inspiral", ext="png", max_attempts=1000):
+    """Atomically claim a not-yet-existing "prefix_timestamp[_n].ext" path.
+
+    See driver_gw._reserve_unique_path for the full rationale (Audit2
+    Copilot A2-3): a timestamp collision only reduces, rather than
+    eliminates, the chance of two writes picking the same filename, and an
+    ordinary savefig() to that path would silently overwrite an earlier
+    PNG. O_CREAT|O_EXCL claims the path atomically; a collision retries
+    with a "_1", "_2", ... suffix.
+    """
+    base = _timestamp_fname(prefix=prefix)
+    stem = base[: -(len(ext) + 1)]
+    for attempt in range(max_attempts):
+        candidate = f"{stem}.{ext}" if attempt == 0 else f"{stem}_{attempt}.{ext}"
+        path = os.path.join(directory, candidate)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return path
+    raise RuntimeError(
+        f"Could not reserve a unique output filename in {directory!r} "
+        f"after {max_attempts} attempts."
+    )
 
 
 def plot_inspiral(result, outdir=None,
@@ -126,7 +157,7 @@ def plot_inspiral(result, outdir=None,
     # after the window appears.
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        fpath = os.path.join(outdir, _timestamp_fname())
+        fpath = _reserve_unique_path(outdir)
         fig.savefig(fpath, dpi=dpi, bbox_inches="tight")
         print(f"[plot_gw] PNG saved -> {fpath}")
 

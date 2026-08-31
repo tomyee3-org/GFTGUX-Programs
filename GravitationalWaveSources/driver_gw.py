@@ -7,7 +7,7 @@ Orchestration layer for GravitationalWaveSources.
 import csv
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 import numpy as np
 import physics_gw as phys
@@ -84,16 +84,50 @@ def _validate_plot_inputs(t_before, t_after, lw, dpi):
 
 
 def _timestamp_fname(prefix="gw_inspiral", ext="csv"):
-    # Microsecond resolution avoids two rapid saves in the same directory
-    # (e.g. a scripted parameter sweep) silently colliding and overwriting
-    # each other under the previous second-resolution timestamp.
+    # Microsecond resolution makes two rapid saves in the same directory
+    # (e.g. a scripted parameter sweep) collide far less often than under
+    # the previous second-resolution timestamp, but does not make a
+    # collision impossible (a coarser OS clock, two calls landing in the
+    # same microsecond, or a clock adjustment can still repeat a value).
+    # _reserve_unique_path() below is what actually guarantees no silent
+    # overwrite; this function only picks the first candidate name.
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return f"{prefix}_{ts}.{ext}"
 
 
+def _reserve_unique_path(directory, prefix, ext, max_attempts=1000):
+    """Atomically claim a not-yet-existing "prefix_timestamp[_n].ext" path.
+
+    Audit2 (Copilot A2-3) correctly points out that a microsecond-resolution
+    timestamp only reduces, rather than eliminates, the chance that two
+    writes pick the same filename (a coarser effective clock resolution on
+    some platforms, two calls landing in the same microsecond, concurrent
+    processes, or a clock adjustment can still repeat a value) -- and an
+    ordinary open(path, "w") would then silently overwrite the earlier
+    file. This claims the path with O_CREAT|O_EXCL, which fails atomically
+    (no TOCTOU race) if the path already exists, and retries with a "_1",
+    "_2", ... suffix until an unclaimed name is found.
+    """
+    base = _timestamp_fname(prefix=prefix, ext=ext)
+    stem = base[: -(len(ext) + 1)]  # strip the trailing ".<ext>"
+    for attempt in range(max_attempts):
+        candidate = f"{stem}.{ext}" if attempt == 0 else f"{stem}_{attempt}.{ext}"
+        path = os.path.join(directory, candidate)
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return path
+    raise RuntimeError(
+        f"Could not reserve a unique output filename in {directory!r} "
+        f"after {max_attempts} attempts."
+    )
+
+
 def _write_csv(result, csvdir):
-    """Save t, f, A, h as a plain tabular CSV (blank cells where the
-    ringdown segment leaves f/A undefined -- see integrate_inspiral).
+    """Save a self-documenting CSV of t, f, A, h, phase (blank cells where
+    the ringdown segment leaves f/A undefined -- see integrate_inspiral).
 
     This gives students a documented, no-programming-required route to the
     numerical arrays behind the plot -- e.g. for the chirp-mass-extraction
@@ -101,16 +135,58 @@ def _write_csv(result, csvdir):
     physics_gw.chirp_mass_from_fdot()) or for EXP-8's fixed-time RK4
     convergence comparison -- without requiring every student to write a
     Python import snippet.
+
+    Audit2 (Codex P1-1 / Copilot A2-5) found that the original export --
+    a bare "t_s,f_hz,A,h" table with only a timestamped filename -- could
+    not be traced back to the executable revision or run parameters that
+    produced it once separated from the terminal output, which defeats the
+    point of EXP-8's multi-dt comparison (four files that differ only by
+    --dt, with nothing in the files themselves saying which is which). A
+    commented metadata block (mirroring the convention Gemini/Codex point
+    to in StellarEvolutionTracks) is written before the header row, naming
+    MODEL_VERSION, BUILD_ID, the UTC run timestamp, and every input
+    parameter that affected this run (Audit2 Copilot A2-6 additionally
+    asked for the phase array, which is now a fifth data column).
     """
     os.makedirs(csvdir, exist_ok=True)
-    fpath = os.path.join(csvdir, _timestamp_fname())
+    fpath = _reserve_unique_path(csvdir, "gw_inspiral", "csv")
+    s = result["summary"]
+    include_rd = s["include_ringdown"]
+
+    def _fmt(value):
+        return f"{float(value):.17g}" if value is not None else "n/a"
+
+    meta_lines = [
+        "# GravitationalWaveSources CSV export",
+        f"# model_version: {s['model_version']}",
+        f"# build_id: {s['build_id']}",
+        f"# run_timestamp_utc: {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%fZ')}",
+        f"# m1_msun: {_fmt(s['m1_msun'])}",
+        f"# m2_msun: {_fmt(s['m2_msun'])}",
+        f"# d_mpc: {_fmt(s['d_mpc'])}",
+        f"# dt_s: {_fmt(s['dt_s'])}",
+        f"# f_start_hz: {_fmt(s['f_start_hz'])}",
+        f"# include_ringdown: {include_rd}",
+        f"# n_ringdown_tau: {s['n_ringdown_tau'] if include_rd else 'n/a'}",
+        f"# ringdown_pts: {s['ringdown_pts'] if include_rd else 'n/a'}",
+        f"# f_qnm_hz: {_fmt(s['f_qnm_hz']) if include_rd else 'n/a'}",
+        f"# tau_qnm_ms: {_fmt(s['tau_qnm_ms']) if include_rd else 'n/a'}",
+        (f"# ringdown_model: illustrative Schwarzschild QNM "
+         f"(95% of total mass retained, zero remnant spin) -- not a "
+         f"physical merger" if include_rd else "# ringdown_model: n/a"),
+        "# columns: t_s,f_hz,A,h,phase_rad -- f_hz/A are blank on ringdown-only rows",
+    ]
     with open(fpath, "w", newline="", encoding="utf-8") as handle:
+        for line in meta_lines:
+            handle.write(line + "\n")
         writer = csv.writer(handle)
-        writer.writerow(["t_s", "f_hz", "A", "h"])
-        for t, f, A, h in zip(result["t"], result["f"], result["A"], result["h"]):
+        writer.writerow(["t_s", "f_hz", "A", "h", "phase_rad"])
+        for t, f, A, h, phase in zip(
+            result["t"], result["f"], result["A"], result["h"], result["phase"]
+        ):
             writer.writerow([
                 f"{float(v):.17g}" if math.isfinite(v) else ""
-                for v in (t, f, A, h)
+                for v in (t, f, A, h, phase)
             ])
     print(f"[driver_gw] CSV saved -> {fpath}")
     return fpath
@@ -139,6 +215,17 @@ def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
     )
 
     _print_summary(result["summary"])
+
+    # Validate the zoom window against the actual computed data range
+    # before writing any requested output file. Audit2 (Codex P3-5) found
+    # that a request whose zoom window ends up empty (e.g. --t_before 0
+    # --t_after 0) still left a complete CSV behind, because the CSV was
+    # written before plot_inspiral()'s own data-dependent window check --
+    # so a failed run's exit code did not match what was left on disk. This
+    # duplicates a cheap check (plot_inspiral() below still performs its
+    # own, so calling plot_inspiral() directly without going through run()
+    # is equally safe), buying a clean all-or-nothing failure here instead.
+    viz._xlim(result["t_isco"], t_before, t_after, result["t"][0], result["t"][-1])
 
     if csvdir is not None:
         _write_csv(result, csvdir)

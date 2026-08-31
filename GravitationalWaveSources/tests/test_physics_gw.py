@@ -27,6 +27,7 @@ Instead each quantity is cross-checked against at least one of:
 import ast
 from collections import Counter
 import hashlib
+import html
 from html.parser import HTMLParser
 import inspect
 import math
@@ -75,6 +76,34 @@ if str(MODULE_DIR) not in sys.path:
 import driver_gw as driver  # noqa: E402
 import physics_gw as physics  # noqa: E402
 import plot_gw as plotting  # noqa: E402
+
+
+def read_gw_csv(path):
+    """Split a GravitationalWaveSources CSV export into its commented
+    metadata block (as a dict) and its ordinary CSV rows (header + data).
+
+    Audit2 (Codex P1-1 / Copilot A2-5) added a commented metadata block
+    above the header row so an exported file can be identified/attributed
+    on its own. Some metadata lines themselves contain commas (e.g. the
+    "# columns: t_s,f_hz,A,h,phase_rad -- ..." line), so tests must not
+    assume csv.reader's rows[0] is the header row -- "#"-prefixed lines
+    are stripped out here before csv parsing, mirroring how a human (or
+    any '#'-comment-aware CSV consumer) would read the file.
+    """
+    import csv as csv_module
+    meta = {}
+    data_lines = []
+    with open(path, newline="", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("#"):
+                stripped = line[1:].strip()
+                if ":" in stripped:
+                    key, _, value = stripped.partition(":")
+                    meta[key.strip()] = value.strip()
+            else:
+                data_lines.append(line)
+    rows = list(csv_module.reader(data_lines))
+    return meta, rows
 
 
 def recompute_build_id(directory):
@@ -161,6 +190,29 @@ def ref_dfdt_hz_per_s(f_hz, Mc_kg):
     coded from the local _G/_C constants rather than importing dfdt()."""
     Mc_geom = _G * Mc_kg / _C**3
     return (96.0 / 5.0) * math.pi ** (8.0 / 3.0) * Mc_geom ** (5.0 / 3.0) * f_hz ** (11.0 / 3.0)
+
+
+def ref_phase_from_frequency(f0_hz, f_hz, Mc_kg):
+    """Closed-form leading-order accumulated GW phase between f0 and f,
+    derived (and coded) from scratch here -- NOT by calling physics_gw's
+    RK4 phase integration or dfdt(). Starting from the same two governing
+    ODEs the model integrates (dPhi/dt = 2 pi f, df/dt = K f^(11/3)):
+
+        dPhi/df = (dPhi/dt)/(df/dt) = 2 pi f / (K f^(11/3)) = (2 pi/K) f^(-8/3)
+        Phi(f) - Phi(f0) = (2 pi/K) * integral_{f0}^{f} u^(-8/3) du
+                          = (6 pi)/(5K) * [f0^(-5/3) - f^(-5/3)]
+
+    Audit2 (Codex P3-4 / Copilot A2-8) points out that
+    test_h_equals_amplitude_times_cosine_of_phase_exactly only re-reads
+    physics_gw's own stored h/phase arrays against each other, so a
+    coherently wrong phase trajectory (phase and h wrong together) would
+    still pass it. This closed-form oracle is algebraically independent of
+    the RK4 stepper physics_gw actually runs, so a wrong phase trajectory
+    generally will *not* satisfy it.
+    """
+    Mc_geom = _G * Mc_kg / _C**3
+    K = (96.0 / 5.0) * math.pi ** (8.0 / 3.0) * Mc_geom ** (5.0 / 3.0)
+    return (6.0 * math.pi / (5.0 * K)) * (f0_hz ** (-5.0 / 3.0) - f_hz ** (-5.0 / 3.0))
 
 
 class HtmlNode:
@@ -297,7 +349,7 @@ class TestModuleDiscovery(unittest.TestCase):
 # ===========================================================================
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_model_version(self):
-        self.assertEqual(physics.MODEL_VERSION, "1.1.0")
+        self.assertEqual(physics.MODEL_VERSION, "1.2.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -567,6 +619,46 @@ class TestChirpMassFromFdot(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "bool is not"):
             physics.chirp_mass_from_fdot(20.0, False)
 
+    def test_extreme_inputs_never_silently_underflow_or_overflow(self):
+        """Audit2 (Codex P2-1) reproducer table: before the log-domain
+        rewrite, some of these cases raised an uncaught OverflowError
+        (from Python float exponentiation/multiplication) and others
+        silently returned 0.0 kg (from premature underflow of an
+        intermediate factor) instead of either a valid finite chirp mass
+        or a clean ValueError. Every case below must now do one of the
+        two acceptable things: return a positive finite float, or raise
+        ValueError -- never raise OverflowError and never return exactly
+        0.0 (a physically meaningless "successful" answer)."""
+        # (f_hz, fdot_hz_per_s, expect) -- expect is "raises" or "finite"
+        cases = [
+            (5e-324, 1.0, "raises"),   # smallest subnormal double as f
+            (1e-300, 1.0, "raises"),
+            (1e308, 1.0, "raises"),
+            (1e308, 1e308, "raises"),
+            (20.0, 5e-324, "finite"),  # smallest subnormal double as fdot
+            (20.0, 1e308, "finite"),
+        ]
+        for f_hz, fdot, expect in cases:
+            with self.subTest(f_hz=f_hz, fdot=fdot):
+                if expect == "raises":
+                    with self.assertRaises(ValueError) as ctx:
+                        physics.chirp_mass_from_fdot(f_hz, fdot)
+                    self.assertNotIsInstance(ctx.exception, OverflowError)
+                else:
+                    Mc_kg = physics.chirp_mass_from_fdot(f_hz, fdot)
+                    self.assertTrue(math.isfinite(Mc_kg))
+                    self.assertGreater(Mc_kg, 0.0)
+
+    def test_log_domain_bounds_are_finite_and_ordered(self):
+        """physics_gw._LOG_FLOAT_MIN/_MAX must bracket a genuine finite
+        range (used to reject an out-of-range implied chirp mass while
+        still working entirely in the log domain); a regression that
+        broke this constant setup would silently defeat every boundary
+        check above."""
+        self.assertTrue(math.isfinite(physics._LOG_FLOAT_MAX))
+        self.assertTrue(math.isfinite(physics._LOG_FLOAT_MIN))
+        self.assertLess(physics._LOG_FLOAT_MIN, physics._LOG_FLOAT_MAX)
+
 
 class TestDefaultAndBBHReferenceCase(unittest.TestCase):
     """Bit-for-bit-independent hand recomputation of the two headline
@@ -687,7 +779,7 @@ class TestRK4Stepper(unittest.TestCase):
 
     def test_numerically_integrated_time_to_isco_converges_to_analytic_value(self):
         """The *reported* time to ISCO is limited by the single linearly
-        interpolated final step (see Help Algorithm step 6 / EXP-7), so this
+        interpolated final step (see Help Algorithm step 6 / EXP-8), so this
         checks convergence to the analytic answer without assuming a clean
         fourth-order rate."""
         Mc = physics.chirp_mass(36.0 * physics.M_sun, 29.0 * physics.M_sun)
@@ -741,11 +833,47 @@ class TestIntegrateInspiralNominal(unittest.TestCase):
         h(t) = A(t) cos(Phi(t)) on the inspiral segment, rather than only
         the much weaker |h| <= A bound. This would fail for h=0, h=0.5*A*
         cos(phase), or a wrong phase array, none of which the envelope-only
-        check above can catch."""
+        check above can catch.
+
+        Audit2 (Codex P3-4 / Copilot A2-8): this is an *internal storage
+        consistency* check, not an independent scientific validation of the
+        phase trajectory itself -- it recomputes A*cos(phase) from arrays
+        physics_gw already produced together, so a phase array that is
+        coherently wrong (with h wrong to match) would still satisfy this
+        exact identity. See
+        test_accumulated_phase_matches_independent_closed_form_oracle below
+        for the algebraically-independent check that phase itself is
+        physically correct as a function of frequency."""
         result = physics.integrate_inspiral(36.0, 29.0, 440.0, dt=1e-4, f_start=20.0)
         insp_mask = np.isfinite(result["f"])
         expected_h = result["A"][insp_mask] * np.cos(result["phase"][insp_mask])
         np.testing.assert_array_equal(result["h"][insp_mask], expected_h)
+
+    def test_accumulated_phase_matches_independent_closed_form_oracle(self):
+        """Audit2 (Codex P3-4 / Copilot A2-8): validate result["phase"]
+        itself against ref_phase_from_frequency -- a closed-form expression
+        derived and coded from scratch in this file, never calling
+        physics_gw.dfdt() or reusing its RK4 phase-accumulation code -- at
+        several pre-cutoff frequencies plus the final, linearly interpolated
+        ISCO point. A coherently wrong phase trajectory (e.g. an off-by-a-
+        constant-factor error in the RK4 phase ODE) would fail this even
+        though it would still pass the exact-identity test above."""
+        result = physics.integrate_inspiral(36.0, 29.0, 440.0, dt=1e-4, f_start=20.0)
+        Mc_kg = result["summary"]["Mc_msun"] * physics.M_sun
+        f = result["f"]
+        phase = result["phase"]
+        f0 = f[0]
+        n = len(f)
+        # Several ordinary RK4-stepped points: tight relative tolerance.
+        for idx in (1, 100, n // 4, n // 2, n - 2):
+            with self.subTest(idx=idx):
+                expected = ref_phase_from_frequency(f0, f[idx], Mc_kg)
+                self.assertAlmostEqual(phase[idx] / expected, 1.0, places=8)
+        # Final point is linearly interpolated to the exact ISCO frequency
+        # (see the code comment on the final RK4 step), so it carries a
+        # somewhat larger, but still small, interpolation error.
+        expected_last = ref_phase_from_frequency(f0, f[-1], Mc_kg)
+        self.assertAlmostEqual(phase[-1] / expected_last, 1.0, places=4)
 
     def test_ringdown_h_equals_peak_amplitude_times_damped_cosine_of_phase(self):
         """Same architectural invariant on the ringdown segment: h_rd(t) =
@@ -883,8 +1011,12 @@ class TestIntegrateInspiralValidation(unittest.TestCase):
         for keyword in ("m1_msun", "m2_msun", "d_mpc", "dt", "f_start",
                         "n_ringdown_tau", "ringdown_pts"):
             with self.subTest(keyword=keyword):
+                # n_ringdown_tau/ringdown_pts are only validated (Audit2
+                # Copilot A2-4) when include_ringdown=True, so this test
+                # must request ringdown to still exercise their bool guard.
                 kwargs = dict(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0, dt=2e-4,
-                               f_start=20.0, n_ringdown_tau=6, ringdown_pts=4000)
+                               f_start=20.0, include_ringdown=True,
+                               n_ringdown_tau=6, ringdown_pts=4000)
                 kwargs[keyword] = True
                 with self.assertRaisesRegex(ValueError, "bool is not"):
                     physics.integrate_inspiral(**kwargs)
@@ -907,6 +1039,21 @@ class TestIntegrateInspiralValidation(unittest.TestCase):
         # True/False (and numpy bool) remain accepted.
         physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0,
                                     include_ringdown=np.bool_(False))
+
+    def test_include_ringdown_docstring_matches_np_bool_behavior(self):
+        """Audit2 (Copilot 'Prior A5' follow-up): the docstring explicitly
+        promises numpy.bool_ is accepted (it is not treated as one of the
+        rejected duck-typed boolean-like objects) -- confirm both the
+        wording and the actual behavior agree, so a future edit to either
+        cannot silently drift out of sync."""
+        doc = physics.integrate_inspiral.__doc__
+        self.assertIn("numpy.bool_", doc)
+        result = physics.integrate_inspiral(
+            1.4, 1.4, 400.0, dt=2e-4, f_start=20.0,
+            include_ringdown=np.bool_(True),
+            n_ringdown_tau=6, ringdown_pts=4000,
+        )
+        self.assertTrue(result["summary"]["include_ringdown"])
 
     def test_f_start_at_or_above_isco_is_rejected(self):
         f_isco_hz = physics.f_isco(2.8 * physics.M_sun)
@@ -1011,6 +1158,56 @@ class TestIntegrateInspiralValidation(unittest.TestCase):
                 include_ringdown=True, n_ringdown_tau=6, ringdown_pts=rd_pts,
             )  # must not raise
 
+    def test_n_ringdown_tau_boundary_at_max_ringdown_points_ceiling(self):
+        """Codex Audit2's 'Recommended Regression Additions' #6: an
+        n_ringdown_tau boundary test just below/at/above the largest value
+        still resolvable within MAX_RINGDOWN_POINTS. f_QNM*tau_QNM is a
+        fixed dimensionless invariant for a given remnant mass (see
+        test_qnm_f_times_m_and_tau_over_m_are_exactly_scale_invariant), so
+        the minimum ringdown_pts needed grows linearly with n_ringdown_tau;
+        this independently recomputes that boundary from qnm_params rather
+        than hardcoding it."""
+        f_qnm, tau_qnm = physics.qnm_params(0.95 * 65.0 * physics.M_sun)
+
+        def min_pts_needed(n_tau):
+            return math.ceil(
+                physics.MIN_RINGDOWN_SAMPLES_PER_CYCLE * n_tau * tau_qnm * f_qnm
+            ) + 1
+
+        # Binary search the largest integer n_tau still resolvable at the
+        # documented ceiling, MAX_RINGDOWN_POINTS.
+        lo, hi = 1, 10_000_000
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if min_pts_needed(mid) <= physics.MAX_RINGDOWN_POINTS:
+                lo = mid
+            else:
+                hi = mid - 1
+        n_tau_max = lo
+        self.assertLessEqual(min_pts_needed(n_tau_max), physics.MAX_RINGDOWN_POINTS)
+        self.assertGreater(min_pts_needed(n_tau_max + 1), physics.MAX_RINGDOWN_POINTS)
+
+        # At the boundary: MAX_RINGDOWN_POINTS is (just barely) sufficient.
+        physics.integrate_inspiral(
+            36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+            include_ringdown=True, n_ringdown_tau=n_tau_max,
+            ringdown_pts=physics.MAX_RINGDOWN_POINTS,
+        )  # must not raise
+        # One below the boundary is also fine (less demanding).
+        physics.integrate_inspiral(
+            36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+            include_ringdown=True, n_ringdown_tau=n_tau_max - 1,
+            ringdown_pts=physics.MAX_RINGDOWN_POINTS,
+        )  # must not raise
+        # One above the boundary: no ringdown_pts up to MAX_RINGDOWN_POINTS
+        # can resolve it, so even the ceiling itself must be rejected.
+        with self.assertRaisesRegex(ValueError, "too small to resolve the"):
+            physics.integrate_inspiral(
+                36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+                include_ringdown=True, n_ringdown_tau=n_tau_max + 1,
+                ringdown_pts=physics.MAX_RINGDOWN_POINTS,
+            )
+
     def test_ringdown_default_settings_remain_valid(self):
         """The documented default (--n_tau 6 --rd_pts 4000) must remain
         comfortably accepted after the P1-1 fix -- for the 36+29 case this
@@ -1019,6 +1216,64 @@ class TestIntegrateInspiralValidation(unittest.TestCase):
             36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
             include_ringdown=True, n_ringdown_tau=6, ringdown_pts=4000,
         )  # must not raise
+
+    def test_out_of_range_ringdown_params_are_ignored_when_ringdown_disabled(self):
+        """Audit2 (Copilot A2-4): n_ringdown_tau/ringdown_pts are dormant
+        configuration when include_ringdown=False and must not be able to
+        break a pure-inspiral call, however invalid their values are on
+        their own terms."""
+        for n_tau, rd_pts in ((-5, 4000), (0, 4000), (0.5, 4000),
+                               (6, 0), (6, 1), (6, -5), (6, 20_000_000)):
+            with self.subTest(n_ringdown_tau=n_tau, ringdown_pts=rd_pts):
+                result = physics.integrate_inspiral(
+                    1.4, 1.4, 400.0, dt=2e-4, f_start=20.0,
+                    include_ringdown=False,
+                    n_ringdown_tau=n_tau, ringdown_pts=rd_pts,
+                )  # must not raise
+                self.assertFalse(result["summary"]["include_ringdown"])
+
+    def test_same_out_of_range_ringdown_params_still_rejected_when_enabled(self):
+        """Companion to the A2-4 test above: the same values must still be
+        rejected once include_ringdown=True actually requests a ringdown
+        segment -- gating must not have accidentally disabled the checks
+        outright."""
+        for n_tau, rd_pts in ((-5, 4000), (0, 4000)):
+            with self.subTest(n_ringdown_tau=n_tau, ringdown_pts=rd_pts):
+                with self.assertRaisesRegex(ValueError, "n_ringdown_tau must be a positive integer"):
+                    physics.integrate_inspiral(
+                        1.4, 1.4, 400.0, dt=2e-4, f_start=20.0,
+                        include_ringdown=True, n_ringdown_tau=n_tau, ringdown_pts=rd_pts,
+                    )
+
+    def test_huge_n_ringdown_tau_raises_cleanly_not_overflowerror(self):
+        """Audit2 (Codex P2-2) reproducer: a --n_tau value large enough that
+        the implied minimum-sample-count arithmetic overflows to inf must
+        raise a clean ValueError (math.isfinite guard / OverflowError
+        catch around math.ceil), never an uncaught OverflowError."""
+        with self.assertRaises(ValueError) as ctx:
+            physics.integrate_inspiral(
+                36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+                include_ringdown=True, n_ringdown_tau=1e308, ringdown_pts=4000,
+            )
+        self.assertNotIsInstance(ctx.exception, OverflowError)
+        self.assertIn("too large", str(ctx.exception))
+
+    def test_invalid_ringdown_sampling_is_rejected_before_any_rk4_step(self):
+        """Audit2 (Codex P2-3 / Copilot A2-2): invalid coupled ringdown
+        sampling must be detected before the (potentially long) inspiral
+        integration runs, not after. A wall-clock timing comparison is not
+        a reliable deterministic assertion, so this instead spies on the
+        RK4 stepper itself and asserts it is never called for a request
+        that is invalid on ringdown-sampling grounds alone."""
+        with mock.patch.object(
+            physics, "_rk4_frequency_phase_step", wraps=physics._rk4_frequency_phase_step
+        ) as spy:
+            with self.assertRaisesRegex(ValueError, "too small to resolve the"):
+                physics.integrate_inspiral(
+                    36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+                    include_ringdown=True, n_ringdown_tau=6, ringdown_pts=2,
+                )
+            spy.assert_not_called()
 
     def test_huge_integer_n_ringdown_tau_rd_pts_produce_clean_value_error(self):
         """P2-2 regression: a CLI-style huge Python int (401 digits, as in
@@ -1155,8 +1410,10 @@ class TestDriverRun(unittest.TestCase):
 
     def test_run_saves_csv_in_addition_to_displaying_when_csvdir_given(self):
         """P2-1/Gemini regression: --csvdir gives students a no-programming
-        route to the numerical arrays (e.g. for chirp-mass extraction)."""
-        import csv as csv_module
+        route to the numerical arrays (e.g. for chirp-mass extraction).
+        Audit2 (Codex P1-1 / Copilot A2-5, A2-6) additionally requires a
+        commented metadata block above the header, and a fifth phase_rad
+        column."""
         import matplotlib.pyplot as plt
         with tempfile.TemporaryDirectory() as csvdir:
             with mock.patch.object(plt, "show"):
@@ -1166,18 +1423,46 @@ class TestDriverRun(unittest.TestCase):
                 )
             saved = list(Path(csvdir).glob("*.csv"))
             self.assertEqual(len(saved), 1)
-            with saved[0].open(newline="", encoding="utf-8") as handle:
-                rows = list(csv_module.reader(handle))
-            self.assertEqual(rows[0], ["t_s", "f_hz", "A", "h"])
+            meta, rows = read_gw_csv(saved[0])
+            self.assertEqual(rows[0], ["t_s", "f_hz", "A", "h", "phase_rad"])
             self.assertEqual(len(rows) - 1, result["summary"]["inspiral_steps"])
             self.assertEqual(float(rows[1][0]), 0.0)
             self.assertEqual(float(rows[1][1]), 20.0)
             # Full double precision is preserved (not truncated/rounded).
             self.assertAlmostEqual(float(rows[-1][1]), result["f"][-1], places=9)
             self.assertAlmostEqual(float(rows[-1][3]), result["h"][-1], places=9)
+            self.assertAlmostEqual(float(rows[-1][4]), result["phase"][-1], places=9)
+            # Metadata block: cross-check against the run's own summary.
+            self.assertEqual(meta["model_version"], result["summary"]["model_version"])
+            self.assertEqual(meta["build_id"], result["summary"]["build_id"])
+            self.assertAlmostEqual(float(meta["m1_msun"]), 1.4, places=9)
+            self.assertAlmostEqual(float(meta["m2_msun"]), 1.4, places=9)
+            self.assertAlmostEqual(float(meta["dt_s"]), 2e-4, places=12)
+            self.assertAlmostEqual(float(meta["f_start_hz"]), 20.0, places=9)
+            self.assertEqual(meta["include_ringdown"], "False")
+            self.assertEqual(meta["n_ringdown_tau"], "n/a")
+            self.assertEqual(meta["ringdown_pts"], "n/a")
+
+    def test_csv_metadata_distinguishes_runs_that_differ_only_by_dt(self):
+        """Audit2 (Codex P1-1) specifically calls out EXP-8: four CSVs that
+        differ only by --dt must remain individually identifiable once
+        separated from the terminal that produced them."""
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(plt, "show"):
+                driver.run(m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
+                           dt=8e-4, f_start=20.0, csvdir=csvdir)
+                driver.run(m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
+                           dt=4e-4, f_start=20.0, csvdir=csvdir)
+            saved = sorted(Path(csvdir).glob("*.csv"))
+            self.assertEqual(len(saved), 2)
+            dts = set()
+            for path in saved:
+                meta, _ = read_gw_csv(path)
+                dts.add(meta["dt_s"])
+            self.assertEqual(len(dts), 2)  # both files self-report a different dt_s
 
     def test_csv_blanks_ringdown_rows_with_no_inspiral_f_or_a(self):
-        import csv as csv_module
         import matplotlib.pyplot as plt
         with tempfile.TemporaryDirectory() as csvdir:
             with mock.patch.object(plt, "show"):
@@ -1188,8 +1473,8 @@ class TestDriverRun(unittest.TestCase):
                 )
             saved = list(Path(csvdir).glob("*.csv"))
             self.assertEqual(len(saved), 1)
-            with saved[0].open(newline="", encoding="utf-8") as handle:
-                rows = list(csv_module.reader(handle))
+            meta, rows = read_gw_csv(saved[0])
+            self.assertEqual(rows[0], ["t_s", "f_hz", "A", "h", "phase_rad"])
             data_rows = rows[1:]
             blank_f_rows = [row for row in data_rows if row[1] == ""]
             self.assertTrue(blank_f_rows)
@@ -1197,6 +1482,10 @@ class TestDriverRun(unittest.TestCase):
                 self.assertEqual(row[2], "")  # A also blank on ringdown rows
                 self.assertNotEqual(row[0], "")  # t always present
                 self.assertNotEqual(row[3], "")  # h always present
+                self.assertNotEqual(row[4], "")  # phase always present
+            self.assertEqual(meta["include_ringdown"], "True")
+            self.assertEqual(meta["n_ringdown_tau"], "6")
+            self.assertEqual(meta["ringdown_pts"], "4000")
 
     def test_csv_timestamp_filename_has_microsecond_resolution(self):
         """P3-4 regression, driver-layer counterpart to the plot_gw check:
@@ -1204,12 +1493,53 @@ class TestDriverRun(unittest.TestCase):
         name = driver._timestamp_fname()
         self.assertRegex(name, r"^gw_inspiral_\d{8}_\d{6}_\d{6}\.csv$")
 
+    def test_reserve_unique_path_does_not_overwrite_on_timestamp_collision(self):
+        """Audit2 (Copilot A2-3): a repeated (e.g. mocked, or genuinely
+        coincident) timestamp must never silently overwrite an earlier
+        file -- _reserve_unique_path must claim a distinct "_1", "_2", ...
+        suffixed name instead. Uses a frozen datetime.now() so the
+        collision is deterministic rather than relying on real-clock
+        timing."""
+        fixed = driver.datetime(2026, 1, 1, 12, 0, 0, 123456)
+
+        class FrozenDatetime(driver.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed if tz is None else fixed.astimezone(tz)
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(driver, "datetime", FrozenDatetime):
+                p1 = driver._reserve_unique_path(d, "gw_inspiral", "csv")
+                p2 = driver._reserve_unique_path(d, "gw_inspiral", "csv")
+                p3 = driver._reserve_unique_path(d, "gw_inspiral", "csv")
+            self.assertEqual(len({p1, p2, p3}), 3)  # three distinct paths
+            for p in (p1, p2, p3):
+                self.assertTrue(os.path.exists(p))
+            self.assertEqual(len(list(Path(d).glob("*.csv"))), 3)  # nothing overwritten
+
     def test_no_csvdir_does_not_write_a_csv_file(self):
         import matplotlib.pyplot as plt
         with tempfile.TemporaryDirectory() as csvdir:
             with mock.patch.object(plt, "show"):
                 driver.run(m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
                            dt=1e-4, f_start=20.0)
+            self.assertEqual(list(Path(csvdir).glob("*.csv")), [])
+
+    def test_empty_zoom_window_leaves_no_csv_behind(self):
+        """Audit2 (Codex P3-5): a request whose zoom window is empty
+        (--t_before 0 --t_after 0, which collapses hi<=lo once t_isco is
+        not exactly 0 or the data endpoint) must fail all-or-nothing -- a
+        non-zero exit and *zero* files written, not a CSV left behind by a
+        write that happened before the (later) plot-window check failed."""
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(plt, "show"):
+                with self.assertRaises(ValueError):
+                    driver.run(
+                        m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
+                        dt=1e-4, f_start=20.0, csvdir=csvdir,
+                        t_before=0.0, t_after=0.0,
+                    )
             self.assertEqual(list(Path(csvdir).glob("*.csv")), [])
 
 
@@ -1334,6 +1664,28 @@ class TestPlotting(unittest.TestCase):
         name = plotting._timestamp_fname()
         self.assertRegex(name, r"^gw_inspiral_\d{8}_\d{6}_\d{6}\.png$")
 
+    def test_reserve_unique_path_does_not_overwrite_on_timestamp_collision(self):
+        """Audit2 (Copilot A2-3), plot_gw-layer counterpart to the
+        driver_gw test of the same name: a repeated timestamp must claim a
+        distinct "_1", "_2", ... suffixed PNG path rather than silently
+        overwriting an earlier one."""
+        fixed = plotting.datetime(2026, 1, 1, 12, 0, 0, 123456)
+
+        class FrozenDatetime(plotting.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed if tz is None else fixed.astimezone(tz)
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(plotting, "datetime", FrozenDatetime):
+                p1 = plotting._reserve_unique_path(d)
+                p2 = plotting._reserve_unique_path(d)
+                p3 = plotting._reserve_unique_path(d)
+            self.assertEqual(len({p1, p2, p3}), 3)
+            for p in (p1, p2, p3):
+                self.assertTrue(os.path.exists(p))
+            self.assertEqual(len(list(Path(d).glob("*.png"))), 3)
+
     def test_zoom_interval_rejects_an_empty_window(self):
         # A window fully outside the data range collapses to empty (hi<=lo):
         with self.assertRaisesRegex(ValueError, "no plotted data"):
@@ -1454,10 +1806,48 @@ class TestCLI(unittest.TestCase):
             self.assertIn("CSV saved ->", result.stdout)
             saved = list(Path(csvdir).glob("*.csv"))
             self.assertEqual(len(saved), 1)
-            self.assertEqual(
-                saved[0].read_text(encoding="utf-8").splitlines()[0],
-                "t_s,f_hz,A,h",
-            )
+            lines = saved[0].read_text(encoding="utf-8").splitlines()
+            # Audit2 (Codex P1-1 / Copilot A2-5): a commented metadata block
+            # now precedes the header row.
+            self.assertTrue(lines[0].startswith("#"))
+            header_lines = [ln for ln in lines if not ln.startswith("#")]
+            self.assertEqual(header_lines[0], "t_s,f_hz,A,h,phase_rad")
+            meta_text = "\n".join(ln for ln in lines if ln.startswith("#"))
+            self.assertIn(f"model_version: {physics.MODEL_VERSION}", meta_text)
+            self.assertIn(f"build_id: {physics.BUILD_ID}", meta_text)
+            self.assertIn("dt_s:", meta_text)
+
+    def test_n_tau_huge_value_fails_cleanly_end_to_end(self):
+        """Audit2 (Codex P2-2) reproducer, CLI-level: --n_tau is parsed as
+        argparse type=int, so the reachable huge value is a huge digit
+        string (as a real user might paste), not scientific notation
+        (which argparse's int() rejects earlier, with its own clean
+        usage/error message -- a different, already-covered case). This
+        huge-but-valid Python int previously reached math.ceil(inf) inside
+        physics_gw and raised an uncaught OverflowError; it must now
+        produce a single clean error line and a non-zero exit, never a
+        traceback."""
+        result = self._run(
+            ["--m1", "36", "--m2", "29", "--d", "440", "--dt", "1e-4",
+             "--ringdown", "--n_tau", "1" + "0" * 308],
+            timeout=15,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("Traceback", result.stderr)
+        stderr_lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+        self.assertEqual(len(stderr_lines), 1)
+        self.assertIn("too large", stderr_lines[0])
+
+    def test_n_tau_out_of_range_is_ignored_without_ringdown_end_to_end(self):
+        """Audit2 (Copilot A2-4): an out-of-range --n_tau has no effect
+        when --ringdown is not requested."""
+        result = self._run(
+            ["--m1", "1.4", "--m2", "1.4", "--d", "400", "--dt", "2e-4",
+             "--n_tau", "0"],
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
     def test_dpi_at_max_dpi_is_accepted_end_to_end(self):
         with tempfile.TemporaryDirectory() as outdir:
@@ -1494,6 +1884,23 @@ class TestHelpFile(unittest.TestCase):
             normalized_text(version_nodes[0]),
             f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}",
         )
+
+    def test_build_id_provenance_wording_does_not_overstate_exact_bytes(self):
+        """Audit2 (Codex P3-2 / Copilot A2-1): BUILD_ID is computed from
+        UTF-8 source *text* after universal-newline (CRLF/CR -> LF)
+        normalization, not from the literal on-disk bytes -- a CRLF and an
+        LF copy of the same source intentionally hash identically. The
+        Help text previously (incorrectly) said "exact bytes"; it must not
+        say that, and must describe the normalization instead."""
+        self.assertNotIn("exact bytes", self.html)
+        self.assertIn("normaliz", self.html.lower())
+        provenance_idx = self.html.find("Build identifier provenance")
+        self.assertNotEqual(provenance_idx, -1)
+        # The normalization wording should appear near the provenance note
+        # itself, not merely somewhere else on the page.
+        nearby = self.html[provenance_idx:provenance_idx + 1200]
+        self.assertIn("normaliz", nearby.lower())
+        self.assertIn("CRLF", nearby)
 
     def test_default_case_numbers_are_current(self):
         for required in ("158 seconds",):
@@ -1557,6 +1964,22 @@ class TestHelpFile(unittest.TestCase):
         parameter and referenced from the chirp-mass-extraction and
         convergence exercises."""
         self.assertIn("--csvdir", self.html)
+
+    def test_exp7_pre_snippet_executes_and_prints_documented_result(self):
+        """Extract the exact copyable Python snippet from the EXP-7 <pre>
+        block and actually run it (against the real installed physics_gw),
+        confirming it prints the documented 1.2188 -- rather than merely
+        trusting that the HTML text and the real behavior still agree."""
+        match = re.search(r"<pre>(import physics_gw as gw.*?)</pre>", self.html, re.S)
+        self.assertIsNotNone(match, "EXP-7 <pre> snippet not found in Help file")
+        snippet = html.unescape(match.group(1))
+        self.assertIn("chirp_mass_from_fdot", snippet)
+        proc = subprocess.run(
+            [sys.executable, "-c", snippet],
+            cwd=MODULE_DIR, capture_output=True, text=True, timeout=15, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "1.2188")
 
     def test_help_documents_mathjax_connectivity_plainly(self):
         self.assertIn("cdn.jsdelivr.net/npm/mathjax@3", self.html)

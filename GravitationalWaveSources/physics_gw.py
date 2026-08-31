@@ -12,9 +12,10 @@ masses and megaparsecs.
 """
 
 import math
+import sys
 import numpy as np
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.2.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -85,6 +86,16 @@ MAX_RINGDOWN_POINTS = 500_000
 #: requests before they silently produce a misleading or invisible plot.
 MIN_RINGDOWN_SAMPLES_PER_CYCLE = 8
 
+#: Natural-log bounds on a representable positive double, used by
+#: chirp_mass_from_fdot() to detect an out-of-range implied result while
+#: still working entirely in the log domain (see that function for why).
+#: _LOG_FLOAT_MIN uses the smallest *normal* double (not the smallest
+#: subnormal) so a "successful" inference is never a reduced-precision
+#: subnormal result -- a chirp mass that tiny is not physically meaningful
+#: at this program's leading-order pedagogical level regardless.
+_LOG_FLOAT_MAX = math.log(sys.float_info.max)
+_LOG_FLOAT_MIN = math.log(sys.float_info.min)
+
 
 def _require_finite(name, value):
     """Return value as float after giving a consistent user-facing error.
@@ -151,9 +162,46 @@ def chirp_mass_from_fdot(f_hz, fdot_hz_per_s):
             "fdot_hz_per_s must be greater than zero (an inspiraling "
             "binary's GW frequency always increases under this model)."
         )
-    Mc_geom = ((5.0 / 96.0) * np.pi ** (-8.0 / 3.0)
-               * f_hz ** (-11.0 / 3.0) * fdot_hz_per_s) ** (3.0 / 5.0)
-    return Mc_geom * c**3 / G
+    # Evaluate in the log domain rather than forming f**(-11/3) and
+    # fdot**1 as intermediate powers/products directly. Audit2 (Codex P2-1)
+    # found that the direct form can individually overflow (OverflowError)
+    # or underflow to exactly 0.0 for f or fdot near the extreme ends of
+    # the representable float range, even when the true, mathematically
+    # implied chirp mass is a normal, representable, nonzero number -- or,
+    # in the opposite direction, is genuinely outside any representable
+    # range and should be reported as such rather than silently returned
+    # as 0.0. Working in log space keeps every intermediate value in a
+    # moderate numeric range (natural logs of doubles span roughly
+    # -745..+709, never overflowing/underflowing on their own), so the
+    # only overflow/underflow decision left is the single explicit
+    # boundary check on the final log-domain result below.
+    log_Mc_kg = (
+        (3.0 / 5.0) * math.log(5.0 / 96.0)
+        - (8.0 / 5.0) * math.log(math.pi)
+        + 3.0 * math.log(c)
+        - math.log(G)
+        - (11.0 / 5.0) * math.log(f_hz)
+        + (3.0 / 5.0) * math.log(fdot_hz_per_s)
+    )
+    if log_Mc_kg > _LOG_FLOAT_MAX:
+        raise ValueError(
+            f"f_hz={f_hz:g} and fdot_hz_per_s={fdot_hz_per_s:g} imply a "
+            "chirp mass too large to represent as a finite number; check "
+            "the units and magnitude of the inputs."
+        )
+    if log_Mc_kg < _LOG_FLOAT_MIN:
+        raise ValueError(
+            f"f_hz={f_hz:g} and fdot_hz_per_s={fdot_hz_per_s:g} imply a "
+            "chirp mass too small to represent as a positive finite "
+            "number; check the units and magnitude of the inputs."
+        )
+    Mc_kg = math.exp(log_Mc_kg)
+    if not (math.isfinite(Mc_kg) and Mc_kg > 0):
+        raise ValueError(
+            f"f_hz={f_hz:g} and fdot_hz_per_s={fdot_hz_per_s:g} did not "
+            "produce a positive finite chirp mass."
+        )
+    return Mc_kg
 
 
 def dfdt(f_hz, Mc_kg):
@@ -234,14 +282,20 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     signal of a binary-neutron-star system.
 
     API note on integer-valued parameters: ``include_ringdown`` must be a
-    real ``bool`` (not ``0``/``1`` or a numpy bool_-like duck type -- see
-    _require_finite's bool guard, which applies to every other argument
-    here). ``n_ringdown_tau``, ``ringdown_pts``, and (at the driver layer)
-    ``--dpi`` are conceptually integer counts, but this function accepts
-    any integer-*valued* float for them (e.g. ``4000.0``) as a convenience
-    for callers who already have floating-point arithmetic results on
-    hand; each is validated with ``int(value) == value`` and rejected
-    otherwise, then converted to ``int`` before use.
+    real ``bool`` or ``numpy.bool_`` (not ``0``/``1`` or another duck-typed
+    boolean-like object -- see _require_finite's bool guard, which applies
+    to every other argument here). ``n_ringdown_tau``, ``ringdown_pts``,
+    and (at the driver layer) ``--dpi`` are conceptually integer counts,
+    but this function accepts any integer-*valued* float for them (e.g.
+    ``4000.0``) as a convenience for callers who already have
+    floating-point arithmetic results on hand; each is validated with
+    ``int(value) == value`` and rejected otherwise, then converted to
+    ``int`` before use. ``n_ringdown_tau`` and ``ringdown_pts`` are only
+    inspected (and therefore can only be rejected) when
+    ``include_ringdown`` is ``True``; when ringdown is disabled they have
+    no effect on the calculation and are not validated at all, so a
+    caller carrying an unused/invalid ringdown configuration alongside a
+    pure-inspiral request is not broken by it.
     """
     # Validate scalar inputs before unit conversion.
     m1_msun = _require_finite("m1_msun", m1_msun)
@@ -249,8 +303,6 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     d_mpc = _require_finite("d_mpc", d_mpc)
     dt = _require_finite("dt", dt)
     f_start = _require_finite("f_start", f_start)
-    n_ringdown_tau = _require_finite("n_ringdown_tau", n_ringdown_tau)
-    ringdown_pts = _require_finite("ringdown_pts", ringdown_pts)
 
     if m1_msun <= 0 or m2_msun <= 0:
         raise ValueError("Component masses must both be greater than zero.")
@@ -262,18 +314,24 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         raise ValueError("Starting GW frequency f_start must be greater than zero.")
     if not isinstance(include_ringdown, (bool, np.bool_)):
         raise ValueError("include_ringdown must be True or False.")
-    if int(n_ringdown_tau) != n_ringdown_tau or n_ringdown_tau <= 0:
-        raise ValueError("n_ringdown_tau must be a positive integer.")
-    if int(ringdown_pts) != ringdown_pts or ringdown_pts < 2:
-        raise ValueError("ringdown_pts must be an integer of at least 2.")
-    if ringdown_pts > MAX_RINGDOWN_POINTS:
-        raise ValueError(
-            f"ringdown_pts must not exceed {MAX_RINGDOWN_POINTS:,}; "
-            "reduce --rd_pts."
-        )
 
-    n_ringdown_tau = int(n_ringdown_tau)
-    ringdown_pts = int(ringdown_pts)
+    # n_ringdown_tau/ringdown_pts are meaningless when ringdown is not
+    # requested, so they are validated (and can only reject the call) when
+    # include_ringdown is True -- see the API note above (Audit2/Copilot A2-4).
+    if include_ringdown:
+        n_ringdown_tau = _require_finite("n_ringdown_tau", n_ringdown_tau)
+        ringdown_pts = _require_finite("ringdown_pts", ringdown_pts)
+        if int(n_ringdown_tau) != n_ringdown_tau or n_ringdown_tau <= 0:
+            raise ValueError("n_ringdown_tau must be a positive integer.")
+        if int(ringdown_pts) != ringdown_pts or ringdown_pts < 2:
+            raise ValueError("ringdown_pts must be an integer of at least 2.")
+        if ringdown_pts > MAX_RINGDOWN_POINTS:
+            raise ValueError(
+                f"ringdown_pts must not exceed {MAX_RINGDOWN_POINTS:,}; "
+                "reduce --rd_pts."
+            )
+        n_ringdown_tau = int(n_ringdown_tau)
+        ringdown_pts = int(ringdown_pts)
 
     # Extreme-but-technically-finite inputs (e.g. dt or f_start at the
     # smallest positive subnormal float) can make the derived arithmetic
@@ -300,6 +358,72 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
             "The requested component masses and/or distance produced a "
             "non-finite derived quantity; use more moderate values."
         )
+
+    # Validate the optional ringdown's coupled sampling requirement here,
+    # as soon as M_total (and hence the toy remnant mass and QNM
+    # parameters) is known -- deliberately *before* estimating or running
+    # the inspiral integration below. Audit2 (Codex P2-3 / Copilot A2-2)
+    # found that checking this only after the full inspiral had already
+    # been integrated and copied into NumPy arrays let an invalid ringdown
+    # request (e.g. the default BNS case with --rd_pts 2) burn several
+    # seconds and ~200 MiB before being rejected, even though nothing
+    # about this check depends on the inspiral waveform itself.
+    f_qnm = np.nan
+    tau_qnm = np.nan
+    M_final = np.nan
+    if include_ringdown:
+        # Deliberate toy assumption: 5% of total mass radiated and zero remnant spin.
+        M_final = 0.95 * M_total
+        try:
+            f_qnm, tau_qnm = qnm_params(M_final)
+        except (OverflowError, ZeroDivisionError) as exc:
+            raise ValueError(
+                "The requested component masses do not yield computable "
+                "ringdown QNM parameters; use more moderate values."
+            ) from exc
+        if not (math.isfinite(f_qnm) and math.isfinite(tau_qnm)
+                and f_qnm > 0 and tau_qnm > 0):
+            raise ValueError(
+                "The requested component masses produced non-finite "
+                "ringdown QNM parameters; use more moderate values."
+            )
+
+        # A stored ringdown that cannot resolve the QNM oscillation itself
+        # is worse than useless for a teaching plot: at exactly the Nyquist
+        # limit (2 samples/cycle) the waveform aliases, and at --rd_pts=2 it
+        # collapses to a single stored point (see the t_rd[1:] slice below)
+        # that cannot be rendered as a visible line at all, even though the
+        # legend would still claim a ringdown curve is present. Require a
+        # visually adequate sampling rate up front instead of silently
+        # producing a misleading or empty-looking plot.
+        #
+        # An astronomically large --n_tau (e.g. 1e308) makes this product
+        # overflow to float('inf') -- float multiplication overflows
+        # silently to inf rather than raising, unlike float()/** -- so
+        # isfinite() is checked explicitly before math.ceil(), which does
+        # raise OverflowError on an infinite input (Audit2 Codex P2-2).
+        try:
+            duration = n_ringdown_tau * tau_qnm
+            cycles = duration * f_qnm
+            raw_min_pts = MIN_RINGDOWN_SAMPLES_PER_CYCLE * cycles
+        except OverflowError:
+            raw_min_pts = math.inf
+        if not math.isfinite(raw_min_pts):
+            raise ValueError(
+                f"n_ringdown_tau={n_ringdown_tau:.4g} is too large for this "
+                "leading-order ringdown model to compute a required sample "
+                "count; reduce --n_tau."
+            )
+        min_pts_needed = math.ceil(raw_min_pts) + 1
+        if ringdown_pts < min_pts_needed:
+            raise ValueError(
+                f"ringdown_pts={ringdown_pts} is too small to resolve the "
+                f"QNM oscillation (f_QNM={f_qnm:.4g} Hz) over "
+                f"n_ringdown_tau={n_ringdown_tau} decay times; at least "
+                f"{min_pts_needed} points are needed for "
+                f"{MIN_RINGDOWN_SAMPLES_PER_CYCLE} samples per cycle. "
+                "Increase --rd_pts or reduce --n_tau."
+            )
 
     if f_start >= f_isco_hz:
         raise ValueError(
@@ -404,36 +528,12 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     f_arr = np.asarray(f_list, dtype=float)
     phase_arr = np.asarray(phase_list, dtype=float)
 
-    # Optional illustrative Schwarzschild ringdown.
-    f_qnm = np.nan
-    tau_qnm = np.nan
-    M_final = np.nan
+    # Optional illustrative Schwarzschild ringdown. f_qnm/tau_qnm/M_final and
+    # the coupled sampling requirement were already computed and validated
+    # above, before this inspiral was integrated -- this block only builds
+    # the ringdown arrays using those already-known-good values.
     if include_ringdown:
-        # Deliberate toy assumption: 5% of total mass radiated and zero remnant spin.
-        M_final = 0.95 * M_total
-        f_qnm, tau_qnm = qnm_params(M_final)
-
-        # A stored ringdown that cannot resolve the QNM oscillation itself
-        # is worse than useless for a teaching plot: at exactly the Nyquist
-        # limit (2 samples/cycle) the waveform aliases, and at --rd_pts=2 it
-        # collapses to a single stored point (see the t_rd[1:] slice below)
-        # that cannot be rendered as a visible line at all, even though the
-        # legend would still claim a ringdown curve is present. Require a
-        # visually adequate sampling rate up front instead of silently
-        # producing a misleading or empty-looking plot.
         duration = n_ringdown_tau * tau_qnm
-        cycles = duration * f_qnm
-        min_pts_needed = math.ceil(MIN_RINGDOWN_SAMPLES_PER_CYCLE * cycles) + 1
-        if ringdown_pts < min_pts_needed:
-            raise ValueError(
-                f"ringdown_pts={ringdown_pts} is too small to resolve the "
-                f"QNM oscillation (f_QNM={f_qnm:.4g} Hz) over "
-                f"n_ringdown_tau={n_ringdown_tau} decay times; at least "
-                f"{min_pts_needed} points are needed for "
-                f"{MIN_RINGDOWN_SAMPLES_PER_CYCLE} samples per cycle. "
-                "Increase --rd_pts or reduce --n_tau."
-            )
-
         t_rd = np.linspace(0.0, duration, ringdown_pts)
         phase_rd = phase_isco + 2.0 * np.pi * f_qnm * t_rd
         h_rd = A_peak * np.cos(phase_rd) * np.exp(-t_rd / tau_qnm)
@@ -451,12 +551,15 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         Mc_msun=Mc / M_sun,
         M_total_msun=M_total / M_sun,
         d_mpc=d_mpc,
+        dt_s=dt,
         f_start_hz=f_start,
         f_isco_hz=f_isco_hz,
         t_isco_s=t_isco,
         T_band_s=t_isco,
         A_isco=A_peak,
         include_ringdown=bool(include_ringdown),
+        n_ringdown_tau=(n_ringdown_tau if include_ringdown else None),
+        ringdown_pts=(ringdown_pts if include_ringdown else None),
         M_final_msun=(M_final / M_sun if include_ringdown else np.nan),
         f_qnm_hz=f_qnm,
         tau_qnm_ms=(tau_qnm * 1e3 if include_ringdown else np.nan),
