@@ -16,6 +16,12 @@ Examples
 
   # Also save a timestamped PNG (in addition to the on-screen display)
   python main.py --outdir ./runs
+
+  # Also save a timestamped CSV of t, f, A, h (e.g. for the chirp-mass-
+  # extraction exercise, or the EXP-8 fixed-time convergence comparison)
+  python main.py --csvdir ./runs
+
+Requires Python 3.10 or later; see the GFTGU Python Setup Guide.
 """
 
 import argparse
@@ -69,12 +75,15 @@ def parse_args():
     g.add_argument("--lw", type=float, default=0.4, metavar="PT",
                    help="waveform line width [points] (default 0.4)")
     g.add_argument("--dpi", type=int, default=150, metavar="N",
-                   help="PNG resolution [dpi] (default 150)")
+                   help="PNG resolution [dpi], 1..600 (default 150)")
 
     g = p.add_argument_group("Output")
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",
                    help="also save a timestamped PNG in PATH, in addition to "
                         "displaying it on screen (default: display only)")
+    g.add_argument("--csvdir", type=str, default=None, metavar="PATH",
+                   help="also save a timestamped CSV of t_s,f_hz,A,h in PATH "
+                        "(default: no CSV)")
     return p.parse_args()
 
 
@@ -88,6 +97,7 @@ def main():
             dt=args.dt,
             f_start=args.f_start,
             outdir=args.outdir,
+            csvdir=args.csvdir,
             t_before=args.t_before,
             t_after=args.t_after,
             lw=args.lw,

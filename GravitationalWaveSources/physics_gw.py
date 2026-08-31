@@ -14,7 +14,7 @@ masses and megaparsecs.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.1.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -74,6 +74,17 @@ MAX_INSPIRAL_STEPS = 5_000_000
 MIN_INSPIRAL_STEPS = 50
 MAX_RINGDOWN_POINTS = 500_000
 
+#: Minimum samples per QNM oscillation cycle the stored ringdown must
+#: provide. 2 (bare Nyquist) is a necessary but visually inadequate
+#: standard for a teaching plot: a value just above 2 samples/cycle still
+#: aliases badly on screen, and --rd_pts=2 stores exactly one ringdown
+#: point (after the seam point is dropped -- see integrate_inspiral),
+#: which cannot be rendered as a visible line at all. 8 is a conservative
+#: value that keeps the default settings (n_ringdown_tau=6, ringdown_pts=
+#: 4000) comfortably valid while still catching grossly under-sampled
+#: requests before they silently produce a misleading or invisible plot.
+MIN_RINGDOWN_SAMPLES_PER_CYCLE = 8
+
 
 def _require_finite(name, value):
     """Return value as float after giving a consistent user-facing error.
@@ -91,7 +102,11 @@ def _require_finite(name, value):
         )
     try:
         value = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
+        # OverflowError happens for a Python int too large to represent as a
+        # float (e.g. a CLI argument like --n_tau with hundreds of digits);
+        # it is a value problem for this caller, not a programming error, so
+        # it is normalized into the same ValueError as every other bad input.
         raise ValueError(f"{name} must be a finite number; got {value!r}.") from exc
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite; got {value!r}.")
@@ -99,8 +114,46 @@ def _require_finite(name, value):
 
 
 def chirp_mass(m1_kg, m2_kg):
-    """Return chirp mass in kg for two positive component masses."""
+    """Return chirp mass in kg for two positive component masses.
+
+    This is the *forward* calculation: chirp mass computed directly from
+    already-known component masses. See chirp_mass_from_fdot() for the
+    *observational* inverse -- inferring chirp mass from a measured
+    frequency and its rate of change, the calculation actually used to
+    estimate chirp mass from a detected chirp.
+    """
     return (m1_kg * m2_kg) ** 0.6 / (m1_kg + m2_kg) ** 0.2
+
+
+def chirp_mass_from_fdot(f_hz, fdot_hz_per_s):
+    """Infer chirp mass in kg from an observed GW frequency and df/dt.
+
+    Inverts the same leading-order quadrupole relation used by dfdt():
+
+        df/dt = (96/5) pi^(8/3) (G Mc/c^3)^(5/3) f^(11/3)
+        =>  Mc = (c^3/G) [ (5/96) pi^(-8/3) f^(-11/3) (df/dt) ]^(3/5)
+
+    This is the leading-order version of the relation used observationally
+    to estimate a binary's chirp mass directly from its measured frequency
+    sweep (e.g. in the GW150914 discovery analysis), as distinct from
+    chirp_mass(), which requires already knowing the two component masses.
+    Both f_hz and fdot_hz_per_s must be strictly positive: a gravitational-
+    wave frequency is positive by definition, and an inspiraling binary's
+    GW frequency always increases (df/dt > 0) under this leading-order
+    model.
+    """
+    f_hz = _require_finite("f_hz", f_hz)
+    fdot_hz_per_s = _require_finite("fdot_hz_per_s", fdot_hz_per_s)
+    if f_hz <= 0:
+        raise ValueError("f_hz must be greater than zero.")
+    if fdot_hz_per_s <= 0:
+        raise ValueError(
+            "fdot_hz_per_s must be greater than zero (an inspiraling "
+            "binary's GW frequency always increases under this model)."
+        )
+    Mc_geom = ((5.0 / 96.0) * np.pi ** (-8.0 / 3.0)
+               * f_hz ** (-11.0 / 3.0) * fdot_hz_per_s) ** (3.0 / 5.0)
+    return Mc_geom * c**3 / G
 
 
 def dfdt(f_hz, Mc_kg):
@@ -179,6 +232,16 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     The ringdown is a pedagogical extension, not a physical merger model.
     In particular it should not be interpreted as the generic post-merger
     signal of a binary-neutron-star system.
+
+    API note on integer-valued parameters: ``include_ringdown`` must be a
+    real ``bool`` (not ``0``/``1`` or a numpy bool_-like duck type -- see
+    _require_finite's bool guard, which applies to every other argument
+    here). ``n_ringdown_tau``, ``ringdown_pts``, and (at the driver layer)
+    ``--dpi`` are conceptually integer counts, but this function accepts
+    any integer-*valued* float for them (e.g. ``4000.0``) as a convenience
+    for callers who already have floating-point arithmetic results on
+    hand; each is validated with ``int(value) == value`` and rejected
+    otherwise, then converted to ``int`` before use.
     """
     # Validate scalar inputs before unit conversion.
     m1_msun = _require_finite("m1_msun", m1_msun)
@@ -212,12 +275,31 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     n_ringdown_tau = int(n_ringdown_tau)
     ringdown_pts = int(ringdown_pts)
 
-    m1 = m1_msun * M_sun
-    m2 = m2_msun * M_sun
-    M_total = m1 + m2
-    Mc = chirp_mass(m1, m2)
-    d = d_mpc * MPC_M
-    f_isco_hz = f_isco(M_total)
+    # Extreme-but-technically-finite inputs (e.g. dt or f_start at the
+    # smallest positive subnormal float) can make the derived arithmetic
+    # below overflow even though each individual input passed
+    # _require_finite on its own. Convert that into the same clean
+    # ValueError as every other out-of-range request instead of letting an
+    # OverflowError/ZeroDivisionError escape as a bare traceback.
+    try:
+        m1 = m1_msun * M_sun
+        m2 = m2_msun * M_sun
+        M_total = m1 + m2
+        Mc = chirp_mass(m1, m2)
+        d = d_mpc * MPC_M
+        f_isco_hz = f_isco(M_total)
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            "The requested component masses and/or distance are outside "
+            "the range this leading-order model can compute; use more "
+            "moderate values."
+        ) from exc
+    if not (math.isfinite(M_total) and math.isfinite(Mc) and math.isfinite(d)
+            and math.isfinite(f_isco_hz) and f_isco_hz > 0):
+        raise ValueError(
+            "The requested component masses and/or distance produced a "
+            "non-finite derived quantity; use more moderate values."
+        )
 
     if f_start >= f_isco_hz:
         raise ValueError(
@@ -225,8 +307,20 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
             f"frequency ({f_isco_hz:.3g} Hz) for these masses."
         )
 
-    T_est = inspiral_time(f_start, f_isco_hz, Mc)
-    estimated_steps = math.ceil(T_est / dt)
+    try:
+        T_est = inspiral_time(f_start, f_isco_hz, Mc)
+        estimated_steps = math.ceil(T_est / dt)
+    except (OverflowError, ZeroDivisionError) as exc:
+        raise ValueError(
+            f"f_start={f_start:g} Hz and/or dt={dt:g} s are outside the "
+            "range this leading-order model can compute; use more "
+            "moderate values."
+        ) from exc
+    if not math.isfinite(T_est) or T_est <= 0:
+        raise ValueError(
+            f"f_start={f_start:g} Hz produced a non-finite or non-positive "
+            "estimated inspiral time; use a larger f_start."
+        )
 
     # A sampled waveform cannot represent the highest inspiral frequency if
     # the timestep violates the Nyquist criterion at the ISCO cutoff.  This is
@@ -256,6 +350,7 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     f_list = []
     A_list = []
     h_list = []
+    phase_list = []
 
     t = 0.0
     f = float(f_start)
@@ -268,6 +363,7 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         f_list.append(f)
         A_list.append(A)
         h_list.append(A * np.cos(phase))
+        phase_list.append(phase)
 
         if f >= f_isco_hz:
             break
@@ -306,6 +402,7 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     h_arr = np.asarray(h_list, dtype=float)
     A_arr = np.asarray(A_list, dtype=float)
     f_arr = np.asarray(f_list, dtype=float)
+    phase_arr = np.asarray(phase_list, dtype=float)
 
     # Optional illustrative Schwarzschild ringdown.
     f_qnm = np.nan
@@ -315,15 +412,38 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         # Deliberate toy assumption: 5% of total mass radiated and zero remnant spin.
         M_final = 0.95 * M_total
         f_qnm, tau_qnm = qnm_params(M_final)
-        t_rd = np.linspace(0.0, n_ringdown_tau * tau_qnm, ringdown_pts)
-        h_rd = (A_peak * np.cos(phase_isco + 2.0 * np.pi * f_qnm * t_rd)
-                * np.exp(-t_rd / tau_qnm))
+
+        # A stored ringdown that cannot resolve the QNM oscillation itself
+        # is worse than useless for a teaching plot: at exactly the Nyquist
+        # limit (2 samples/cycle) the waveform aliases, and at --rd_pts=2 it
+        # collapses to a single stored point (see the t_rd[1:] slice below)
+        # that cannot be rendered as a visible line at all, even though the
+        # legend would still claim a ringdown curve is present. Require a
+        # visually adequate sampling rate up front instead of silently
+        # producing a misleading or empty-looking plot.
+        duration = n_ringdown_tau * tau_qnm
+        cycles = duration * f_qnm
+        min_pts_needed = math.ceil(MIN_RINGDOWN_SAMPLES_PER_CYCLE * cycles) + 1
+        if ringdown_pts < min_pts_needed:
+            raise ValueError(
+                f"ringdown_pts={ringdown_pts} is too small to resolve the "
+                f"QNM oscillation (f_QNM={f_qnm:.4g} Hz) over "
+                f"n_ringdown_tau={n_ringdown_tau} decay times; at least "
+                f"{min_pts_needed} points are needed for "
+                f"{MIN_RINGDOWN_SAMPLES_PER_CYCLE} samples per cycle. "
+                "Increase --rd_pts or reduce --n_tau."
+            )
+
+        t_rd = np.linspace(0.0, duration, ringdown_pts)
+        phase_rd = phase_isco + 2.0 * np.pi * f_qnm * t_rd
+        h_rd = A_peak * np.cos(phase_rd) * np.exp(-t_rd / tau_qnm)
 
         # Skip t_rd[0] because the inspiral array already contains the ISCO point.
         t_arr = np.concatenate([t_arr, t_isco + t_rd[1:]])
         h_arr = np.concatenate([h_arr, h_rd[1:]])
         A_arr = np.concatenate([A_arr, np.full(ringdown_pts - 1, np.nan)])
         f_arr = np.concatenate([f_arr, np.full(ringdown_pts - 1, np.nan)])
+        phase_arr = np.concatenate([phase_arr, phase_rd[1:]])
 
     summary = dict(
         m1_msun=m1_msun,
@@ -351,6 +471,7 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         h=h_arr,
         A=A_arr,
         f=f_arr,
+        phase=phase_arr,
         t_isco=t_isco,
         f_isco_hz=f_isco_hz,
         Mc_msun=Mc / M_sun,

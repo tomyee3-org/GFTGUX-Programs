@@ -33,7 +33,10 @@ def _sci_y(ax):
 
 
 def _timestamp_fname(prefix="gw_inspiral"):
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Microsecond resolution avoids two rapid saves in the same directory
+    # (e.g. a scripted parameter sweep) silently colliding and overwriting
+    # each other under the previous second-resolution timestamp.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     return f"{prefix}_{ts}.png"
 
 
@@ -75,6 +78,8 @@ def plot_inspiral(result, outdir=None,
         ann_lines.extend([
             fr"$f_{{\rm QNM}}={s['f_qnm_hz']:.1f}\,\mathrm{{Hz}}$",
             fr"$\tau_{{\rm QNM}}={s['tau_qnm_ms']:.3f}\,\mathrm{{ms}}$",
+            "illustrative ringdown --",
+            "not a physical merger",
         ])
     ann_text = "\n".join(ann_lines)
 

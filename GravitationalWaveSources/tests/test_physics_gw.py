@@ -156,6 +156,13 @@ def ref_qnm(M_kg):
     return 0.3737 / (2.0 * math.pi * scale), scale / 0.0890
 
 
+def ref_dfdt_hz_per_s(f_hz, Mc_kg):
+    """Independent from-scratch copy of the leading-order df/dt relation,
+    coded from the local _G/_C constants rather than importing dfdt()."""
+    Mc_geom = _G * Mc_kg / _C**3
+    return (96.0 / 5.0) * math.pi ** (8.0 / 3.0) * Mc_geom ** (5.0 / 3.0) * f_hz ** (11.0 / 3.0)
+
+
 class HtmlNode:
     """Small dependency-free HTML tree node used for structural Help tests."""
 
@@ -290,7 +297,7 @@ class TestModuleDiscovery(unittest.TestCase):
 # ===========================================================================
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_model_version(self):
-        self.assertEqual(physics.MODEL_VERSION, "1.0.1")
+        self.assertEqual(physics.MODEL_VERSION, "1.1.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -325,6 +332,15 @@ class TestMetadataAndCompatibility(unittest.TestCase):
             with self.subTest(name=name):
                 source = (MODULE_DIR / name).read_text(encoding="utf-8")
                 ast.parse(source, filename=name, feature_version=(3, 10))
+
+    def test_build_id_returns_unknown_when_source_unreadable(self):
+        """A2 regression: in a frozen/zipped/relocated distribution the four
+        core files may not be readable beside physics_gw.py on disk (e.g.
+        packed into a single-file executable). _compute_build_id() must
+        degrade to the documented literal "unknown" rather than raising and
+        preventing the program from running at all."""
+        with mock.patch("builtins.open", side_effect=OSError("simulated frozen distribution")):
+            self.assertEqual(physics._compute_build_id(), "unknown")
 
     def test_version_command(self):
         result = subprocess.run(
@@ -478,6 +494,80 @@ class TestPhysicsIndependentReferences(unittest.TestCase):
             self.assertAlmostEqual(value / ratios[0], 1.0, places=12)
 
 
+# ===========================================================================
+# chirp_mass_from_fdot: the observational inverse (Codex P2-1 / Gemini)
+# ===========================================================================
+class TestChirpMassFromFdot(unittest.TestCase):
+    """chirp_mass_from_fdot() is the leading-order *observational* inference
+    -- Mc from a measured (f, df/dt) -- as distinct from chirp_mass(), which
+    requires already-known component masses. Cross-checked against a
+    from-scratch df/dt reference (ref_dfdt_hz_per_s, coded independently of
+    physics_gw.dfdt) by injecting a known Mc, generating fdot from it, and
+    confirming the inverse recovers the same Mc."""
+
+    def test_recovers_injected_chirp_mass_at_several_frequencies(self):
+        Mc_kg = ref_chirp_mass_kg(1.4 * _MSUN, 1.4 * _MSUN)
+        for f in (20.0, 100.0, 500.0, 1000.0):
+            with self.subTest(f=f):
+                fdot = ref_dfdt_hz_per_s(f, Mc_kg)
+                recovered = physics.chirp_mass_from_fdot(f, fdot)
+                self.assertAlmostEqual(recovered / Mc_kg, 1.0, places=9)
+
+    def test_recovers_injected_chirp_mass_for_bbh_case(self):
+        Mc_kg = ref_chirp_mass_kg(36.0 * _MSUN, 29.0 * _MSUN)
+        fdot = ref_dfdt_hz_per_s(50.0, Mc_kg)
+        recovered = physics.chirp_mass_from_fdot(50.0, fdot)
+        self.assertAlmostEqual(recovered / Mc_kg, 1.0, places=9)
+
+    def test_round_trips_exactly_against_dfdt(self):
+        Mc_kg = 1.2188 * physics.M_sun
+        f = 20.0
+        fdot = physics.dfdt(f, Mc_kg)
+        recovered = physics.chirp_mass_from_fdot(f, fdot)
+        self.assertAlmostEqual(recovered / Mc_kg, 1.0, places=12)
+
+    def test_matches_default_run_via_finite_difference_of_two_samples(self):
+        """Emulates the EXP-7 student workflow: two (t, f) samples from the
+        unmodified default run (as a student would read from --csvdir
+        output), a two-point finite-difference fdot estimate, then
+        inversion -- must recover the run's own printed chirp mass."""
+        result = physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
+        t, f = result["t"], result["f"]
+        f1, f2 = f[0], f[10]
+        t1, t2 = t[0], t[10]
+        fdot_est = (f2 - f1) / (t2 - t1)
+        f_mid = 0.5 * (f1 + f2)
+        Mc_kg = physics.chirp_mass_from_fdot(f_mid, fdot_est)
+        self.assertEqual(f"{Mc_kg / physics.M_sun:.4f}", "1.2188")
+        self.assertAlmostEqual(Mc_kg / physics.M_sun, result["summary"]["Mc_msun"], places=3)
+
+    def test_f_must_be_positive(self):
+        for value in (0.0, -1.0, -100.0):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "f_hz must be greater than zero"):
+                    physics.chirp_mass_from_fdot(value, 0.05)
+
+    def test_fdot_must_be_positive(self):
+        for value in (0.0, -1e-3):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "fdot_hz_per_s must be greater than zero"):
+                    physics.chirp_mass_from_fdot(20.0, value)
+
+    def test_rejects_non_finite_and_non_numeric(self):
+        for value in (math.nan, math.inf, -math.inf, None, [], {}, "abc", 1 + 2j):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    physics.chirp_mass_from_fdot(value, 0.05)
+                with self.assertRaises(ValueError):
+                    physics.chirp_mass_from_fdot(20.0, value)
+
+    def test_bool_is_rejected_not_silently_coerced(self):
+        with self.assertRaisesRegex(ValueError, "bool is not"):
+            physics.chirp_mass_from_fdot(True, 0.05)
+        with self.assertRaisesRegex(ValueError, "bool is not"):
+            physics.chirp_mass_from_fdot(20.0, False)
+
+
 class TestDefaultAndBBHReferenceCase(unittest.TestCase):
     """Bit-for-bit-independent hand recomputation of the two headline
     example cases quoted throughout the Help file, computed here from raw
@@ -616,7 +706,7 @@ class TestRK4Stepper(unittest.TestCase):
 class TestIntegrateInspiralNominal(unittest.TestCase):
     def test_structure_and_finiteness_pure_inspiral(self):
         result = physics.integrate_inspiral(36.0, 29.0, 440.0, dt=1e-4, f_start=20.0)
-        for key in ("t", "h", "A", "f"):
+        for key in ("t", "h", "A", "f", "phase"):
             self.assertTrue(np.all(np.isfinite(result[key])), key)
         self.assertEqual(result["t"][0], 0.0)
         self.assertTrue(np.all(np.diff(result["t"]) >= 0.0))
@@ -635,13 +725,45 @@ class TestIntegrateInspiralNominal(unittest.TestCase):
         self.assertEqual(s["model_version"], physics.MODEL_VERSION)
         self.assertEqual(s["build_id"], physics.BUILD_ID)
 
-    def test_h_equals_amplitude_times_cosine_of_accumulated_phase(self):
-        """h(t) = A(t) cos(Phi(t)) is an architectural invariant: A and h
-        must be evaluated from the same stored (f, phase) pair."""
+    def test_envelope_bounds_the_waveform_amplitude(self):
+        """Weaker envelope-only check: |h| <= A everywhere on the inspiral.
+        This alone would also pass for h=0, h=0.5*A, or an incorrect phase
+        evolution -- see test_h_equals_amplitude_times_cosine_of_phase_
+        exactly below for the actual equation check (P3-2 regression: this
+        test previously carried the "...cosine_of_accumulated_phase" name
+        while only ever testing this inequality)."""
         result = physics.integrate_inspiral(36.0, 29.0, 440.0, dt=1e-4, f_start=20.0)
-        # Cannot recover phase directly from outputs, but A must always be
-        # within [-1, 1] x itself of h given |cos| <= 1.
         self.assertTrue(np.all(np.abs(result["h"]) <= result["A"] * (1.0 + 1e-9)))
+
+    def test_h_equals_amplitude_times_cosine_of_phase_exactly(self):
+        """P3-2 regression: with the accumulated GW phase now exposed as
+        result["phase"], directly assert the architectural invariant
+        h(t) = A(t) cos(Phi(t)) on the inspiral segment, rather than only
+        the much weaker |h| <= A bound. This would fail for h=0, h=0.5*A*
+        cos(phase), or a wrong phase array, none of which the envelope-only
+        check above can catch."""
+        result = physics.integrate_inspiral(36.0, 29.0, 440.0, dt=1e-4, f_start=20.0)
+        insp_mask = np.isfinite(result["f"])
+        expected_h = result["A"][insp_mask] * np.cos(result["phase"][insp_mask])
+        np.testing.assert_array_equal(result["h"][insp_mask], expected_h)
+
+    def test_ringdown_h_equals_peak_amplitude_times_damped_cosine_of_phase(self):
+        """Same architectural invariant on the ringdown segment: h_rd(t) =
+        A_peak * cos(phase_rd(t)) * exp(-t_rd/tau_qnm), independently
+        recomputed here from the returned phase, t_isco, f_qnm, and
+        tau_qnm_ms rather than re-deriving the ringdown internally."""
+        result = physics.integrate_inspiral(
+            36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+            include_ringdown=True, n_ringdown_tau=6, ringdown_pts=4000,
+        )
+        insp_mask = np.isfinite(result["f"])
+        rd_mask = ~insp_mask
+        s = result["summary"]
+        A_peak = result["A"][insp_mask][-1]
+        tau_qnm_s = s["tau_qnm_ms"] * 1e-3
+        t_rd = result["t"][rd_mask] - result["t_isco"]
+        expected_h_rd = A_peak * np.cos(result["phase"][rd_mask]) * np.exp(-t_rd / tau_qnm_s)
+        np.testing.assert_allclose(result["h"][rd_mask], expected_h_rd, rtol=1e-12)
 
     def test_ringdown_segment_marks_f_and_a_as_nan_but_h_and_t_finite(self):
         result = physics.integrate_inspiral(
@@ -857,6 +979,78 @@ class TestIntegrateInspiralValidation(unittest.TestCase):
             physics.MAX_RINGDOWN_POINTS - 1,
         )
 
+    def test_ringdown_samples_per_cycle_below_threshold_is_rejected(self):
+        """P1-1 regression: Codex's exact reproducer grid (36+29 Msun,
+        dt=1e-4) of settings that were previously accepted but produced an
+        aliased or effectively invisible (single-point) ringdown."""
+        for n_tau, rd_pts in ((6, 2), (6, 9), (6, 10), (10_000, 4_000)):
+            with self.subTest(n_ringdown_tau=n_tau, ringdown_pts=rd_pts):
+                with self.assertRaisesRegex(ValueError, "too small to resolve the"):
+                    physics.integrate_inspiral(
+                        36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+                        include_ringdown=True, n_ringdown_tau=n_tau, ringdown_pts=rd_pts,
+                    )
+
+    def test_ringdown_samples_per_cycle_at_and_above_threshold_is_accepted(self):
+        """Boundary check for the 36+29 Msun / n_ringdown_tau=6 case: the
+        computed minimum ringdown_pts (34, independently recomputed here
+        from qnm_params rather than hardcoded) must be the exact accept/
+        reject boundary."""
+        f_qnm, tau_qnm = physics.qnm_params(0.95 * 65.0 * physics.M_sun)
+        min_pts_needed = math.ceil(physics.MIN_RINGDOWN_SAMPLES_PER_CYCLE
+                                    * 6 * tau_qnm * f_qnm) + 1
+        self.assertEqual(min_pts_needed, 34)
+        with self.assertRaisesRegex(ValueError, "too small to resolve the"):
+            physics.integrate_inspiral(
+                36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+                include_ringdown=True, n_ringdown_tau=6, ringdown_pts=min_pts_needed - 1,
+            )
+        for rd_pts in (min_pts_needed, min_pts_needed + 1):
+            physics.integrate_inspiral(
+                36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+                include_ringdown=True, n_ringdown_tau=6, ringdown_pts=rd_pts,
+            )  # must not raise
+
+    def test_ringdown_default_settings_remain_valid(self):
+        """The documented default (--n_tau 6 --rd_pts 4000) must remain
+        comfortably accepted after the P1-1 fix -- for the 36+29 case this
+        needs only 34 points (see above), far below the 4000 default."""
+        physics.integrate_inspiral(
+            36.0, 29.0, 440.0, dt=1e-4, f_start=20.0,
+            include_ringdown=True, n_ringdown_tau=6, ringdown_pts=4000,
+        )  # must not raise
+
+    def test_huge_integer_n_ringdown_tau_rd_pts_produce_clean_value_error(self):
+        """P2-2 regression: a CLI-style huge Python int (401 digits, as in
+        Codex's reproducer) previously escaped as a bare OverflowError from
+        float() inside _require_finite; must now be one clean ValueError."""
+        huge = 10 ** 400
+        with self.assertRaises(ValueError):
+            physics.integrate_inspiral(
+                1.4, 1.4, 400.0, dt=2e-4, f_start=20.0,
+                include_ringdown=True, n_ringdown_tau=huge, ringdown_pts=4000,
+            )
+        with self.assertRaises(ValueError):
+            physics.integrate_inspiral(
+                1.4, 1.4, 400.0, dt=2e-4, f_start=20.0,
+                include_ringdown=True, n_ringdown_tau=6, ringdown_pts=huge,
+            )
+
+    def test_subnormal_dt_produces_clean_value_error(self):
+        """P2-2 regression: --dt 5e-324 previously escaped as a bare
+        OverflowError ("cannot convert float infinity to integer") from
+        math.ceil(T_est / dt); must now be one clean ValueError."""
+        with self.assertRaises(ValueError):
+            physics.integrate_inspiral(1.4, 1.4, 400.0, dt=5e-324, f_start=20.0)
+
+    def test_subnormal_f_start_produces_clean_value_error(self):
+        """P2-2 regression: --f_start 5e-324 previously escaped as a bare
+        OverflowError ("Numerical result out of range") from
+        f_start**(-8/3) inside inspiral_time(); must now be one clean
+        ValueError."""
+        with self.assertRaises(ValueError):
+            physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=5e-324)
+
     def test_non_finite_rk4_state_raises_runtime_error_with_dt_hint(self):
         # Deterministically force the internal isfinite guard by making the
         # frequency derivative blow up, rather than hunting for organically
@@ -895,6 +1089,23 @@ class TestValidatePlotInputs(unittest.TestCase):
             driver._validate_plot_inputs(None, None, 0.4, True)
         with self.assertRaisesRegex(ValueError, "bool is not"):
             driver._validate_plot_inputs(None, None, True, 150)
+
+    def test_dpi_upper_bound_is_enforced(self):
+        """P2-4 regression: --dpi previously had no upper bound at all, so
+        an oversized (but not overflow-triggering) request could allocate a
+        huge in-memory image before any error could be produced."""
+        with self.assertRaisesRegex(ValueError, "dpi must not exceed 600"):
+            driver._validate_plot_inputs(None, None, 0.4, driver.MAX_DPI + 1)
+        # The documented ceiling itself must still be accepted.
+        t_before, t_after, lw, dpi = driver._validate_plot_inputs(None, None, 0.4, driver.MAX_DPI)
+        self.assertEqual(dpi, driver.MAX_DPI)
+
+    def test_huge_integer_dpi_produces_clean_value_error(self):
+        """P2-2 regression: a 401-digit --dpi previously escaped as a bare
+        OverflowError from float() inside _finite_number; must now be one
+        clean ValueError (and, independently, still rejected by MAX_DPI)."""
+        with self.assertRaises(ValueError):
+            driver._validate_plot_inputs(None, None, 0.4, 10 ** 400)
 
     def test_zoom_widths_must_be_non_negative_or_none(self):
         self.assertEqual(driver._validate_plot_inputs(None, None, 0.4, 150)[:2], (None, None))
@@ -941,6 +1152,65 @@ class TestDriverRun(unittest.TestCase):
             show.assert_called_once_with()
             saved = list(Path(outdir).glob("*.png"))
             self.assertEqual(len(saved), 1)
+
+    def test_run_saves_csv_in_addition_to_displaying_when_csvdir_given(self):
+        """P2-1/Gemini regression: --csvdir gives students a no-programming
+        route to the numerical arrays (e.g. for chirp-mass extraction)."""
+        import csv as csv_module
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(plt, "show"):
+                result = driver.run(
+                    m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
+                    dt=2e-4, f_start=20.0, csvdir=csvdir,
+                )
+            saved = list(Path(csvdir).glob("*.csv"))
+            self.assertEqual(len(saved), 1)
+            with saved[0].open(newline="", encoding="utf-8") as handle:
+                rows = list(csv_module.reader(handle))
+            self.assertEqual(rows[0], ["t_s", "f_hz", "A", "h"])
+            self.assertEqual(len(rows) - 1, result["summary"]["inspiral_steps"])
+            self.assertEqual(float(rows[1][0]), 0.0)
+            self.assertEqual(float(rows[1][1]), 20.0)
+            # Full double precision is preserved (not truncated/rounded).
+            self.assertAlmostEqual(float(rows[-1][1]), result["f"][-1], places=9)
+            self.assertAlmostEqual(float(rows[-1][3]), result["h"][-1], places=9)
+
+    def test_csv_blanks_ringdown_rows_with_no_inspiral_f_or_a(self):
+        import csv as csv_module
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(plt, "show"):
+                driver.run(
+                    m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
+                    dt=1e-4, f_start=20.0, csvdir=csvdir,
+                    include_ringdown=True, n_ringdown_tau=6, ringdown_pts=4000,
+                )
+            saved = list(Path(csvdir).glob("*.csv"))
+            self.assertEqual(len(saved), 1)
+            with saved[0].open(newline="", encoding="utf-8") as handle:
+                rows = list(csv_module.reader(handle))
+            data_rows = rows[1:]
+            blank_f_rows = [row for row in data_rows if row[1] == ""]
+            self.assertTrue(blank_f_rows)
+            for row in blank_f_rows:
+                self.assertEqual(row[2], "")  # A also blank on ringdown rows
+                self.assertNotEqual(row[0], "")  # t always present
+                self.assertNotEqual(row[3], "")  # h always present
+
+    def test_csv_timestamp_filename_has_microsecond_resolution(self):
+        """P3-4 regression, driver-layer counterpart to the plot_gw check:
+        the CSV filename must also carry microsecond resolution."""
+        name = driver._timestamp_fname()
+        self.assertRegex(name, r"^gw_inspiral_\d{8}_\d{6}_\d{6}\.csv$")
+
+    def test_no_csvdir_does_not_write_a_csv_file(self):
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(plt, "show"):
+                driver.run(m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
+                           dt=1e-4, f_start=20.0)
+            self.assertEqual(list(Path(csvdir).glob("*.csv")), [])
 
 
 # ===========================================================================
@@ -1037,6 +1307,33 @@ class TestPlotting(unittest.TestCase):
         texts = [t.get_text() for t in ax1.texts]
         self.assertTrue(any("QNM" in t for t in texts))
 
+    def test_ringdown_annotation_states_not_a_physical_merger(self):
+        """A3/A4 regression: the plot itself (not only the Help file) must
+        carry a prominent reminder that the ringdown is illustrative, so a
+        viewer of the saved PNG alone (without the Help text) is not misled
+        into reading it as a physical merger-ringdown continuation."""
+        result = _synthetic_result(include_ringdown=True)
+        fig = self._render_and_capture(result)
+        ax1 = fig.axes[0]
+        texts = " ".join(t.get_text() for t in ax1.texts)
+        self.assertIn("illustrative ringdown", texts)
+        self.assertIn("not a physical merger", texts)
+
+    def test_no_ringdown_annotation_when_ringdown_not_included(self):
+        result = _synthetic_result(include_ringdown=False)
+        fig = self._render_and_capture(result)
+        ax1 = fig.axes[0]
+        texts = " ".join(t.get_text() for t in ax1.texts)
+        self.assertNotIn("illustrative ringdown", texts)
+
+    def test_png_timestamp_filename_has_microsecond_resolution(self):
+        """P3-4 regression: the previous second-resolution timestamp let two
+        rapid programmatic saves to the same --outdir collide and silently
+        overwrite each other; the filename must now carry a 6-digit
+        microsecond field."""
+        name = plotting._timestamp_fname()
+        self.assertRegex(name, r"^gw_inspiral_\d{8}_\d{6}_\d{6}\.png$")
+
     def test_zoom_interval_rejects_an_empty_window(self):
         # A window fully outside the data range collapses to empty (hi<=lo):
         with self.assertRaisesRegex(ValueError, "no plotted data"):
@@ -1099,6 +1396,15 @@ class TestCLI(unittest.TestCase):
             ("--rd_pts", "20000000", "--ringdown"): "must not exceed 500,000",
             ("--dpi", "0"): "dpi must be a positive integer.",
             ("--lw", "-1"): "lw must be greater than zero.",
+            ("--dpi", "601"): "dpi must not exceed 600",
+            ("--ringdown", "--n_tau", "6", "--rd_pts", "2",
+             "--m1", "36", "--m2", "29", "--d", "440",
+             "--dt", "1e-4"): "too small to resolve the",
+            ("--n_tau", "1" + "0" * 400, "--ringdown"): None,
+            ("--rd_pts", "1" + "0" * 400, "--ringdown"): None,
+            ("--dpi", "1" + "0" * 400): None,
+            ("--dt", "5e-324",): None,
+            ("--f_start", "5e-324",): None,
         }
         for args, expected_fragment in cases.items():
             with self.subTest(args=args):
@@ -1108,7 +1414,8 @@ class TestCLI(unittest.TestCase):
                 stderr_lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
                 self.assertEqual(len(stderr_lines), 1)
                 self.assertTrue(stderr_lines[0].startswith("GravitationalWaveSources: "))
-                self.assertIn(expected_fragment, stderr_lines[0])
+                if expected_fragment is not None:
+                    self.assertIn(expected_fragment, stderr_lines[0])
 
     def test_dpi_non_integer_is_rejected_by_argparse_itself(self):
         result = self._run(["--dpi", "150.5"], timeout=15)
@@ -1135,6 +1442,32 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertNotIn("PNG saved", result.stdout)
             self.assertEqual(list(Path(outdir).glob("*.png")), [])
+
+    def test_csvdir_saves_a_csv_end_to_end(self):
+        with tempfile.TemporaryDirectory() as csvdir:
+            result = self._run(
+                ["--m1", "36", "--m2", "29", "--d", "440", "--dt", "1e-4",
+                 "--csvdir", csvdir],
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("CSV saved ->", result.stdout)
+            saved = list(Path(csvdir).glob("*.csv"))
+            self.assertEqual(len(saved), 1)
+            self.assertEqual(
+                saved[0].read_text(encoding="utf-8").splitlines()[0],
+                "t_s,f_hz,A,h",
+            )
+
+    def test_dpi_at_max_dpi_is_accepted_end_to_end(self):
+        with tempfile.TemporaryDirectory() as outdir:
+            result = self._run(
+                ["--m1", "36", "--m2", "29", "--d", "440", "--dt", "1e-4",
+                 "--outdir", outdir, "--dpi", "600"],
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(list(Path(outdir).glob("*.png"))), 1)
 
 
 # ===========================================================================
@@ -1185,7 +1518,7 @@ class TestHelpFile(unittest.TestCase):
             "--m1": 1.4, "--m2": 1.4, "--d": 400.0, "--dt": 2e-4,
             "--f_start": 20.0, "--ringdown": False, "--n_tau": 6,
             "--rd_pts": 4000, "--t_before": None, "--t_after": None,
-            "--lw": 0.4, "--dpi": 150, "--outdir": None,
+            "--lw": 0.4, "--dpi": 150, "--outdir": None, "--csvdir": None,
         }
         self.assertEqual(argparse_defaults, expected)
 
@@ -1198,6 +1531,32 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(int(rows["--rd_pts"][0]), argparse_defaults["--rd_pts"])
         self.assertEqual(float(rows["--lw"][0]), argparse_defaults["--lw"])
         self.assertEqual(int(rows["--dpi"][0]), argparse_defaults["--dpi"])
+
+    def test_help_states_python_version_requirement(self):
+        """P3-3 regression: the Help previously never told students which
+        Python version is required, even though the test suite already
+        confirmed 3.10 syntax compatibility."""
+        self.assertIn("Python 3.10", self.html)
+
+    def test_help_documents_ringdown_samples_per_cycle_requirement(self):
+        """P1-1 regression: the parameter table and safeguards note
+        previously described --rd_pts as valid over "2 through 500,000"
+        alone, with no mention that --n_tau and --rd_pts are jointly
+        constrained by the QNM sampling requirement."""
+        self.assertIn("samples per QNM", self.html)
+
+    def test_help_documents_dpi_upper_bound(self):
+        """P2-4 regression: the Help previously described --dpi as simply
+        "a positive integer" with no documented upper bound."""
+        self.assertIn("600", self.html)
+        params_text = normalized_text(nodes_by_id(self.root, "parameters")[0])
+        self.assertIn("1 through 600", params_text)
+
+    def test_help_documents_csvdir(self):
+        """P2-1/P2-3/Gemini regression: --csvdir must be documented as a
+        parameter and referenced from the chirp-mass-extraction and
+        convergence exercises."""
+        self.assertIn("--csvdir", self.html)
 
     def test_help_documents_mathjax_connectivity_plainly(self):
         self.assertIn("cdn.jsdelivr.net/npm/mathjax@3", self.html)
@@ -1234,10 +1593,11 @@ class TestHelpFile(unittest.TestCase):
             ("EXP-4 · intermediate", "Chirp Mass Controls the Sweep"),
             ("EXP-5 · intermediate", "Mass Ratio at Fixed Total Mass"),
             ("EXP-6 · intermediate", "Test the Inspiral-Time Power Law"),
-            ("EXP-7 · intermediate/advanced", "Numerical Convergence"),
-            ("EXP-8 · advanced", "Illustrative Black-Hole Ringdown"),
-            ("EXP-9 · advanced", "QNM Scaling with Remnant Mass"),
-            ("EXP-10 · synthesis", "Map the Model's Domain of Validity"),
+            ("EXP-7 · intermediate", "Extract Chirp Mass from the Frequency Sweep"),
+            ("EXP-8 · intermediate/advanced", "Numerical Convergence"),
+            ("EXP-9 · advanced", "Illustrative Black-Hole Ringdown"),
+            ("EXP-10 · advanced", "QNM Scaling with Remnant Mass"),
+            ("EXP-11 · synthesis", "Map the Model's Domain of Validity"),
         ]
         self.assertEqual(actual, expected)
 

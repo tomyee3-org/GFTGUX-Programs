@@ -4,10 +4,22 @@ driver_gw.py
 Orchestration layer for GravitationalWaveSources.
 """
 
+import csv
 import math
+import os
+from datetime import datetime
+
 import numpy as np
 import physics_gw as phys
 import plot_gw as viz
+
+#: Conservative upper bound on --dpi. The figure is a fixed 12x9 inches, so
+#: pixel area grows as dpi^2; an unbounded dpi lets a single typo (or a
+#: deliberately adversarial value) request a multi-hundred-megabyte to
+#: multi-gigabyte in-memory image before any useful error can be produced.
+#: 600 dpi already exceeds anything these instructional plots need (a
+#: 7200x5400 pixel PNG), so this is not expected to constrain any normal use.
+MAX_DPI = 600
 
 
 def _finite_number(name, value):
@@ -24,7 +36,10 @@ def _finite_number(name, value):
         )
     try:
         value = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
+        # See the matching comment in physics_gw._require_finite: a Python
+        # int too large to represent as a float is a value problem for this
+        # caller, not a programming error.
         raise ValueError(f"{name} must be a finite number.") from exc
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite.")
@@ -48,6 +63,12 @@ def _validate_plot_inputs(t_before, t_after, lw, dpi):
         raise ValueError("lw must be greater than zero.")
     if int(dpi) != dpi or dpi <= 0:
         raise ValueError("dpi must be a positive integer.")
+    if dpi > MAX_DPI:
+        raise ValueError(
+            f"dpi must not exceed {MAX_DPI}; the figure is a fixed 12x9in, "
+            f"so a larger value requests an excessively large PNG. Reduce "
+            "--dpi."
+        )
 
     normalized_zoom = []
     for name, value in (("t_before", t_before), ("t_after", t_after)):
@@ -62,9 +83,42 @@ def _validate_plot_inputs(t_before, t_after, lw, dpi):
     return normalized_zoom[0], normalized_zoom[1], lw, int(dpi)
 
 
+def _timestamp_fname(prefix="gw_inspiral", ext="csv"):
+    # Microsecond resolution avoids two rapid saves in the same directory
+    # (e.g. a scripted parameter sweep) silently colliding and overwriting
+    # each other under the previous second-resolution timestamp.
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return f"{prefix}_{ts}.{ext}"
+
+
+def _write_csv(result, csvdir):
+    """Save t, f, A, h as a plain tabular CSV (blank cells where the
+    ringdown segment leaves f/A undefined -- see integrate_inspiral).
+
+    This gives students a documented, no-programming-required route to the
+    numerical arrays behind the plot -- e.g. for the chirp-mass-extraction
+    exercise (estimate df/dt between two nearby rows, then invert with
+    physics_gw.chirp_mass_from_fdot()) or for EXP-8's fixed-time RK4
+    convergence comparison -- without requiring every student to write a
+    Python import snippet.
+    """
+    os.makedirs(csvdir, exist_ok=True)
+    fpath = os.path.join(csvdir, _timestamp_fname())
+    with open(fpath, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["t_s", "f_hz", "A", "h"])
+        for t, f, A, h in zip(result["t"], result["f"], result["A"], result["h"]):
+            writer.writerow([
+                f"{float(v):.17g}" if math.isfinite(v) else ""
+                for v in (t, f, A, h)
+            ])
+    print(f"[driver_gw] CSV saved -> {fpath}")
+    return fpath
+
+
 def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
         dt=2e-4, f_start=20.0,
-        outdir=None,
+        outdir=None, csvdir=None,
         t_before=None, t_after=None, lw=0.4,
         include_ringdown=False,
         n_ringdown_tau=6, ringdown_pts=4000,
@@ -85,6 +139,9 @@ def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
     )
 
     _print_summary(result["summary"])
+
+    if csvdir is not None:
+        _write_csv(result, csvdir)
 
     print("[driver_gw] Rendering figure ...")
     viz.plot_inspiral(
