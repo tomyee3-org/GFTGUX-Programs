@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.1.1"
+MODEL_VERSION = "1.1.2"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -105,7 +105,9 @@ R_sun   = 6.957e8               # m      (IAU nominal solar radius)
 L_sun   = 3.828e26              # W      (IAU nominal solar luminosity)
 TEFF_SUN = 5772.0               # K      (IAU nominal solar effective temp.)
 
-YEAR    = 3.155_693_0e7         # s      (Julian year 365.25 d)
+YEAR    = 365.25 * 86400.0      # s      (Julian year, exactly 365.25 d;
+                                 #         IAU-recommended definition of a
+                                 #         year for astronomical ages)
 GYR     = 1.0e9 * YEAR
 
 EPS_NUC = 0.007 * c**2          # J kg^-1 released turning H into He
