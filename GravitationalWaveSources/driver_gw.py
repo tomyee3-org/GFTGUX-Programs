@@ -7,6 +7,7 @@ Orchestration layer for GravitationalWaveSources.
 import csv
 import math
 import os
+import tempfile
 from datetime import datetime, timezone
 
 import numpy as np
@@ -83,102 +84,173 @@ def _validate_plot_inputs(t_before, t_after, lw, dpi):
     return normalized_zoom[0], normalized_zoom[1], lw, int(dpi)
 
 
-def _timestamp_fname(prefix="gw_inspiral", ext="csv"):
-    # Microsecond resolution makes two rapid saves in the same directory
-    # (e.g. a scripted parameter sweep) collide far less often than under
-    # the previous second-resolution timestamp, but does not make a
-    # collision impossible (a coarser OS clock, two calls landing in the
-    # same microsecond, or a clock adjustment can still repeat a value).
-    # _reserve_unique_path() below is what actually guarantees no silent
-    # overwrite; this function only picks the first candidate name.
-    #
-    # Audit3 (Gemini): this uses UTC (not local time) so a filename's
-    # embedded timestamp can be compared directly against the UTC
-    # export_timestamp_utc field inside the CSV's own metadata block,
-    # without a reader needing to know or convert the local timezone this
-    # program happened to run in.
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+def _timestamp_fname(now, prefix="gw_inspiral", ext="csv"):
+    """Format an already-captured aware UTC datetime as a
+    "prefix_YYYYMMDD_HHMMSS_ffffff.ext" filename.
+
+    Audit4 (Codex P3-1): this now takes the instant to format as an
+    explicit argument rather than calling datetime.now() itself, so a
+    caller that also needs that same instant elsewhere (e.g. _write_csv()'s
+    export_timestamp_utc metadata field) can capture it exactly once and
+    reuse it for both the filename and the metadata, instead of two
+    independent datetime.now() calls that can straddle a second or date
+    boundary and never quite agree.
+
+    Microsecond resolution makes two rapid saves in the same directory
+    (e.g. a scripted parameter sweep) collide far less often than under
+    the previous second-resolution timestamp, but does not make a
+    collision impossible (a coarser OS clock, two calls landing in the
+    same microsecond, or a clock adjustment can still repeat a value).
+    _publish_atomically() below is what actually guarantees no silent
+    overwrite; this function only formats the first candidate name.
+
+    Audit3 (Gemini): this uses UTC (not local time) so a filename's
+    embedded timestamp can be compared directly against the UTC
+    export_timestamp_utc field inside the CSV's own metadata block,
+    without a reader needing to know or convert the local timezone this
+    program happened to run in.
+    """
+    ts = now.strftime("%Y%m%d_%H%M%S_%f")
     return f"{prefix}_{ts}.{ext}"
 
 
-def _reserve_unique_path(directory, prefix, ext, max_attempts=1000):
-    """Atomically claim a not-yet-existing "prefix_timestamp[_n].ext" path.
+def _create_private_temp_file(directory, ext):
+    """Securely create an empty, randomly-named temporary file in
+    `directory` to build one artifact's content into before publication.
 
-    Audit2 (Copilot A2-3) correctly points out that a microsecond-resolution
-    timestamp only reduces, rather than eliminates, the chance that two
-    writes pick the same filename (a coarser effective clock resolution on
-    some platforms, two calls landing in the same microsecond, concurrent
-    processes, or a clock adjustment can still repeat a value) -- and an
-    ordinary open(path, "w") would then silently overwrite the earlier
-    file. This claims the path with O_CREAT|O_EXCL, which fails atomically
-    if the path already exists, and retries with a "_1", "_2", ... suffix
-    until an unclaimed name is found.
-
-    This only reserves the *name*: it guarantees no two callers walk away
-    believing they each own the same final path, but the reserved file
-    itself is empty. Audit3 (Codex P2-1 / Copilot A3-6) correctly pointed
-    out that an earlier version of this project both reserved the name AND
-    treated that as the file to write content into later by reopening its
-    path -- which is a real gap (a failure between reservation and the
-    later open/write leaves an empty file with no cleanup) and also made
-    the "no TOCTOU race" claim overstated (the guarantee covers claiming
-    the name, not a later reopen of that same path). Callers must not
-    write content directly into the path this function returns; write into
-    a temporary path derived from it instead, and atomically replace it
-    into place only once the content write has fully succeeded -- see
-    _write_csv() and plot_gw.plot_inspiral() for that pattern, and
-    _publish_or_cleanup() below for the shared cleanup half of it.
+    Audit4 (Codex P2-1): the previous design wrote content to a
+    caller-predictable "<final-name>.tmp" path. That path is guessable in
+    advance (it is derived from the same timestamp as the eventual public
+    name) and was opened with an ordinary open(path, "w"), which follows a
+    pre-existing symlink at that path rather than refusing to -- a
+    pre-planted symlink at the guessed .tmp name could redirect this
+    program's write to overwrite an unrelated file. tempfile.mkstemp()
+    instead draws its filename from a wide random namespace unrelated to
+    any published name and creates it with O_CREAT|O_EXCL (refusing to
+    follow an existing path/symlink), so nothing else on the system can
+    anticipate or pre-plant a symlink at this name.
     """
-    base = _timestamp_fname(prefix=prefix, ext=ext)
+    fd, tmp_path = tempfile.mkstemp(prefix=".gw_tmp_", suffix=f".{ext}", dir=directory)
+    os.close(fd)
+    return tmp_path
+
+
+def _fsync_directory(directory):
+    """Best-effort fsync of a directory's own metadata after a publish, so
+    the newly published directory entry is more likely to survive a crash
+    that happens shortly afterward.
+
+    This is deliberately best-effort, not required for correctness: the
+    absent-or-complete guarantee in _publish_atomically() below holds
+    regardless of whether this succeeds. Not every platform supports
+    opening a directory this way (notably Windows, where os.open() on a
+    directory raises), so failure here is silently ignored rather than
+    treated as an error -- it only affects durability across a crash
+    landing in the narrow window immediately after publication, which this
+    project does not claim to guarantee in the first place (see the
+    docstring on _publish_atomically for exactly what is and is not
+    promised).
+    """
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def _publish_atomically(tmp_path, directory, prefix, ext, now, max_attempts=1000):
+    """Publish the already-fully-written file at tmp_path under a fresh
+    "prefix_timestamp[_n].ext" public name in `directory`, without ever
+    creating that public name before the content is complete.
+
+    Audit4 (Codex P2-1): the previous design (see _reserve_unique_path in
+    earlier revisions) created the *final* public filename itself, empty,
+    as a reservation placeholder before any content existed, then wrote
+    content elsewhere and used os.replace() to overwrite that placeholder.
+    Between reservation and replace, the public path was visibly present
+    with 0 bytes -- observable by a directory watcher, file browser, or a
+    student opening the file mid-write -- and a process killed in that
+    window left exactly that misleading zero-byte file behind permanently.
+    This function never creates the public path until it is already the
+    finished file: os.link() creates a second name (this one) pointing at
+    tmp_path's already-complete content, and fails atomically with
+    FileExistsError if the candidate name is already taken rather than
+    silently replacing it -- so a collision is detected and retried with a
+    "_1", "_2", ... suffix at the actual publish operation, not merely at
+    an earlier placeholder claim. At every instant an external observer
+    could inspect `directory`, the public name is therefore either
+    completely absent or the complete, correctly named file -- never a
+    partial or empty one. os.link() requires tmp_path and the destination
+    to be on the same filesystem, which holds here because
+    _create_private_temp_file() always creates tmp_path inside this same
+    `directory`.
+
+    Audit4 (Copilot A4-1): as with any atomicity claim built on a single
+    filesystem operation, this holds specifically on filesystems that
+    implement POSIX hard-link/rename semantics as the OS documents them
+    (the ordinary case for local Linux/macOS/Windows-NTFS filesystems this
+    program is expected to run on) -- not as a claim that spans every
+    filesystem a Python program could conceivably be pointed at (e.g. some
+    network or FAT-family filesystems weaken these guarantees).
+
+    This guarantees atomicity/visibility, not full crash durability: an
+    fsync of file content is the caller's responsibility (see _write_csv's
+    explicit fsync and the note on the plot_gw counterpart), and
+    _fsync_directory() above is only a best-effort attempt to make the new
+    directory entry itself durable, not a guaranteed one.
+    """
+    base = _timestamp_fname(now, prefix=prefix, ext=ext)
     stem = base[: -(len(ext) + 1)]  # strip the trailing ".<ext>"
     for attempt in range(max_attempts):
         candidate = f"{stem}.{ext}" if attempt == 0 else f"{stem}_{attempt}.{ext}"
         path = os.path.join(directory, candidate)
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.link(tmp_path, path)
         except FileExistsError:
             continue
-        os.close(fd)
-        return path
-    raise RuntimeError(
-        f"Could not reserve a unique output filename in {directory!r} "
-        f"after {max_attempts} attempts."
-    )
+        break
+    else:
+        raise RuntimeError(
+            f"Could not publish a unique output filename in {directory!r} "
+            f"after {max_attempts} attempts."
+        )
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    _fsync_directory(directory)
+    return path
 
 
-def _publish_or_cleanup(write_fn, fpath):
-    """Run write_fn(tmp_path) to build the artifact at a private temporary
-    path beside fpath, then atomically publish it to fpath -- or, on any
-    failure, remove every trace (the temp file and the empty reservation
-    placeholder at fpath) and re-raise.
+def _publish_or_cleanup(write_fn, directory, prefix, ext, now):
+    """Build one artifact's content by calling write_fn(tmp_path), where
+    tmp_path is a securely-created private temporary file inside
+    `directory` (see _create_private_temp_file), then publish it under a
+    fresh "prefix_timestamp[_n].ext" public name using the single already-
+    captured `now` instant (see _publish_atomically) -- or, on any failure
+    from write_fn or publication, remove the temporary file and re-raise
+    without ever having created a public name.
 
-    Audit3 (Codex P2-1; Copilot A3-2/A3-3): before this, both _write_csv()
-    and plot_gw.plot_inspiral() reopened the already-reserved fpath
-    directly and wrote content into it in place, so a failure partway
-    through (a mid-write exception, a disk-full condition, a patched
-    writer/savefig raising) left a truncated or zero-byte file permanently
-    occupying that filename -- indistinguishable, by its presence alone,
-    from a genuinely completed export. Writing to a same-directory
-    temporary file first and renaming it into place with os.replace() only
-    after the write fully succeeds means fpath is never observably partial:
-    from the outside, it is either absent or complete. os.replace() is
-    atomic on the same filesystem and here always overwrites only the
-    empty placeholder this run itself created via _reserve_unique_path(),
-    never a concurrent writer's file (each reservation is independently
-    unique).
+    Audit3 (Codex P2-1; Copilot A3-2/A3-3) originally raised the failure-
+    cleanup requirement this implements; Audit4 (Codex P2-1) is the reason
+    the underlying reservation/publish mechanism changed -- see
+    _publish_atomically's docstring for what changed and why.
     """
-    tmp_path = fpath + ".tmp"
+    tmp_path = _create_private_temp_file(directory, ext)
     try:
         write_fn(tmp_path)
-        os.replace(tmp_path, fpath)
+        return _publish_atomically(tmp_path, directory, prefix, ext, now)
     except BaseException:
-        for stray in (tmp_path, fpath):
-            try:
-                os.remove(stray)
-            except OSError:
-                pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         raise
-    return fpath
 
 
 def _write_csv(result, csvdir):
@@ -209,16 +281,23 @@ def _write_csv(result, csvdir):
     themselves (Audit3 Copilot A3-4).
 
     The metadata field is named export_timestamp_utc, not run_timestamp_utc
-    (Audit3 Copilot A3-5): it is captured here, when the export actually
-    happens, which for a long integration can be measurably later than when
-    the run itself began -- the field is named for what it actually
-    measures rather than implying it marks run start.
+    (Audit3 Copilot A3-5): it is captured once, right here, before this
+    export's write begins -- which for a long integration can be
+    measurably earlier than when the CSV write actually finishes on disk,
+    so this is an export-*initiation* timestamp, not a completion one
+    (Audit4 Codex P3-1 -- an earlier response's wording overstated this as
+    an "export-completion timestamp", which was never accurate). That same
+    captured instant is also reused, via _publish_or_cleanup()/
+    _publish_atomically(), to build this file's own published filename, so
+    the filename's embedded timestamp and this metadata field always agree
+    exactly (Audit4 Codex P3-1) rather than coming from two independent
+    datetime.now() calls that could straddle a second or date boundary.
     """
     os.makedirs(csvdir, exist_ok=True)
-    fpath = _reserve_unique_path(csvdir, "gw_inspiral", "csv")
+    now = datetime.now(timezone.utc)
     s = result["summary"]
     include_rd = s["include_ringdown"]
-    export_timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    export_timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     def _fmt(value):
         return f"{float(value):.17g}" if value is not None else "n/a"
@@ -260,7 +339,7 @@ def _write_csv(result, csvdir):
             handle.flush()
             os.fsync(handle.fileno())
 
-    _publish_or_cleanup(_do_write, fpath)
+    fpath = _publish_or_cleanup(_do_write, csvdir, "gw_inspiral", "csv", now)
     print(f"[driver_gw] CSV saved -> {fpath}")
     return fpath
 

@@ -5,6 +5,7 @@ Three-panel Matplotlib visualization for GravitationalWaveSources.
 """
 
 import os
+import tempfile
 import numpy as np
 from datetime import datetime, timezone
 import matplotlib.pyplot as plt
@@ -32,73 +33,124 @@ def _sci_y(ax):
     ax.ticklabel_format(style="sci", axis="y", scilimits=(0, 0))
 
 
-def _timestamp_fname(prefix="gw_inspiral"):
-    # Microsecond resolution makes two rapid saves in the same directory
-    # (e.g. a scripted parameter sweep) collide far less often than under
-    # the previous second-resolution timestamp, but does not make a
-    # collision impossible (a coarser OS clock, two calls landing in the
-    # same microsecond, or a clock adjustment can still repeat a value).
-    # _reserve_unique_path() below is what actually guarantees no silent
-    # overwrite; this function only picks the first candidate name.
-    #
-    # Audit3 (Gemini): UTC, matching driver_gw's CSV filenames and its
-    # export_timestamp_utc metadata field -- so PNG and CSV filenames from
-    # the same run sort and compare directly without a timezone conversion.
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+def _timestamp_fname(now, prefix="gw_inspiral"):
+    """Format an already-captured aware UTC datetime as a
+    "prefix_YYYYMMDD_HHMMSS_ffffff.png" filename.
+
+    Audit4 (Codex P3-1), plot_gw-layer counterpart to driver_gw's fix: this
+    now takes the instant to format as an explicit argument rather than
+    calling datetime.now() itself, so the one instant captured by the
+    caller is reused consistently rather than re-derived.
+
+    Microsecond resolution makes two rapid saves in the same directory
+    (e.g. a scripted parameter sweep) collide far less often than under
+    the previous second-resolution timestamp, but does not make a
+    collision impossible (a coarser OS clock, two calls landing in the
+    same microsecond, or a clock adjustment can still repeat a value).
+    _publish_atomically() below is what actually guarantees no silent
+    overwrite; this function only formats the first candidate name.
+
+    Audit3 (Gemini): UTC, matching driver_gw's CSV filenames and its
+    export_timestamp_utc metadata field -- so PNG and CSV filenames from
+    the same run sort and compare directly without a timezone conversion.
+    """
+    ts = now.strftime("%Y%m%d_%H%M%S_%f")
     return f"{prefix}_{ts}.png"
 
 
-def _reserve_unique_path(directory, prefix="gw_inspiral", ext="png", max_attempts=1000):
-    """Atomically claim a not-yet-existing "prefix_timestamp[_n].ext" path.
+def _create_private_temp_file(directory, ext="png"):
+    """Securely create an empty, randomly-named temporary file in
+    `directory` to render the PNG into before publication.
 
-    See driver_gw._reserve_unique_path for the full rationale (Audit2
-    Copilot A2-3, Audit3 Codex P2-1/Copilot A3-6): a timestamp collision
-    only reduces, rather than eliminates, the chance of two writes picking
-    the same filename, so this claims the path atomically with
-    O_CREAT|O_EXCL and retries with a "_1", "_2", ... suffix on collision.
-    This only reserves the name, though -- callers must not write image
-    content directly into the returned path by reopening it; write to a
-    temporary path and publish with os.replace() instead (see
-    _publish_or_cleanup() below), or a failed savefig() leaves a zero-byte
-    or partial PNG permanently occupying this filename.
+    See driver_gw._create_private_temp_file for the full rationale (Audit4
+    Codex P2-1): a caller-predictable "<final-name>.tmp" path is guessable
+    in advance and, opened with an ordinary open()/savefig() call, follows
+    a pre-existing symlink at that path rather than refusing to.
+    tempfile.mkstemp() draws its name from a wide random namespace and
+    creates it with O_CREAT|O_EXCL, so nothing else on the system can
+    anticipate or pre-plant a symlink at this name; duplicated here rather
+    than imported, per this project's existing convention of not sharing
+    code across the driver_gw/plot_gw split.
     """
-    base = _timestamp_fname(prefix=prefix)
+    fd, tmp_path = tempfile.mkstemp(prefix=".gw_tmp_", suffix=f".{ext}", dir=directory)
+    os.close(fd)
+    return tmp_path
+
+
+def _fsync_directory(directory):
+    """Best-effort fsync of a directory's own metadata after a publish.
+    See driver_gw._fsync_directory for the full rationale; duplicated here
+    rather than imported, per this project's existing convention.
+    """
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError:
+        pass
+    finally:
+        os.close(dir_fd)
+
+
+def _publish_atomically(tmp_path, directory, prefix, now, ext="png", max_attempts=1000):
+    """Publish the already-fully-written file at tmp_path under a fresh
+    "prefix_timestamp[_n].png" public name in `directory`, without ever
+    creating that public name before the content is complete.
+
+    See driver_gw._publish_atomically for the full rationale (Audit4 Codex
+    P2-1): the previous design reserved the *final* filename itself, empty,
+    before any content existed, so the public path was visibly a zero-byte
+    placeholder for the entire duration of a savefig() call and a process
+    killed mid-save left exactly that misleading file behind. os.link()
+    here creates the public name only once tmp_path already holds the
+    complete PNG, and fails atomically (retried with a "_1", "_2", ...
+    suffix) rather than silently overwriting a same-named collision.
+    """
+    base = _timestamp_fname(now, prefix=prefix)
     stem = base[: -(len(ext) + 1)]
     for attempt in range(max_attempts):
         candidate = f"{stem}.{ext}" if attempt == 0 else f"{stem}_{attempt}.{ext}"
         path = os.path.join(directory, candidate)
         try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.link(tmp_path, path)
         except FileExistsError:
             continue
-        os.close(fd)
-        return path
-    raise RuntimeError(
-        f"Could not reserve a unique output filename in {directory!r} "
-        f"after {max_attempts} attempts."
-    )
+        break
+    else:
+        raise RuntimeError(
+            f"Could not publish a unique output filename in {directory!r} "
+            f"after {max_attempts} attempts."
+        )
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    _fsync_directory(directory)
+    return path
 
 
-def _publish_or_cleanup(write_fn, fpath):
-    """Run write_fn(tmp_path) to build the artifact at a private temporary
-    path beside fpath, then atomically publish it to fpath -- or, on any
-    failure, remove every trace and re-raise. See driver_gw._publish_or_
-    cleanup for the full rationale (Audit3 Codex P2-1 / Copilot A3-3);
+def _publish_or_cleanup(write_fn, directory, prefix, now):
+    """Build the PNG by calling write_fn(tmp_path), where tmp_path is a
+    securely-created private temporary file inside `directory`, then
+    publish it under a fresh "prefix_timestamp[_n].png" public name using
+    the single already-captured `now` instant -- or, on any failure, remove
+    the temporary file and re-raise without ever having created a public
+    name. See driver_gw._publish_or_cleanup for the full rationale;
     duplicated here rather than imported, per this project's existing
     convention of not sharing code across the driver_gw/plot_gw split.
     """
-    tmp_path = fpath + ".tmp"
+    tmp_path = _create_private_temp_file(directory)
     try:
         write_fn(tmp_path)
-        os.replace(tmp_path, fpath)
+        return _publish_atomically(tmp_path, directory, prefix, now)
     except BaseException:
-        for stray in (tmp_path, fpath):
-            try:
-                os.remove(stray)
-            except OSError:
-                pass
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         raise
-    return fpath
 
 
 def plot_inspiral(result, outdir=None,
@@ -139,22 +191,27 @@ def plot_inspiral(result, outdir=None,
         # happens before plt.show() so the file is written even if the
         # user closes the interactive window without waiting, or the run
         # is otherwise interrupted after the window appears. The save is
-        # atomic (write to a temp path, then os.replace() into place --
-        # see _publish_or_cleanup()): a failed savefig() leaves no PNG
-        # behind rather than a zero-byte or partial one (Audit3 Codex
-        # P2-1 / Copilot A3-3).
+        # published atomically (write to a securely-created private temp
+        # file, then os.link() it into place under a name that did not
+        # already publicly exist -- see _publish_atomically()): a failed
+        # savefig() leaves no PNG behind rather than a zero-byte or partial
+        # one (Audit3 Codex P2-1 / Copilot A3-3; Audit4 Codex P2-1 replaced
+        # the reservation/rename mechanism itself -- see that docstring).
         if outdir is not None:
-            fpath = _reserve_unique_path(outdir)
-            # format="png" is passed explicitly because the temporary path
-            # _publish_or_cleanup() writes to ends in ".tmp", not ".png" --
-            # savefig() otherwise infers the output format from the
-            # filename extension and would reject ".tmp" as unrecognized.
-            _publish_or_cleanup(
-                lambda tmp_path: fig.savefig(
-                    tmp_path, dpi=dpi, bbox_inches="tight", format="png"
-                ),
-                fpath,
-            )
+            def _do_save(tmp_path):
+                fig.savefig(tmp_path, dpi=dpi, bbox_inches="tight", format="png")
+                # Audit4 (Codex P2-1, item 4): fsync the PNG's own file
+                # content before it is published -- Matplotlib's savefig()
+                # does not fsync on its own, and _publish_atomically() only
+                # best-effort-fsyncs the *directory* entry, not file data.
+                fd = os.open(tmp_path, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+
+            now = datetime.now(timezone.utc)
+            fpath = _publish_or_cleanup(_do_save, outdir, "gw_inspiral", now)
             print(f"[plot_gw] PNG saved -> {fpath}")
 
         print("[plot_gw] Displaying figure on screen ...")

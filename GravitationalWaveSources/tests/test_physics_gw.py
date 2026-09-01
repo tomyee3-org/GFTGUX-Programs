@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -388,12 +389,18 @@ class TestModuleDiscovery(unittest.TestCase):
 # ===========================================================================
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_model_version(self):
-        # Audit3 round: bumped 1.2.0 -> 1.3.0 for this round's behavior
-        # changes (CSV export_timestamp_utc field rename, atomic
-        # publish-or-cleanup write semantics for both CSV and PNG output,
-        # and the corrected chirp_mass_from_fdot() subnormal-boundary
-        # error message).
-        self.assertEqual(physics.MODEL_VERSION, "1.3.0")
+        # Audit4 round: bumped 1.3.0 -> 1.4.0 for this round's behavior
+        # changes (the output-publication mechanism itself changed -- the
+        # public CSV/PNG filename is no longer ever created as an empty
+        # reservation placeholder before content exists, and the private
+        # build-temp file is now securely, randomly named rather than a
+        # predictable "<final>.tmp" path; the CSV export_timestamp_utc
+        # field is now captured exactly once per export and reused for the
+        # published filename itself, rather than two independent
+        # datetime.now() calls; and the phase-linear-interpolation code
+        # comment's false "sub-milliradian at the program default" claim
+        # was corrected to a measured, case-specific figure).
+        self.assertEqual(physics.MODEL_VERSION, "1.4.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -746,43 +753,67 @@ class TestChirpMassFromFdot(unittest.TestCase):
 
 class TestLowLevelHelperDomainContract(unittest.TestCase):
     """chirp_mass(), dfdt(), strain_amplitude(), f_isco(), qnm_params(), and
-    inspiral_time() are documented (Audit3 Codex P3-3) as low-level helpers
-    that deliberately perform no input validation of their own -- validation
-    lives in integrate_inspiral(), which is on the only path a CLI user or
-    the public integration API can reach these functions through. Adding a
+    inspiral_time() are documented as low-level helpers that deliberately
+    perform no input validation of their own -- validation lives in
+    integrate_inspiral(), which is on the only path a CLI user or the
+    public integration API can reach these functions through. Adding a
     validation check to each of these would add per-call overhead on a hot
     path: dfdt() alone is called 4 times per RK4 step, so a multi-hundred-
     thousand-step integration would pay that cost roughly a million times
-    for a safety net integrate_inspiral() already provides. These tests
-    pin down -- not endorse as "correct" -- exactly what happens today when
-    these helpers are called directly with out-of-domain inputs, so a
-    future accidental change in that undefined behavior is caught."""
+    for a safety net integrate_inspiral() already provides.
 
-    def test_chirp_mass_of_negative_masses_returns_complex_not_an_exception(self):
-        result = physics.chirp_mass(-1.0, -1.0)
-        self.assertIsInstance(result, complex)
-        self.assertAlmostEqual(result.real, 0.7042902001692477, places=9)
-        self.assertAlmostEqual(result.imag, -0.5116967824803669, places=9)
+    Audit4 (Codex P3-3): the Audit3 version of this class went further than
+    pinning down that contract -- it froze the *exact* out-of-domain return
+    value (e.g. chirp_mass(-1,-1)'s precise complex real/imag parts, which
+    fall out of NumPy's choice of branch cut for a fractional power of a
+    negative base) or the *exact* incidental Python exception raised for a
+    zero input. Both are undefined behavior by this module's own docstrings,
+    not a supported result, so freezing them turned a future NumPy/Python
+    arithmetic change (e.g. complex -> nan, or a different exception type)
+    into an apparent scientific regression even though it changes nothing
+    this program's only real caller (integrate_inspiral, which always
+    pre-validates first) can ever observe. These tests instead pin the
+    *documented contract itself* -- that each helper's docstring says it is
+    an unvalidated low-level helper -- and confirm that integrate_inspiral(),
+    the only supported entry point, genuinely validates before any of these
+    helpers is ever reached with a raw, un-prevalidated input, rather than
+    pinning what those helpers happen to do if reached directly anyway."""
 
-    def test_dfdt_of_negative_chirp_mass_returns_complex_not_an_exception(self):
-        result = physics.dfdt(-1.0, 1.0)
-        self.assertIsInstance(result, complex)
+    LOW_LEVEL_HELPERS = (
+        physics.chirp_mass, physics.dfdt, physics.strain_amplitude,
+        physics.f_isco, physics.qnm_params, physics.inspiral_time,
+    )
 
-    def test_f_isco_of_zero_total_mass_raises_zero_division_error(self):
-        with self.assertRaises(ZeroDivisionError):
-            physics.f_isco(0.0)
+    def test_each_helper_documents_its_unvalidated_low_level_contract(self):
+        for helper in self.LOW_LEVEL_HELPERS:
+            with self.subTest(helper=helper.__name__):
+                doc = inspect.getdoc(helper) or ""
+                self.assertIn("Low-level", doc)
+                self.assertIn("unvalidated", doc)
 
-    def test_qnm_params_of_zero_remnant_mass_raises_zero_division_error(self):
-        with self.assertRaises(ZeroDivisionError):
-            physics.qnm_params(0.0)
+    def test_integrate_inspiral_rejects_invalid_masses_before_reaching_chirp_mass(self):
+        with mock.patch.object(
+            physics, "chirp_mass", wraps=physics.chirp_mass
+        ) as spy:
+            with self.assertRaises(ValueError):
+                physics.integrate_inspiral(-1.0, 1.4, 400.0, dt=2e-4, f_start=20.0)
+            spy.assert_not_called()
 
-    def test_strain_amplitude_of_zero_distance_raises_zero_division_error(self):
-        with self.assertRaises(ZeroDivisionError):
-            physics.strain_amplitude(20.0, 1.0, 0.0)
+    def test_integrate_inspiral_rejects_invalid_distance_before_reaching_strain_amplitude(self):
+        with mock.patch.object(
+            physics, "strain_amplitude", wraps=physics.strain_amplitude
+        ) as spy:
+            with self.assertRaises(ValueError):
+                physics.integrate_inspiral(1.4, 1.4, 0.0, dt=2e-4, f_start=20.0)
+            spy.assert_not_called()
 
-    def test_inspiral_time_of_zero_chirp_mass_raises_zero_division_error(self):
-        with self.assertRaises(ZeroDivisionError):
-            physics.inspiral_time(20.0, 20.0, 0.0)
+    def test_integrate_inspiral_rejects_invalid_dt_before_reaching_dfdt(self):
+        with mock.patch.object(
+            physics, "dfdt", wraps=physics.dfdt
+        ) as spy:
+            with self.assertRaises(ValueError):
+                physics.integrate_inspiral(1.4, 1.4, 400.0, dt=0.0, f_start=20.0)
+            spy.assert_not_called()
 
 
 class TestDefaultAndBBHReferenceCase(unittest.TestCase):
@@ -999,6 +1030,37 @@ class TestIntegrateInspiralNominal(unittest.TestCase):
         # somewhat larger, but still small, interpolation error.
         expected_last = ref_phase_from_frequency(f0, f[-1], Mc_kg)
         self.assertAlmostEqual(phase[-1] / expected_last, 1.0, places=4)
+
+    def test_default_bns_final_phase_absolute_interpolation_error_is_measured_not_assumed(self):
+        """Audit4 (Codex P2-2): a physics_gw.py code comment previously
+        claimed the final linearly-interpolated step introduces a
+        "sub-milliradian" phase error "at this program's pedagogical
+        default". That number was actually measured on the Help file's
+        36+29 Msun BBH dt=1e-4 example above (whose relative-ratio check at
+        places=4 easily hides a sub-milliradian absolute error against its
+        own much larger accumulated phase), not on the *actual* default
+        1.4+1.4 Msun BNS case at dt=2e-4 -- where it is wrong by a factor of
+        about 30. This checks the ABSOLUTE final-point error for the real
+        default case against the same algebraically-independent closed-form
+        oracle used above, rather than a relative ratio against the ~31,706
+        rad of total accumulated phase (which a 0.03 rad absolute error is
+        far too small a fraction of to fail at places=4).
+        """
+        result = physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
+        Mc_kg = result["summary"]["Mc_msun"] * physics.M_sun
+        f0 = result["f"][0]
+        f_last = result["f"][-1]
+        expected_last = ref_phase_from_frequency(f0, f_last, Mc_kg)
+        absolute_error = abs(result["phase"][-1] - expected_last)
+        # Measured value is about 0.0305 rad (~0.0049 cycle); bracket
+        # generously around it so this does not become a brittle pin, while
+        # still failing loudly if the error scale changes by an order of
+        # magnitude in either direction (e.g. if a future dt/algorithm
+        # change silently made this either much worse or genuinely
+        # sub-milliradian, in which case the code comment should be
+        # re-measured and updated again).
+        self.assertGreater(absolute_error, 1e-3)  # nowhere near sub-milliradian
+        self.assertLess(absolute_error, 0.2)       # but still a small fraction of a cycle
 
     def test_ringdown_h_equals_peak_amplitude_times_damped_cosine_of_phase(self):
         """Same architectural invariant on the ringdown segment: h_rd(t) =
@@ -1346,12 +1408,21 @@ class TestIntegrateInspiralValidation(unittest.TestCase):
         """Audit2 (Copilot A2-4): n_ringdown_tau/ringdown_pts are dormant
         configuration when include_ringdown=False and must not be able to
         break a pure-inspiral call, however invalid their values are on
-        their own terms."""
+        their own terms.
+
+        Audit4 (Codex P2-3): this gating rule does not depend on the
+        default f_start=20 Hz at all -- it is exercised identically, and
+        far more cheaply, at f_start=100 Hz (about 10,800 steps, per the
+        EXP-7 revision, versus 789,004 at the default). The previous
+        version of this test ran the full default-f_start integration
+        seven times in this one loop alone for no assertion that actually
+        needed it.
+        """
         for n_tau, rd_pts in ((-5, 4000), (0, 4000), (0.5, 4000),
                                (6, 0), (6, 1), (6, -5), (6, 20_000_000)):
             with self.subTest(n_ringdown_tau=n_tau, ringdown_pts=rd_pts):
                 result = physics.integrate_inspiral(
-                    1.4, 1.4, 400.0, dt=2e-4, f_start=20.0,
+                    1.4, 1.4, 400.0, dt=2e-4, f_start=100.0,
                     include_ringdown=False,
                     n_ringdown_tau=n_tau, ringdown_pts=rd_pts,
                 )  # must not raise
@@ -1511,6 +1582,39 @@ class TestDriverRun(unittest.TestCase):
         import matplotlib.pyplot as plt
         plt.close("all")
 
+    def _assert_common_csv_metadata(self, meta, result):
+        """Shared cross-check of the metadata fields every export carries
+        regardless of ringdown status, used by both the pure-inspiral and
+        ringdown CSV tests below.
+
+        Audit4 (Codex P3-2): the previous version of the ringdown CSV test
+        checked only the ringdown-specific fields, even though the Claude
+        response accompanying it claimed both cases cross-check "every
+        field" -- this factors the full cross-check (including the
+        previously-unchecked "columns" value and export_timestamp_utc
+        parsing) into one helper so both tests genuinely exercise it,
+        rather than only the pure-inspiral case.
+        """
+        s = result["summary"]
+        self.assertEqual(meta["model_version"], s["model_version"])
+        self.assertEqual(meta["build_id"], s["build_id"])
+        self.assertAlmostEqual(float(meta["m1_msun"]), s["m1_msun"], places=9)
+        self.assertAlmostEqual(float(meta["m2_msun"]), s["m2_msun"], places=9)
+        self.assertAlmostEqual(float(meta["d_mpc"]), s["d_mpc"], places=9)
+        self.assertAlmostEqual(float(meta["dt_s"]), s["dt_s"], places=12)
+        self.assertAlmostEqual(float(meta["f_start_hz"]), s["f_start_hz"], places=9)
+        self.assertEqual(
+            meta["columns"],
+            "t_s,f_hz,A,h,phase_rad -- f_hz/A are blank on ringdown-only rows",
+        )
+        # export_timestamp_utc must be a genuinely parseable UTC instant
+        # (Audit3 Codex P3-4), not merely a non-empty string.
+        parsed = datetime.strptime(
+            meta["export_timestamp_utc"], "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+        self.assertLessEqual(abs((now_utc_naive - parsed).total_seconds()), 120)
+
     def test_run_executes_and_returns_the_physics_result(self):
         import matplotlib.pyplot as plt
         with mock.patch.object(plt, "show"):
@@ -1565,7 +1669,9 @@ class TestDriverRun(unittest.TestCase):
             self.assertEqual(float(rows[-1][4]), result["phase"][-1])
             # Metadata block: exact key set (Audit3 Codex P3-4 asked for the
             # *complete* set, not just a handful of fields) plus a
-            # cross-check of every value against the run's own summary.
+            # cross-check of every value against the run's own summary,
+            # including the "columns" value and export_timestamp_utc
+            # parsing (Audit4 Codex P3-2 -- previously unchecked here).
             self.assertEqual(
                 set(meta.keys()),
                 {
@@ -1575,26 +1681,13 @@ class TestDriverRun(unittest.TestCase):
                     "f_qnm_hz", "tau_qnm_ms", "ringdown_model", "columns",
                 },
             )
-            self.assertEqual(meta["model_version"], result["summary"]["model_version"])
-            self.assertEqual(meta["build_id"], result["summary"]["build_id"])
-            self.assertAlmostEqual(float(meta["m1_msun"]), 1.4, places=9)
-            self.assertAlmostEqual(float(meta["m2_msun"]), 1.4, places=9)
-            self.assertAlmostEqual(float(meta["d_mpc"]), 400.0, places=9)
-            self.assertAlmostEqual(float(meta["dt_s"]), 2e-4, places=12)
-            self.assertAlmostEqual(float(meta["f_start_hz"]), 20.0, places=9)
+            self._assert_common_csv_metadata(meta, result)
             self.assertEqual(meta["include_ringdown"], "False")
             self.assertEqual(meta["n_ringdown_tau"], "n/a")
             self.assertEqual(meta["ringdown_pts"], "n/a")
             self.assertEqual(meta["f_qnm_hz"], "n/a")
             self.assertEqual(meta["tau_qnm_ms"], "n/a")
             self.assertEqual(meta["ringdown_model"], "n/a")
-            # export_timestamp_utc must be a genuinely parseable UTC instant
-            # (Audit3 Codex P3-4), not merely a non-empty string.
-            parsed = datetime.strptime(
-                meta["export_timestamp_utc"], "%Y-%m-%dT%H:%M:%S.%fZ"
-            )
-            now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
-            self.assertLessEqual(abs((now_utc_naive - parsed).total_seconds()), 120)
 
     def test_csv_metadata_distinguishes_runs_that_differ_only_by_dt(self):
         """Audit2 (Codex P1-1) specifically calls out EXP-8: four CSVs that
@@ -1636,6 +1729,19 @@ class TestDriverRun(unittest.TestCase):
                 self.assertNotEqual(row[0], "")  # t always present
                 self.assertNotEqual(row[3], "")  # h always present
                 self.assertNotEqual(row[4], "")  # phase always present
+            # Audit4 (Codex P3-2): exact-round-trip at least one ringdown
+            # row's t/h/phase values against the arrays this run actually
+            # produced -- the checks above only confirmed f/A were blank
+            # and t/h/phase were merely non-blank, never that the *values*
+            # on a ringdown row were exported correctly. The last data row
+            # is guaranteed to be a ringdown row (ringdown is appended
+            # after every inspiral row).
+            last_row = data_rows[-1]
+            self.assertEqual(last_row[1], "")
+            self.assertEqual(last_row[2], "")
+            self.assertEqual(float(last_row[0]), result["t"][-1])
+            self.assertEqual(float(last_row[3]), result["h"][-1])
+            self.assertEqual(float(last_row[4]), result["phase"][-1])
             # Audit3 (Codex P3-4): exact metadata-key set, plus the QNM
             # fields the earlier version of this test never checked at all.
             self.assertEqual(
@@ -1647,6 +1753,13 @@ class TestDriverRun(unittest.TestCase):
                     "f_qnm_hz", "tau_qnm_ms", "ringdown_model", "columns",
                 },
             )
+            # Audit4 (Codex P3-2): the ordinary run-parameter/provenance
+            # cross-check (model_version, build_id, masses, distance, dt,
+            # f_start, columns, export_timestamp_utc parsing) was
+            # previously only exercised by the pure-inspiral CSV test above,
+            # even though the response accompanying it claimed both cases
+            # cross-check "every field".
+            self._assert_common_csv_metadata(meta, result)
             s = result["summary"]
             self.assertEqual(meta["include_ringdown"], "True")
             self.assertEqual(meta["n_ringdown_tau"], "6")
@@ -1659,8 +1772,37 @@ class TestDriverRun(unittest.TestCase):
     def test_csv_timestamp_filename_has_microsecond_resolution(self):
         """P3-4 regression, driver-layer counterpart to the plot_gw check:
         the CSV filename must also carry microsecond resolution."""
-        name = driver._timestamp_fname()
+        name = driver._timestamp_fname(datetime.now(timezone.utc))
         self.assertRegex(name, r"^gw_inspiral_\d{8}_\d{6}_\d{6}\.csv$")
+
+    def test_csv_filename_timestamp_matches_metadata_export_timestamp(self):
+        """Audit4 (Codex P3-1): the filename's embedded timestamp and the
+        metadata export_timestamp_utc field must come from the same
+        captured instant, not two independent datetime.now() calls that
+        can straddle a second or date boundary. Uses --f_start 100 (rather
+        than the default 20) so this end-to-end run stays fast (Audit4
+        Codex P2-3): nothing about what this test checks depends on the
+        default step count."""
+        import matplotlib.pyplot as plt
+        with tempfile.TemporaryDirectory() as csvdir:
+            with mock.patch.object(plt, "show"):
+                driver.run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
+                           dt=2e-4, f_start=100.0, csvdir=csvdir)
+            saved = list(Path(csvdir).glob("*.csv"))
+            self.assertEqual(len(saved), 1)
+            meta, _ = read_gw_csv(saved[0])
+            match = re.match(
+                r"^gw_inspiral_(\d{8})_(\d{6})_(\d{6})(?:_\d+)?$", saved[0].stem
+            )
+            self.assertIsNotNone(match, saved[0].stem)
+            fname_dt = datetime.strptime(
+                f"{match.group(1)}_{match.group(2)}_{match.group(3)}",
+                "%Y%m%d_%H%M%S_%f",
+            )
+            meta_dt = datetime.strptime(
+                meta["export_timestamp_utc"], "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            self.assertEqual(fname_dt, meta_dt)
 
     def test_read_gw_csv_helper_rejects_a_duplicated_metadata_key(self):
         """Audit3 (Codex P3-4): read_gw_csv() must not silently let a
@@ -1681,38 +1823,164 @@ class TestDriverRun(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 read_gw_csv(bad_path)
 
-    def test_reserve_unique_path_does_not_overwrite_on_timestamp_collision(self):
+    def test_publish_unique_path_does_not_overwrite_on_timestamp_collision(self):
         """Audit2 (Copilot A2-3): a repeated (e.g. mocked, or genuinely
         coincident) timestamp must never silently overwrite an earlier
-        file -- _reserve_unique_path must claim a distinct "_1", "_2", ...
-        suffixed name instead. Uses a frozen datetime.now() so the
-        collision is deterministic rather than relying on real-clock
-        timing."""
+        file. Audit4 (Codex P2-1 required regression): collision retry
+        must happen at the actual *publish* operation (os.link() to the
+        real, already-complete content), not only at an earlier
+        placeholder-reservation step -- the previous design's
+        _reserve_unique_path no longer exists, replaced by
+        _publish_or_cleanup/_publish_atomically, which this test now
+        exercises directly with real, distinguishable content for each of
+        the three publishes."""
         fixed = driver.datetime(2026, 1, 1, 12, 0, 0, 123456)
 
-        class FrozenDatetime(driver.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return fixed if tz is None else fixed.astimezone(tz)
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for content in (b"one", b"two", b"three"):
+                def _write(tmp_path, content=content):
+                    with open(tmp_path, "wb") as handle:
+                        handle.write(content)
+                paths.append(
+                    driver._publish_or_cleanup(_write, d, "gw_inspiral", "csv", fixed)
+                )
+            self.assertEqual(len(set(paths)), 3)  # three distinct paths
+            contents = {Path(p).read_bytes() for p in paths}
+            self.assertEqual(contents, {b"one", b"two", b"three"})  # nothing overwritten
+            self.assertEqual(len(list(Path(d).glob("*.csv"))), 3)
+            self.assertEqual(list(Path(d).glob(".gw_tmp_*")), [])  # no stray temp files
+
+    def test_public_final_path_does_not_exist_until_publication_completes(self):
+        """Audit4 (Codex P2-1, required regression): pause a real writer
+        after partial temp output and assert the public final .csv path
+        does not exist until publication. The previous design got this
+        backwards -- the public path was created empty *before* the write
+        began and stayed present (at 0 bytes) for its entire duration; this
+        design creates no publicly-named entry at all until the content is
+        already complete."""
+        now = datetime.now(timezone.utc)
+        paused = threading.Event()
+        resume = threading.Event()
+
+        def slow_write(tmp_path):
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                handle.write("partial-data")
+                handle.flush()
+            paused.set()
+            self.assertTrue(resume.wait(timeout=10))
+            with open(tmp_path, "a", encoding="utf-8") as handle:
+                handle.write("-more")
+
+        with tempfile.TemporaryDirectory() as csvdir:
+            outcome = {}
+
+            def runner():
+                outcome["path"] = driver._publish_or_cleanup(
+                    slow_write, csvdir, "gw_inspiral", "csv", now
+                )
+
+            thread = threading.Thread(target=runner)
+            thread.start()
+            try:
+                self.assertTrue(paused.wait(timeout=10))
+                # Only the private, dot-prefixed temp file may exist while
+                # the write is in flight -- never a publicly-named one.
+                public_entries = [
+                    name for name in os.listdir(csvdir) if not name.startswith(".")
+                ]
+                self.assertEqual(public_entries, [])
+            finally:
+                resume.set()
+                thread.join(timeout=10)
+            self.assertTrue(os.path.exists(outcome["path"]))
+            self.assertEqual(
+                Path(outcome["path"]).read_text(encoding="utf-8"), "partial-data-more"
+            )
+
+    def test_killed_writer_subprocess_leaves_no_public_final_csv(self):
+        """Audit4 (Codex P2-1, required regression): kill a writer
+        subprocess mid-write (an abrupt process death, unlike the caught-
+        exception cleanup tested elsewhere) and assert no public
+        gw_inspiral_*.csv filename remains -- only, at worst, its private
+        randomly-named temp file, which carries no name a directory
+        listing could mistake for a genuine completed export."""
+        child_code = (
+            "import sys, time\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import driver_gw as driver\n"
+            "from datetime import datetime, timezone\n"
+            "csvdir = sys.argv[2]\n"
+            "now = datetime.now(timezone.utc)\n"
+            "def slow_write(tmp_path):\n"
+            "    with open(tmp_path, 'w') as f:\n"
+            "        f.write('partial')\n"
+            "        f.flush()\n"
+            "    print('READY', flush=True)\n"
+            "    time.sleep(30)\n"
+            "driver._publish_or_cleanup(slow_write, csvdir, 'gw_inspiral', 'csv', now)\n"
+        )
+        environment = os.environ.copy()
+        environment["MPLBACKEND"] = "Agg"
+        with tempfile.TemporaryDirectory() as csvdir:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", child_code, str(MODULE_DIR), csvdir],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                env=environment,
+            )
+            try:
+                ready_line = proc.stdout.readline()
+                self.assertEqual(ready_line.strip(), "READY")
+                proc.kill()
+                proc.wait(timeout=10)
+            finally:
+                proc.stdout.close()
+                proc.stderr.close()
+            public_csvs = list(Path(csvdir).glob("gw_inspiral_*.csv"))
+            self.assertEqual(public_csvs, [])
+
+    def test_symlink_at_candidate_public_name_is_not_followed_or_overwritten(self):
+        """Audit4 (Codex P2-1, required regression): if a symlink already
+        occupies the exact name this run's export would claim (e.g. left
+        behind by an attacker or by unrelated debris), publication must
+        treat that as an ordinary collision -- os.link() refuses to target
+        an already-existing name, symlink or not -- and retry with a "_1"
+        suffix. It must never follow the symlink and overwrite whatever it
+        points to, and never leave that symlink standing in as the
+        published file."""
+        fixed = driver.datetime(2026, 1, 1, 12, 0, 0, 123456)
 
         with tempfile.TemporaryDirectory() as d:
-            with mock.patch.object(driver, "datetime", FrozenDatetime):
-                p1 = driver._reserve_unique_path(d, "gw_inspiral", "csv")
-                p2 = driver._reserve_unique_path(d, "gw_inspiral", "csv")
-                p3 = driver._reserve_unique_path(d, "gw_inspiral", "csv")
-            self.assertEqual(len({p1, p2, p3}), 3)  # three distinct paths
-            for p in (p1, p2, p3):
-                self.assertTrue(os.path.exists(p))
-            self.assertEqual(len(list(Path(d).glob("*.csv"))), 3)  # nothing overwritten
+            victim = Path(d) / "victim.txt"
+            victim.write_text("ORIGINAL", encoding="utf-8")
+            expected_base = driver._timestamp_fname(fixed, prefix="gw_inspiral", ext="csv")
+            booby_trapped_path = Path(d) / expected_base
+            os.symlink(victim, booby_trapped_path)
+
+            published = driver._publish_or_cleanup(
+                lambda p: Path(p).write_text("real content", encoding="utf-8"),
+                d, "gw_inspiral", "csv", fixed,
+            )
+
+            self.assertEqual(victim.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertTrue(os.path.islink(booby_trapped_path))  # symlink untouched
+            self.assertNotEqual(published, str(booby_trapped_path))
+            self.assertTrue(published.endswith("_1.csv"), published)
+            self.assertFalse(os.path.islink(published))  # published file is a real file
+            self.assertEqual(Path(published).read_text(encoding="utf-8"), "real content")
 
     def test_frozen_timestamp_two_complete_writes_both_survive_intact(self):
-        """Audit3 (Codex P2-1, required regression #5): the collision test
-        above only proves _reserve_unique_path() claims three distinct
-        empty placeholders. This proves the stronger claim that matters --
-        two full, real _write_csv() runs that land on the exact same frozen
-        timestamp each publish their own complete, distinguishable content
-        rather than one clobbering the other or either being left
-        truncated by the atomic-publish rename."""
+        """Audit3 (Codex P2-1, required regression #5): the collision tests
+        above only prove _publish_atomically() claims three distinct real
+        files. This proves the stronger claim that matters -- two full,
+        real driver.run(csvdir=...) calls that land on the exact same
+        frozen timestamp each publish their own complete, distinguishable
+        content rather than one clobbering the other or either being left
+        truncated. Audit4 (Codex P2-3): the first run previously used the
+        default f_start=20 (789,004 steps, ~78 MiB) merely to be
+        "distinguishable" from the second -- --f_start 100 is equally
+        distinguishable (different m1/m2) and about 70x cheaper; the
+        collision property being tested needs only two short runs."""
         fixed = driver.datetime(2026, 1, 1, 12, 0, 0, 123456)
 
         class FrozenDatetime(driver.datetime):
@@ -1725,7 +1993,7 @@ class TestDriverRun(unittest.TestCase):
             with mock.patch.object(driver, "datetime", FrozenDatetime):
                 with mock.patch.object(plt, "show"):
                     driver.run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
-                               dt=2e-4, f_start=20.0, csvdir=csvdir)
+                               dt=2e-4, f_start=100.0, csvdir=csvdir)
                     driver.run(m1_msun=36.0, m2_msun=29.0, d_mpc=440.0,
                                dt=2e-4, f_start=20.0, csvdir=csvdir)
             saved = sorted(Path(csvdir).glob("*.csv"))
@@ -1740,9 +2008,13 @@ class TestDriverRun(unittest.TestCase):
     def test_csv_write_failure_leaves_no_csv_behind(self):
         """Audit3 (Codex P2-1 / Copilot A3-2, required regression): inject a
         mid-write failure inside the csv.writer and confirm the atomic
-        publish-or-cleanup path removes the temporary file and the
-        pre-reserved placeholder, leaving zero .csv files -- not the
-        empty/partial file Audit3 originally reported."""
+        publish-or-cleanup path removes the private temp file, leaving zero
+        .csv files and zero stray temp files behind -- not the
+        empty/partial file Audit3 originally reported. Audit4 (Codex P2-3):
+        --f_start 100 replaces the previous full default-f_start
+        integration, which this test's assertions never actually needed
+        (it only checks that nothing is left behind after a failure, not
+        anything about the exported content)."""
         import matplotlib.pyplot as plt
         with tempfile.TemporaryDirectory() as csvdir:
             with mock.patch.object(plt, "show"):
@@ -1751,9 +2023,9 @@ class TestDriverRun(unittest.TestCase):
                 ):
                     with self.assertRaises(OSError):
                         driver.run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
-                                   dt=2e-4, f_start=20.0, csvdir=csvdir)
+                                   dt=2e-4, f_start=100.0, csvdir=csvdir)
             self.assertEqual(list(Path(csvdir).glob("*.csv")), [])
-            self.assertEqual(list(Path(csvdir).glob("*.csv.tmp")), [])
+            self.assertEqual(list(Path(csvdir).glob(".gw_tmp_*")), [])
             self.assertEqual(list(Path(csvdir).iterdir()), [])
 
     def test_outdir_as_existing_regular_file_leaves_no_csv_behind(self):
@@ -1928,38 +2200,66 @@ class TestPlotting(unittest.TestCase):
         rapid programmatic saves to the same --outdir collide and silently
         overwrite each other; the filename must now carry a 6-digit
         microsecond field."""
-        name = plotting._timestamp_fname()
+        name = plotting._timestamp_fname(datetime.now(timezone.utc))
         self.assertRegex(name, r"^gw_inspiral_\d{8}_\d{6}_\d{6}\.png$")
 
-    def test_reserve_unique_path_does_not_overwrite_on_timestamp_collision(self):
+    def test_publish_unique_path_does_not_overwrite_on_timestamp_collision(self):
         """Audit2 (Copilot A2-3), plot_gw-layer counterpart to the
         driver_gw test of the same name: a repeated timestamp must claim a
         distinct "_1", "_2", ... suffixed PNG path rather than silently
-        overwriting an earlier one."""
+        overwriting an earlier one. Audit4 (Codex P2-1 required regression):
+        exercises the actual publish operation (_publish_or_cleanup /
+        _publish_atomically) directly, with real distinguishable content
+        for each publish, rather than the previous placeholder-reservation
+        function that no longer exists in this design."""
         fixed = plotting.datetime(2026, 1, 1, 12, 0, 0, 123456)
 
-        class FrozenDatetime(plotting.datetime):
-            @classmethod
-            def now(cls, tz=None):
-                return fixed if tz is None else fixed.astimezone(tz)
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for content in (b"one", b"two", b"three"):
+                def _write(tmp_path, content=content):
+                    with open(tmp_path, "wb") as handle:
+                        handle.write(content)
+                paths.append(plotting._publish_or_cleanup(_write, d, "gw_inspiral", fixed))
+            self.assertEqual(len(set(paths)), 3)
+            contents = {Path(p).read_bytes() for p in paths}
+            self.assertEqual(contents, {b"one", b"two", b"three"})
+            self.assertEqual(len(list(Path(d).glob("*.png"))), 3)
+            self.assertEqual(list(Path(d).glob(".gw_tmp_*")), [])  # no stray temp files
+
+    def test_symlink_at_candidate_public_name_is_not_followed_or_overwritten(self):
+        """Audit4 (Codex P2-1, required regression), plot_gw-layer
+        counterpart to the driver_gw test of the same name: a pre-existing
+        symlink at the exact PNG name this publish would claim must be
+        treated as an ordinary collision (retried with a "_1" suffix), not
+        followed or overwritten."""
+        fixed = plotting.datetime(2026, 1, 1, 12, 0, 0, 123456)
 
         with tempfile.TemporaryDirectory() as d:
-            with mock.patch.object(plotting, "datetime", FrozenDatetime):
-                p1 = plotting._reserve_unique_path(d)
-                p2 = plotting._reserve_unique_path(d)
-                p3 = plotting._reserve_unique_path(d)
-            self.assertEqual(len({p1, p2, p3}), 3)
-            for p in (p1, p2, p3):
-                self.assertTrue(os.path.exists(p))
-            self.assertEqual(len(list(Path(d).glob("*.png"))), 3)
+            victim = Path(d) / "victim.txt"
+            victim.write_text("ORIGINAL", encoding="utf-8")
+            expected_base = plotting._timestamp_fname(fixed, prefix="gw_inspiral")
+            booby_trapped_path = Path(d) / expected_base
+            os.symlink(victim, booby_trapped_path)
+
+            published = plotting._publish_or_cleanup(
+                lambda p: Path(p).write_bytes(b"\x89PNG-fake-content"),
+                d, "gw_inspiral", fixed,
+            )
+
+            self.assertEqual(victim.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertTrue(os.path.islink(booby_trapped_path))
+            self.assertNotEqual(published, str(booby_trapped_path))
+            self.assertTrue(published.endswith("_1.png"), published)
+            self.assertFalse(os.path.islink(published))
 
     def test_savefig_failure_leaves_no_png_behind(self):
         """Audit3 (Codex P2-1 / Copilot A3-3, required regression): patch
         Figure.savefig to raise mid-write and confirm the atomic
-        publish-or-cleanup path removes the temporary file and the
-        pre-reserved placeholder -- zero .png files remain, not the
-        zero-byte placeholder Audit3 originally reported. Also confirms
-        the figure is still closed (finally block) despite the failure."""
+        publish-or-cleanup path removes the private temp file -- zero .png
+        files and zero stray temp files remain, not the zero-byte
+        placeholder Audit3 originally reported. Also confirms the figure is
+        still closed (finally block) despite the failure."""
         import matplotlib.figure
         import matplotlib.pyplot as plt
         result = _synthetic_result(include_ringdown=False)
@@ -1972,7 +2272,7 @@ class TestPlotting(unittest.TestCase):
                 with self.assertRaises(OSError):
                     plotting.plot_inspiral(result, outdir=outdir)
             self.assertEqual(list(Path(outdir).glob("*.png")), [])
-            self.assertEqual(list(Path(outdir).glob("*.png.tmp")), [])
+            self.assertEqual(list(Path(outdir).glob(".gw_tmp_*")), [])
             self.assertEqual(list(Path(outdir).iterdir()), [])
         # No figure leaked into pyplot's registry despite the exception.
         self.assertEqual(set(plt.get_fignums()), before)
@@ -2177,10 +2477,13 @@ class TestCLI(unittest.TestCase):
 
     def test_n_tau_out_of_range_is_ignored_without_ringdown_end_to_end(self):
         """Audit2 (Copilot A2-4): an out-of-range --n_tau has no effect
-        when --ringdown is not requested."""
+        when --ringdown is not requested. Audit4 (Codex P2-3): --f_start 100
+        replaces the previous default f_start=20 (789,004 steps) -- this
+        gating behavior does not depend on the default step count, and the
+        smaller run is far cheaper for an end-to-end subprocess check."""
         result = self._run(
             ["--m1", "1.4", "--m2", "1.4", "--d", "400", "--dt", "2e-4",
-             "--n_tau", "0"],
+             "--f_start", "100", "--n_tau", "0"],
             timeout=30,
         )
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -15,7 +15,7 @@ import math
 import sys
 import numpy as np
 
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -570,15 +570,32 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
             # Interpolate the final partial step to end exactly at the ISCO cutoff.
             #
             # Audit3 (Gemini): this is a *linear* interpolation in frac, but
-            # phase accumulates quadratically over the step (dPhase/dt = 2*pi*f,
-            # and f itself is increasing), so this is only approximate. At this
-            # program's pedagogical default (dt=2e-4 s) the resulting error is
-            # sub-milliradian -- far below anything the plotted waveform or the
-            # tutorial exercises can distinguish -- so it is left as linear
-            # interpolation rather than a root-find on this one boundary step.
-            # A future adaptation aimed at high-precision template generation
-            # (rather than this leading-order teaching tool) should revisit
-            # this, e.g. with a proper root-finding boundary crossing.
+            # phase is not linear over the step (dPhase/dt = 2*pi*f, and f
+            # itself is increasing), so this is only approximate. Audit4
+            # (Codex P2-2): an earlier version of this comment additionally
+            # claimed the resulting error is "sub-milliradian at this
+            # program's pedagogical default" -- that number was measured on
+            # the Help file's 36+29 Msun BBH example at dt=1e-4 s (final
+            # error there is indeed tiny, about 1e-5 rad), not on the actual
+            # default 1.4+1.4 Msun BNS case at dt=2e-4 s, where an
+            # independent closed-form phase oracle (see
+            # test_default_bns_final_phase_absolute_interpolation_error_is_
+            # measured_not_assumed in the test suite) shows this final-step
+            # interpolation error is instead about 0.03 rad (roughly 0.005
+            # of a cycle) -- some 30 times larger, though still a tiny
+            # fraction of the ~31,706 rad accumulated over the full run and
+            # far below anything the plotted waveform can visually
+            # distinguish. The error scale is case-dependent (it shrinks
+            # with smaller dt and varies with the masses/f_start chosen), so
+            # it should be re-measured for other parameter combinations
+            # rather than assumed; it is left as linear interpolation rather
+            # than a root-find on this one boundary step because this
+            # program is a leading-order teaching tool, not a high-precision
+            # template generator. A future adaptation aimed at high-
+            # precision template generation should revisit this, e.g. with a
+            # proper root-finding boundary crossing (see Help Algorithm step
+            # 6 / EXP-8 for the corresponding student-facing caveat, which
+            # was already correctly qualitative and needs no change).
             frac = (f_isco_hz - f) / (f_next - f)
             t += frac * dt
             phase += frac * (phase_next - phase)
