@@ -7,6 +7,7 @@ Orchestration layer for GravitationalWaveSources.
 import csv
 import math
 import os
+import stat
 import tempfile
 from datetime import datetime, timezone
 
@@ -129,10 +130,106 @@ def _create_private_temp_file(directory, ext):
     any published name and creates it with O_CREAT|O_EXCL (refusing to
     follow an existing path/symlink), so nothing else on the system can
     anticipate or pre-plant a symlink at this name.
+
+    Audit5 (Codex P2-1): the returned file descriptor `fd` is kept open
+    (mkstemp already created it) and returned alongside tmp_path, instead
+    of being closed here. The earlier Audit4 version closed fd immediately
+    and had every caller reopen tmp_path by name to write content -- but
+    that reopen is itself a second, path-based operation, separated in
+    time from the fd-based creation above, and nothing stops something
+    else from deleting tmp_path and creating a symlink in its place during
+    that gap (e.g. a shared/world-writable output directory, or another
+    process racing this one). Reopening by name would then silently follow
+    that symlink. Keeping the original fd open and writing through it
+    (os.fdopen(fd, ..., closefd=False), see _write_csv/_do_write and the
+    plot_gw counterpart) means the bytes always land in the exact inode
+    mkstemp created, never in whatever tmp_path happens to resolve to by
+    the time writing starts. _verify_temp_identity() below adds a second,
+    independent check of this immediately before publication.
     """
     fd, tmp_path = tempfile.mkstemp(prefix=".gw_tmp_", suffix=f".{ext}", dir=directory)
-    os.close(fd)
-    return tmp_path
+    return fd, tmp_path
+
+
+def _default_output_file_mode():
+    """Return the permission mode an ordinary open(path, "w") would have
+    produced for a new file, given the process's current umask.
+
+    Audit5 (Codex P3-1): tempfile.mkstemp() always creates its file with
+    mode 0o600 (owner read/write only), regardless of umask -- that is
+    mkstemp's own documented, deliberately conservative default, chosen
+    because a temp file's name is normally private to the process that
+    created it. Once this program links that same file out under a public,
+    predictable name for a student to open (see _publish_atomically), a
+    mode of 0o600 is a behavior change from the pre-Audit4 design (which
+    used a plain open(path, "w") and therefore got the ordinary
+    umask-controlled mode, typically 0o644) -- and an unwelcome one, since
+    it silently makes exported CSVs/PNGs unreadable by anyone but the user
+    who ran the program, on a multi-user machine or a shared directory.
+    This computes what that ordinary open() would have produced, so the
+    published file's permissions can be normalized to match (see
+    _publish_or_cleanup below) rather than inheriting mkstemp's stricter
+    default. Reading the umask requires briefly setting it (os.umask() has
+    no read-only form) and then immediately restoring the original value;
+    this is not atomic with respect to other threads in the same process
+    that also touch the umask, but CPython's umask is process-wide and
+    this program does not otherwise set it, so in practice this executes
+    without any other umask change interleaved.
+    """
+    saved = os.umask(0)
+    os.umask(saved)
+    return 0o666 & ~saved
+
+
+def _verify_temp_identity(fd, tmp_path):
+    """Confirm tmp_path still refers to the exact same regular file that
+    `fd` was opened against, immediately before that path is used to
+    publish the file under a public name.
+
+    Audit5 (Codex P2-1): _create_private_temp_file() creates tmp_path
+    securely and this program always writes through `fd`, not by
+    reopening tmp_path -- but _publish_atomically() below still uses
+    tmp_path (a name, not a descriptor) as the *source* of os.link(), since
+    os.link() has no fd-based form in the standard library usable here.
+    Between tmp_path's creation and that os.link() call, something else
+    with access to `directory` could in principle delete tmp_path and
+    create a new file or a symlink at that same name (e.g. to a sensitive
+    file elsewhere) -- os.link() would then publish that substituted
+    target's content under this program's output name instead of the
+    content this program actually wrote.
+
+    This narrows that window rather than eliminating it: os.lstat(tmp_path)
+    (which does NOT follow a symlink) is compared against os.fstat(fd)
+    (the descriptor this program has held open since creation) by device
+    and inode number. A mismatch, or tmp_path having become a symlink at
+    all, means the name no longer identifies the file this program wrote,
+    and publication is refused. This still leaves a narrow race between
+    this check and the os.link() call immediately after it (a true
+    TOCTOU-free guarantee would require an operation that both verifies
+    identity and links atomically by fd, which POSIX does not offer
+    through Python's standard library) -- so this is a defense-in-depth
+    check, not an airtight one, and the atomicity/security claims this
+    program makes are scoped to ordinary, non-adversarial output
+    directories (a student's own working directory), not to a directory
+    under an untrusted party's control.
+    """
+    try:
+        entry = os.lstat(tmp_path)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot verify temporary file {tmp_path!r} before publication: {exc}."
+        ) from exc
+    if stat.S_ISLNK(entry.st_mode):
+        raise RuntimeError(
+            f"Refusing to publish: {tmp_path!r} has been replaced with a "
+            "symlink since it was created."
+        )
+    fd_entry = os.fstat(fd)
+    if (entry.st_dev, entry.st_ino) != (fd_entry.st_dev, fd_entry.st_ino):
+        raise RuntimeError(
+            f"Refusing to publish: {tmp_path!r} no longer refers to the "
+            "file this program created."
+        )
 
 
 def _fsync_directory(directory):
@@ -163,7 +260,7 @@ def _fsync_directory(directory):
         os.close(dir_fd)
 
 
-def _publish_atomically(tmp_path, directory, prefix, ext, now, max_attempts=1000):
+def _publish_atomically(fd, tmp_path, directory, prefix, ext, now, max_attempts=1000):
     """Publish the already-fully-written file at tmp_path under a fresh
     "prefix_timestamp[_n].ext" public name in `directory`, without ever
     creating that public name before the content is complete.
@@ -203,7 +300,16 @@ def _publish_atomically(tmp_path, directory, prefix, ext, now, max_attempts=1000
     explicit fsync and the note on the plot_gw counterpart), and
     _fsync_directory() above is only a best-effort attempt to make the new
     directory entry itself durable, not a guaranteed one.
+
+    Audit5 (Codex P2-1): now also takes the open `fd` from
+    _create_private_temp_file() and calls _verify_temp_identity(fd,
+    tmp_path) immediately before the first os.link() attempt, so a
+    tmp_path that has been deleted-and-recreated or replaced with a
+    symlink since creation is caught here rather than silently linked in.
+    See _verify_temp_identity's docstring for exactly what this does and
+    does not guarantee.
     """
+    _verify_temp_identity(fd, tmp_path)
     base = _timestamp_fname(now, prefix=prefix, ext=ext)
     stem = base[: -(len(ext) + 1)]  # strip the trailing ".<ext>"
     for attempt in range(max_attempts):
@@ -228,29 +334,53 @@ def _publish_atomically(tmp_path, directory, prefix, ext, now, max_attempts=1000
 
 
 def _publish_or_cleanup(write_fn, directory, prefix, ext, now):
-    """Build one artifact's content by calling write_fn(tmp_path), where
-    tmp_path is a securely-created private temporary file inside
-    `directory` (see _create_private_temp_file), then publish it under a
-    fresh "prefix_timestamp[_n].ext" public name using the single already-
+    """Build one artifact's content by calling write_fn(fd, tmp_path),
+    where tmp_path is a securely-created private temporary file inside
+    `directory` and fd is the still-open descriptor mkstemp created it
+    with (see _create_private_temp_file), then publish it under a fresh
+    "prefix_timestamp[_n].ext" public name using the single already-
     captured `now` instant (see _publish_atomically) -- or, on any failure
     from write_fn or publication, remove the temporary file and re-raise
     without ever having created a public name.
 
     Audit3 (Codex P2-1; Copilot A3-2/A3-3) originally raised the failure-
     cleanup requirement this implements; Audit4 (Codex P2-1) is the reason
-    the underlying reservation/publish mechanism changed -- see
-    _publish_atomically's docstring for what changed and why.
+    the underlying reservation/publish mechanism changed; Audit5 (Codex
+    P2-1) is why write_fn now receives the open fd instead of just a path
+    -- see _create_private_temp_file's and _publish_atomically's
+    docstrings for what changed and why.
+
+    write_fn is expected to write through fd (e.g. via
+    os.fdopen(fd, mode, ..., closefd=False)) and must NOT close fd itself
+    -- this function always closes it exactly once, in the finally block
+    below, regardless of how write_fn or publication finishes. Audit5
+    (Codex P3-1): on the success path, before publication, the file's
+    permissions are normalized from mkstemp's fixed 0o600 to the ordinary
+    umask-controlled mode a plain open(path, "w") would have produced (see
+    _default_output_file_mode) -- using os.fchmod(fd, ...), which acts on
+    the descriptor rather than the path, so this cannot be redirected by a
+    symlink substituted at tmp_path the way a path-based os.chmod() could
+    be. os.fchmod is POSIX-only (absent on Windows), so it is skipped
+    there; Windows' own ACL-based permission model does not have an
+    equivalent umask-driven "default mode" for this to normalize toward.
     """
-    tmp_path = _create_private_temp_file(directory, ext)
+    fd, tmp_path = _create_private_temp_file(directory, ext)
     try:
-        write_fn(tmp_path)
-        return _publish_atomically(tmp_path, directory, prefix, ext, now)
+        write_fn(fd, tmp_path)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, _default_output_file_mode())
+        return _publish_atomically(fd, tmp_path, directory, prefix, ext, now)
     except BaseException:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
         raise
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _write_csv(result, csvdir):
@@ -323,8 +453,15 @@ def _write_csv(result, csvdir):
         "# columns: t_s,f_hz,A,h,phase_rad -- f_hz/A are blank on ringdown-only rows",
     ]
 
-    def _do_write(tmp_path):
-        with open(tmp_path, "w", newline="", encoding="utf-8") as handle:
+    def _do_write(fd, tmp_path):
+        # Audit5 (Codex P2-1): write through the already-open fd (via
+        # os.fdopen(..., closefd=False)) instead of reopening tmp_path by
+        # name -- see _create_private_temp_file's docstring for why a
+        # path-based reopen here would reintroduce the race this fixes.
+        # closefd=False means the `with` block's close() at the end closes
+        # only this Python-level file object, not the underlying fd, which
+        # _publish_or_cleanup() owns and closes itself.
+        with os.fdopen(fd, "w", newline="", encoding="utf-8", closefd=False) as handle:
             for line in meta_lines:
                 handle.write(line + "\n")
             writer = csv.writer(handle)
@@ -337,7 +474,7 @@ def _write_csv(result, csvdir):
                     for v in (t, f, A, h, phase)
                 ])
             handle.flush()
-            os.fsync(handle.fileno())
+            os.fsync(fd)
 
     fpath = _publish_or_cleanup(_do_write, csvdir, "gw_inspiral", "csv", now)
     print(f"[driver_gw] CSV saved -> {fpath}")

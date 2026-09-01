@@ -5,6 +5,7 @@ Three-panel Matplotlib visualization for GravitationalWaveSources.
 """
 
 import os
+import stat
 import tempfile
 import numpy as np
 from datetime import datetime, timezone
@@ -71,10 +72,58 @@ def _create_private_temp_file(directory, ext="png"):
     anticipate or pre-plant a symlink at this name; duplicated here rather
     than imported, per this project's existing convention of not sharing
     code across the driver_gw/plot_gw split.
+
+    Audit5 (Codex P2-1): the returned fd is kept open and returned
+    alongside tmp_path, instead of being closed here -- see
+    driver_gw._create_private_temp_file's docstring for the full
+    rationale (a path-based reopen of tmp_path, after fd is closed, is a
+    second operation separated in time from this one, and can be raced).
     """
     fd, tmp_path = tempfile.mkstemp(prefix=".gw_tmp_", suffix=f".{ext}", dir=directory)
-    os.close(fd)
-    return tmp_path
+    return fd, tmp_path
+
+
+def _default_output_file_mode():
+    """Return the permission mode an ordinary open(path, "w") would have
+    produced, given the process's current umask.
+
+    See driver_gw._default_output_file_mode for the full rationale (Audit5
+    Codex P3-1); duplicated here rather than imported, per this project's
+    existing convention of not sharing code across the driver_gw/plot_gw
+    split.
+    """
+    saved = os.umask(0)
+    os.umask(saved)
+    return 0o666 & ~saved
+
+
+def _verify_temp_identity(fd, tmp_path):
+    """Confirm tmp_path still refers to the exact same regular file that
+    `fd` was opened against, immediately before that path is used to
+    publish the file under a public name.
+
+    See driver_gw._verify_temp_identity for the full rationale (Audit5
+    Codex P2-1) and for exactly what this does and does not guarantee;
+    duplicated here rather than imported, per this project's existing
+    convention of not sharing code across the driver_gw/plot_gw split.
+    """
+    try:
+        entry = os.lstat(tmp_path)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Cannot verify temporary file {tmp_path!r} before publication: {exc}."
+        ) from exc
+    if stat.S_ISLNK(entry.st_mode):
+        raise RuntimeError(
+            f"Refusing to publish: {tmp_path!r} has been replaced with a "
+            "symlink since it was created."
+        )
+    fd_entry = os.fstat(fd)
+    if (entry.st_dev, entry.st_ino) != (fd_entry.st_dev, fd_entry.st_ino):
+        raise RuntimeError(
+            f"Refusing to publish: {tmp_path!r} no longer refers to the "
+            "file this program created."
+        )
 
 
 def _fsync_directory(directory):
@@ -94,7 +143,7 @@ def _fsync_directory(directory):
         os.close(dir_fd)
 
 
-def _publish_atomically(tmp_path, directory, prefix, now, ext="png", max_attempts=1000):
+def _publish_atomically(fd, tmp_path, directory, prefix, now, ext="png", max_attempts=1000):
     """Publish the already-fully-written file at tmp_path under a fresh
     "prefix_timestamp[_n].png" public name in `directory`, without ever
     creating that public name before the content is complete.
@@ -107,7 +156,12 @@ def _publish_atomically(tmp_path, directory, prefix, now, ext="png", max_attempt
     here creates the public name only once tmp_path already holds the
     complete PNG, and fails atomically (retried with a "_1", "_2", ...
     suffix) rather than silently overwriting a same-named collision.
+
+    Audit5 (Codex P2-1): now also takes the open `fd` and calls
+    _verify_temp_identity(fd, tmp_path) immediately before the first
+    os.link() attempt -- see driver_gw._publish_atomically's Audit5 note.
     """
+    _verify_temp_identity(fd, tmp_path)
     base = _timestamp_fname(now, prefix=prefix)
     stem = base[: -(len(ext) + 1)]
     for attempt in range(max_attempts):
@@ -132,25 +186,38 @@ def _publish_atomically(tmp_path, directory, prefix, now, ext="png", max_attempt
 
 
 def _publish_or_cleanup(write_fn, directory, prefix, now):
-    """Build the PNG by calling write_fn(tmp_path), where tmp_path is a
-    securely-created private temporary file inside `directory`, then
-    publish it under a fresh "prefix_timestamp[_n].png" public name using
-    the single already-captured `now` instant -- or, on any failure, remove
-    the temporary file and re-raise without ever having created a public
-    name. See driver_gw._publish_or_cleanup for the full rationale;
-    duplicated here rather than imported, per this project's existing
-    convention of not sharing code across the driver_gw/plot_gw split.
+    """Build the PNG by calling write_fn(fd, tmp_path), where tmp_path is a
+    securely-created private temporary file inside `directory` and fd is
+    the still-open descriptor mkstemp created it with, then publish it
+    under a fresh "prefix_timestamp[_n].png" public name using the single
+    already-captured `now` instant -- or, on any failure, remove the
+    temporary file and re-raise without ever having created a public name.
+    See driver_gw._publish_or_cleanup for the full rationale (including
+    the Audit5 Codex P2-1/P3-1 changes to this signature); duplicated here
+    rather than imported, per this project's existing convention of not
+    sharing code across the driver_gw/plot_gw split.
+
+    write_fn is expected to write through fd (e.g. via a file object
+    wrapped with closefd=False) and must NOT close fd itself -- this
+    function always closes it exactly once, in the finally block below.
     """
-    tmp_path = _create_private_temp_file(directory)
+    fd, tmp_path = _create_private_temp_file(directory)
     try:
-        write_fn(tmp_path)
-        return _publish_atomically(tmp_path, directory, prefix, now)
+        write_fn(fd, tmp_path)
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, _default_output_file_mode())
+        return _publish_atomically(fd, tmp_path, directory, prefix, now)
     except BaseException:
         try:
             os.remove(tmp_path)
         except OSError:
             pass
         raise
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def plot_inspiral(result, outdir=None,
@@ -198,17 +265,24 @@ def plot_inspiral(result, outdir=None,
         # one (Audit3 Codex P2-1 / Copilot A3-3; Audit4 Codex P2-1 replaced
         # the reservation/rename mechanism itself -- see that docstring).
         if outdir is not None:
-            def _do_save(tmp_path):
-                fig.savefig(tmp_path, dpi=dpi, bbox_inches="tight", format="png")
-                # Audit4 (Codex P2-1, item 4): fsync the PNG's own file
-                # content before it is published -- Matplotlib's savefig()
-                # does not fsync on its own, and _publish_atomically() only
-                # best-effort-fsyncs the *directory* entry, not file data.
-                fd = os.open(tmp_path, os.O_RDONLY)
-                try:
+            def _do_save(fd, tmp_path):
+                # Audit5 (Codex P2-1): save through the already-open fd
+                # (via os.fdopen(..., closefd=False)) rather than passing
+                # tmp_path to savefig() by name -- see
+                # driver_gw._create_private_temp_file's docstring for why
+                # a path-based reopen here would reintroduce the race this
+                # fixes. format="png" stays explicit: a file object's
+                # .name is not a real ".png" path Matplotlib can sniff an
+                # extension from.
+                with os.fdopen(fd, "wb", closefd=False) as handle:
+                    fig.savefig(handle, dpi=dpi, bbox_inches="tight", format="png")
+                    # Audit4 (Codex P2-1, item 4): fsync the PNG's own file
+                    # content before it is published -- Matplotlib's
+                    # savefig() does not fsync on its own, and
+                    # _publish_atomically() only best-effort-fsyncs the
+                    # *directory* entry, not file data.
+                    handle.flush()
                     os.fsync(fd)
-                finally:
-                    os.close(fd)
 
             now = datetime.now(timezone.utc)
             fpath = _publish_or_cleanup(_do_save, outdir, "gw_inspiral", now)

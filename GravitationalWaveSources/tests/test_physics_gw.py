@@ -27,6 +27,7 @@ Instead each quantity is cross-checked against at least one of:
 import ast
 from collections import Counter
 from datetime import datetime, timezone
+import functools
 import hashlib
 import html
 from html.parser import HTMLParser
@@ -36,6 +37,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -78,6 +80,34 @@ if str(MODULE_DIR) not in sys.path:
 import driver_gw as driver  # noqa: E402
 import physics_gw as physics  # noqa: E402
 import plot_gw as plotting  # noqa: E402
+
+
+@functools.lru_cache(maxsize=1)
+def _default_bns_result():
+    """Run the program's actual pedagogical default (1.4+1.4 Msun BNS,
+    dt=2e-4, f_start=20.0 -- the ~789,000-step integration) exactly once
+    per test process, shared by every test that genuinely needs a result
+    from this exact case.
+
+    Audit4 (Codex P2-3) already went to some trouble to avoid running this
+    expensive default case where a cheaper --f_start setting would serve
+    just as well. Audit5 (Codex P2-2) found that this effort was
+    incomplete: two different tests --
+    TestDefaultAndBBHReferenceCase.test_default_bns_case_matches_hand_computation
+    (verifies the headline numbers quoted in the Help file) and
+    TestIntegrateInspiralNominal.test_default_bns_final_phase_absolute_interpolation_error_is_measured_not_assumed
+    (measures the real final-step phase-interpolation error) -- each need
+    a result from this *exact* case, not a cheaper substitute, and each
+    ran its own independent copy of the identical ~789,000-step
+    integration. An Audit4-round response incorrectly described the CSV-
+    export test elsewhere in this file as the only remaining full-default-
+    case integration; these two were also still present. Caching here
+    means the expensive integration itself runs once while both tests
+    still exercise physics.integrate_inspiral()'s real, unmodified return
+    value -- callers must treat the returned dict/arrays as read-only
+    (not mutate them), since the same object is shared across tests.
+    """
+    return physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
 
 
 def read_gw_csv(path):
@@ -143,7 +173,10 @@ def recompute_build_id(directory):
 # ---------------------------------------------------------------------------
 _G = 6.674_30e-11
 _C = 2.997_924_58e8
-_MSUN = 1.988_92e30
+# Audit5: updated to match physics_gw.py's switch from a legacy adopted
+# M_sun to the value derived from the IAU 2015 nominal solar-mass
+# parameter (see that file's comment on its own M_sun constant).
+_MSUN = 1.988_41e30
 _MPC = 3.085_677_581_49e22
 
 
@@ -400,7 +433,19 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         # datetime.now() calls; and the phase-linear-interpolation code
         # comment's false "sub-milliradian at the program default" claim
         # was corrected to a measured, case-specific figure).
-        self.assertEqual(physics.MODEL_VERSION, "1.4.0")
+        #
+        # Audit5 round: bumped 1.4.0 -> 1.5.0 for this round's behavior
+        # changes (the write path for both the CSV and PNG exports now
+        # writes through the already-open descriptor mkstemp() created,
+        # rather than reopening the temp path by name, closing the race a
+        # substituted symlink could previously have exploited between temp-
+        # file creation and publication; the published file's permissions
+        # are now normalized to the ordinary umask-controlled mode instead
+        # of inheriting mkstemp's fixed 0o600; and M_sun switched from a
+        # legacy adopted value to the value derived from the IAU 2015
+        # nominal solar-mass parameter, a deliberate physical-constant
+        # policy decision, not a bug fix).
+        self.assertEqual(physics.MODEL_VERSION, "1.5.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -636,7 +681,7 @@ class TestChirpMassFromFdot(unittest.TestCase):
         difference fdot estimate, then inversion -- must recover the run's
         own printed chirp mass. Audit3 (Codex P2-2) moved EXP-7's
         documented data-generation command from the default f_start=20 Hz
-        (a 789,004-row/~78 MiB export) to --f_start 100 (a ~10,788-row/
+        (a 789,341-row/~78 MiB export) to --f_start 100 (a ~10,793-row/
         ~1 MiB export); this test follows that same command so it keeps
         emulating what a student following the Help text would actually
         run, not a larger export nobody is instructed to generate."""
@@ -649,7 +694,7 @@ class TestChirpMassFromFdot(unittest.TestCase):
         # 0.002 s apart) are identical, so this pins down the Help text's
         # own numbers, not merely a similar independent scenario.
         self.assertEqual((t1, f1), (0.0, 100.0))
-        self.assertEqual((t2, f2), (0.0020000000000000005, 100.03476529382071))
+        self.assertEqual((t2, f2), (0.0020000000000000005, 100.03475042806328))
         fdot_est = (f2 - f1) / (t2 - t1)
         f_mid = 0.5 * (f1 + f2)
         Mc_kg = physics.chirp_mass_from_fdot(f_mid, fdot_est)
@@ -830,17 +875,17 @@ class TestDefaultAndBBHReferenceCase(unittest.TestCase):
         A = ref_strain_amplitude(f_isco_hz, Mc, 400.0 * _MPC)
 
         self.assertEqual(f"{Mc/_MSUN:.4f}", "1.2188")
-        self.assertEqual(f"{f_isco_hz:.1f}", "1570.0")
-        self.assertEqual(f"{T:.3f}", "157.800")
-        self.assertEqual(f"{A:.3e}", "5.584e-23")
+        self.assertEqual(f"{f_isco_hz:.1f}", "1570.4")
+        self.assertEqual(f"{T:.3f}", "157.868")
+        self.assertEqual(f"{A:.3e}", "5.583e-23")
 
-        result = physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
+        result = _default_bns_result()
         s = result["summary"]
         self.assertAlmostEqual(s["Mc_msun"] / (Mc / _MSUN), 1.0, places=9)
         self.assertAlmostEqual(s["f_isco_hz"] / f_isco_hz, 1.0, places=9)
         self.assertAlmostEqual(s["T_band_s"] / T, 1.0, delta=1e-5)
         self.assertAlmostEqual(s["A_isco"] / A, 1.0, places=9)
-        self.assertEqual(s["inspiral_steps"], 789_004)
+        self.assertEqual(s["inspiral_steps"], 789_341)
 
     def test_bbh_ringdown_case_matches_hand_computation(self):
         m1, m2 = 36.0 * _MSUN, 29.0 * _MSUN
@@ -852,7 +897,7 @@ class TestDefaultAndBBHReferenceCase(unittest.TestCase):
 
         self.assertEqual(f"{f_isco_hz:.1f}", "67.6")
         self.assertEqual(f"{f_qnm:.1f}", "195.5")
-        self.assertEqual(f"{tau_qnm*1e3:.3f}", "3.418")
+        self.assertEqual(f"{tau_qnm*1e3:.3f}", "3.417")
 
         result = physics.integrate_inspiral(
             36.0, 29.0, 440.0, dt=2e-5, f_start=20.0,
@@ -916,7 +961,19 @@ class TestRK4Stepper(unittest.TestCase):
             return f, phase
 
         f0 = 20.0
-        T_fixed = 0.3  # well below this system's f_isco (~67.6 Hz)
+        # Audit5: T_fixed=0.3 (used through Audit4) pushed the second
+        # halving's error down to ~1e-13 -- the double-precision noise
+        # floor the comment below already anticipated. That was already
+        # fragile in principle, and the M_sun policy change this round
+        # (a ~0.026% shift in Mc, see physics_gw.py's M_sun comment) was
+        # enough to flip which side of the noise floor that comparison
+        # landed on, turning a real but tiny (~1e-13) improvement into an
+        # apparent regression. T_fixed=0.5 keeps the finest-dt error above
+        # ~1e-13 (verified with both the current and the previous M_sun
+        # value) while the reached frequency (~28 Hz) remains well below
+        # this system's f_isco (~67.6 Hz), so this still measures genuine
+        # RK4 truncation error, not floating-point round-off noise.
+        T_fixed = 0.5
         f_ref, _ = integrate_n_steps(f0, 1e-5, round(T_fixed / 1e-5))
 
         errors = []
@@ -926,12 +983,12 @@ class TestRK4Stepper(unittest.TestCase):
 
         ratio1 = errors[0] / errors[1]
         ratio2 = errors[1] / errors[2]
-        # Generous bracket around 16x: the second halving approaches the
-        # double-precision noise floor (errors ~1e-13), so only require the
-        # first, cleanly-resolved halving to show clear quartic behavior.
+        # Generous bracket around 16x for both halvings, now that both are
+        # comfortably resolved above the noise floor.
         self.assertGreater(ratio1, 10.0)
         self.assertLess(ratio1, 24.0)
-        self.assertGreater(ratio2, 1.0)  # still improving, not noise-dominated blowup
+        self.assertGreater(ratio2, 3.0)
+        self.assertLess(ratio2, 24.0)
 
     def test_numerically_integrated_time_to_isco_converges_to_analytic_value(self):
         """The *reported* time to ISCO is limited by the single linearly
@@ -1046,7 +1103,7 @@ class TestIntegrateInspiralNominal(unittest.TestCase):
         rad of total accumulated phase (which a 0.03 rad absolute error is
         far too small a fraction of to fail at places=4).
         """
-        result = physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
+        result = _default_bns_result()
         Mc_kg = result["summary"]["Mc_msun"] * physics.M_sun
         f0 = result["f"][0]
         f_last = result["f"][-1]
@@ -1412,8 +1469,8 @@ class TestIntegrateInspiralValidation(unittest.TestCase):
 
         Audit4 (Codex P2-3): this gating rule does not depend on the
         default f_start=20 Hz at all -- it is exercised identically, and
-        far more cheaply, at f_start=100 Hz (about 10,800 steps, per the
-        EXP-7 revision, versus 789,004 at the default). The previous
+        far more cheaply, at f_start=100 Hz (about 10,793 steps, per the
+        EXP-7 revision, versus 789,341 at the default). The previous
         version of this test ran the full default-f_start integration
         seven times in this one loop alone for no assertion that actually
         needed it.
@@ -1642,13 +1699,21 @@ class TestDriverRun(unittest.TestCase):
         route to the numerical arrays (e.g. for chirp-mass extraction).
         Audit2 (Codex P1-1 / Copilot A2-5, A2-6) additionally requires a
         commented metadata block above the header, and a fifth phase_rad
-        column."""
+        column.
+
+        Audit5 (Codex P2-2): this test only exercises the generic CSV
+        write/metadata/round-trip machinery -- none of it depends on
+        f_start=20 specifically -- so it uses --f_start 100 (a ~10,793-row
+        export) rather than the pedagogical default (a 789,341-row/~78 MiB
+        export). Every assertion below reads dynamically from the actual
+        `result`/`rows` objects, so nothing but the f_start value and its
+        one corresponding literal (20.0 -> 100.0) needed to change."""
         import matplotlib.pyplot as plt
         with tempfile.TemporaryDirectory() as csvdir:
             with mock.patch.object(plt, "show"):
                 result = driver.run(
                     m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
-                    dt=2e-4, f_start=20.0, csvdir=csvdir,
+                    dt=2e-4, f_start=100.0, csvdir=csvdir,
                 )
             saved = list(Path(csvdir).glob("*.csv"))
             self.assertEqual(len(saved), 1)
@@ -1656,7 +1721,7 @@ class TestDriverRun(unittest.TestCase):
             self.assertEqual(rows[0], ["t_s", "f_hz", "A", "h", "phase_rad"])
             self.assertEqual(len(rows) - 1, result["summary"]["inspiral_steps"])
             self.assertEqual(float(rows[1][0]), 0.0)
-            self.assertEqual(float(rows[1][1]), 20.0)
+            self.assertEqual(float(rows[1][1]), 100.0)
             # Audit3 (Codex P3-4): .17g is a round-trip-exact format for a
             # binary64 value (verified empirically: 100,000 random samples
             # across a wide magnitude range round-tripped with zero
@@ -1839,8 +1904,8 @@ class TestDriverRun(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             paths = []
             for content in (b"one", b"two", b"three"):
-                def _write(tmp_path, content=content):
-                    with open(tmp_path, "wb") as handle:
+                def _write(fd, tmp_path, content=content):
+                    with os.fdopen(fd, "wb", closefd=False) as handle:
                         handle.write(content)
                 paths.append(
                     driver._publish_or_cleanup(_write, d, "gw_inspiral", "csv", fixed)
@@ -1863,14 +1928,15 @@ class TestDriverRun(unittest.TestCase):
         paused = threading.Event()
         resume = threading.Event()
 
-        def slow_write(tmp_path):
-            with open(tmp_path, "w", encoding="utf-8") as handle:
-                handle.write("partial-data")
-                handle.flush()
+        def slow_write(fd, tmp_path):
+            handle = os.fdopen(fd, "w", encoding="utf-8", closefd=False)
+            handle.write("partial-data")
+            handle.flush()
             paused.set()
             self.assertTrue(resume.wait(timeout=10))
-            with open(tmp_path, "a", encoding="utf-8") as handle:
-                handle.write("-more")
+            handle.write("-more")
+            handle.flush()
+            handle.close()
 
         with tempfile.TemporaryDirectory() as csvdir:
             outcome = {}
@@ -1906,14 +1972,14 @@ class TestDriverRun(unittest.TestCase):
         randomly-named temp file, which carries no name a directory
         listing could mistake for a genuine completed export."""
         child_code = (
-            "import sys, time\n"
+            "import os, sys, time\n"
             "sys.path.insert(0, sys.argv[1])\n"
             "import driver_gw as driver\n"
             "from datetime import datetime, timezone\n"
             "csvdir = sys.argv[2]\n"
             "now = datetime.now(timezone.utc)\n"
-            "def slow_write(tmp_path):\n"
-            "    with open(tmp_path, 'w') as f:\n"
+            "def slow_write(fd, tmp_path):\n"
+            "    with os.fdopen(fd, 'w', closefd=False) as f:\n"
             "        f.write('partial')\n"
             "        f.flush()\n"
             "    print('READY', flush=True)\n"
@@ -1957,9 +2023,12 @@ class TestDriverRun(unittest.TestCase):
             booby_trapped_path = Path(d) / expected_base
             os.symlink(victim, booby_trapped_path)
 
+            def _write(fd, tmp_path):
+                with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
+                    handle.write("real content")
+
             published = driver._publish_or_cleanup(
-                lambda p: Path(p).write_text("real content", encoding="utf-8"),
-                d, "gw_inspiral", "csv", fixed,
+                _write, d, "gw_inspiral", "csv", fixed,
             )
 
             self.assertEqual(victim.read_text(encoding="utf-8"), "ORIGINAL")
@@ -1969,6 +2038,72 @@ class TestDriverRun(unittest.TestCase):
             self.assertFalse(os.path.islink(published))  # published file is a real file
             self.assertEqual(Path(published).read_text(encoding="utf-8"), "real content")
 
+    def test_temp_path_substituted_with_symlink_before_publish_is_refused(self):
+        """Audit5 (Codex P2-1, required regression): this is the attack
+        _verify_temp_identity() exists to catch, proven directly -- not
+        merely the earlier tests' proof that a symlink already sitting at
+        the *public* name is refused. Here write_fn writes real content
+        through the legitimately-created fd exactly as normal, but then --
+        simulating a racing process with write access to the same
+        directory, in the narrow window between write completion and
+        publication -- deletes tmp_path itself and replaces it with a
+        symlink to a victim file, before returning. _publish_or_cleanup
+        must refuse to publish (raising RuntimeError from
+        _verify_temp_identity, not silently linking the victim's content
+        out under this program's export name), the victim file must be
+        completely unchanged, and no public gw_inspiral_*.csv name may
+        exist afterward -- proving the fd this program actually wrote
+        through, not whatever tmp_path happens to resolve to at publish
+        time, is what determines what gets published (in this case,
+        nothing)."""
+        fixed = driver.datetime(2026, 1, 1, 12, 0, 0, 123456)
+
+        with tempfile.TemporaryDirectory() as d:
+            victim = Path(d) / "victim.txt"
+            victim.write_text("VICTIM CONTENT", encoding="utf-8")
+
+            def _write_then_substitute(fd, tmp_path):
+                with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
+                    handle.write("legitimate content")
+                os.unlink(tmp_path)
+                os.symlink(victim, tmp_path)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                driver._publish_or_cleanup(
+                    _write_then_substitute, d, "gw_inspiral", "csv", fixed,
+                )
+
+            self.assertEqual(victim.read_text(encoding="utf-8"), "VICTIM CONTENT")
+            self.assertEqual(list(Path(d).glob("gw_inspiral_*.csv")), [])
+
+    @unittest.skipUnless(hasattr(os, "fchmod"), "os.fchmod is POSIX-only")
+    def test_published_csv_has_ordinary_umask_controlled_permissions(self):
+        """Audit5 (Codex P3-1): tempfile.mkstemp() always creates its file
+        with mode 0o600 regardless of umask -- that is mkstemp's own
+        deliberately conservative default for a file meant to be private to
+        the creating process. Once this program publishes that same file
+        under a public, predictable name for a student to open, inheriting
+        0o600 unread unwritable-to-others is a silent behavior change from
+        the pre-Audit4 design (a plain open(path, "w"), which got the
+        ordinary umask-controlled mode). This confirms the published file's
+        permission bits match what a fresh open(path, "w") would have
+        produced under the *same* umask, computed independently here (not
+        by calling driver._default_output_file_mode(), so a bug in that
+        helper itself would not be invisible to this test)."""
+        fixed = driver.datetime(2026, 1, 1, 12, 0, 0, 123456)
+        saved_umask = os.umask(0)
+        os.umask(saved_umask)
+        expected_mode = 0o666 & ~saved_umask
+
+        def _write(fd, tmp_path):
+            with os.fdopen(fd, "w", encoding="utf-8", closefd=False) as handle:
+                handle.write("content")
+
+        with tempfile.TemporaryDirectory() as d:
+            published = driver._publish_or_cleanup(_write, d, "gw_inspiral", "csv", fixed)
+            actual_mode = stat.S_IMODE(os.stat(published).st_mode)
+            self.assertEqual(actual_mode, expected_mode)
+
     def test_frozen_timestamp_two_complete_writes_both_survive_intact(self):
         """Audit3 (Codex P2-1, required regression #5): the collision tests
         above only prove _publish_atomically() claims three distinct real
@@ -1977,7 +2112,7 @@ class TestDriverRun(unittest.TestCase):
         frozen timestamp each publish their own complete, distinguishable
         content rather than one clobbering the other or either being left
         truncated. Audit4 (Codex P2-3): the first run previously used the
-        default f_start=20 (789,004 steps, ~78 MiB) merely to be
+        default f_start=20 (789,341 steps, ~78 MiB) merely to be
         "distinguishable" from the second -- --f_start 100 is equally
         distinguishable (different m1/m2) and about 70x cheaper; the
         collision property being tested needs only two short runs."""
@@ -2094,7 +2229,7 @@ def _synthetic_result(include_ringdown=False):
     summary = dict(
         m1_msun=36.0, m2_msun=29.0, Mc_msun=28.096, d_mpc=440.0,
         f_start_hz=20.0, f_isco_hz=67.6, include_ringdown=include_ringdown,
-        f_qnm_hz=195.5, tau_qnm_ms=3.418,
+        f_qnm_hz=195.5, tau_qnm_ms=3.417,
     )
     if include_ringdown:
         t_rd = np.array([1.0005, 1.001, 1.002])
@@ -2217,8 +2352,8 @@ class TestPlotting(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             paths = []
             for content in (b"one", b"two", b"three"):
-                def _write(tmp_path, content=content):
-                    with open(tmp_path, "wb") as handle:
+                def _write(fd, tmp_path, content=content):
+                    with os.fdopen(fd, "wb", closefd=False) as handle:
                         handle.write(content)
                 paths.append(plotting._publish_or_cleanup(_write, d, "gw_inspiral", fixed))
             self.assertEqual(len(set(paths)), 3)
@@ -2242,9 +2377,12 @@ class TestPlotting(unittest.TestCase):
             booby_trapped_path = Path(d) / expected_base
             os.symlink(victim, booby_trapped_path)
 
+            def _write(fd, tmp_path):
+                with os.fdopen(fd, "wb", closefd=False) as handle:
+                    handle.write(b"\x89PNG-fake-content")
+
             published = plotting._publish_or_cleanup(
-                lambda p: Path(p).write_bytes(b"\x89PNG-fake-content"),
-                d, "gw_inspiral", fixed,
+                _write, d, "gw_inspiral", fixed,
             )
 
             self.assertEqual(victim.read_text(encoding="utf-8"), "ORIGINAL")
@@ -2252,6 +2390,54 @@ class TestPlotting(unittest.TestCase):
             self.assertNotEqual(published, str(booby_trapped_path))
             self.assertTrue(published.endswith("_1.png"), published)
             self.assertFalse(os.path.islink(published))
+
+    def test_temp_path_substituted_with_symlink_before_publish_is_refused(self):
+        """Audit5 (Codex P2-1, required regression), plot_gw-layer
+        counterpart to the driver_gw test of the same name: see that
+        test's docstring for the full rationale. write_fn writes real PNG
+        bytes through the legitimately-created fd, then -- simulating a
+        racing process -- deletes tmp_path and replaces it with a symlink
+        to a victim file before returning; publication must refuse
+        (RuntimeError from _verify_temp_identity), leaving the victim
+        untouched and no public gw_inspiral_*.png behind."""
+        fixed = plotting.datetime(2026, 1, 1, 12, 0, 0, 123456)
+
+        with tempfile.TemporaryDirectory() as d:
+            victim = Path(d) / "victim.txt"
+            victim.write_text("VICTIM CONTENT", encoding="utf-8")
+
+            def _write_then_substitute(fd, tmp_path):
+                with os.fdopen(fd, "wb", closefd=False) as handle:
+                    handle.write(b"\x89PNG-fake-content")
+                os.unlink(tmp_path)
+                os.symlink(victim, tmp_path)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                plotting._publish_or_cleanup(
+                    _write_then_substitute, d, "gw_inspiral", fixed,
+                )
+
+            self.assertEqual(victim.read_text(encoding="utf-8"), "VICTIM CONTENT")
+            self.assertEqual(list(Path(d).glob("gw_inspiral_*.png")), [])
+
+    @unittest.skipUnless(hasattr(os, "fchmod"), "os.fchmod is POSIX-only")
+    def test_published_png_has_ordinary_umask_controlled_permissions(self):
+        """Audit5 (Codex P3-1), plot_gw-layer counterpart to the driver_gw
+        test of the same name -- see that test's docstring for the full
+        rationale."""
+        fixed = plotting.datetime(2026, 1, 1, 12, 0, 0, 123456)
+        saved_umask = os.umask(0)
+        os.umask(saved_umask)
+        expected_mode = 0o666 & ~saved_umask
+
+        def _write(fd, tmp_path):
+            with os.fdopen(fd, "wb", closefd=False) as handle:
+                handle.write(b"\x89PNG-fake-content")
+
+        with tempfile.TemporaryDirectory() as d:
+            published = plotting._publish_or_cleanup(_write, d, "gw_inspiral", fixed)
+            actual_mode = stat.S_IMODE(os.stat(published).st_mode)
+            self.assertEqual(actual_mode, expected_mode)
 
     def test_savefig_failure_leaves_no_png_behind(self):
         """Audit3 (Codex P2-1 / Copilot A3-3, required regression): patch
@@ -2331,10 +2517,10 @@ class TestCLI(unittest.TestCase):
         self.assertIn(f"GravitationalWaveSources {physics.MODEL_VERSION}", result.stdout)
         self.assertIn(f"(build {physics.BUILD_ID})", result.stdout)
         self.assertIn("Chirp mass          : 1.2188", result.stdout)
-        self.assertIn("ISCO cutoff         : 1570.0", result.stdout)
-        self.assertIn("Time to ISCO        : 157.800", result.stdout)
-        self.assertIn("Strain scale at ISCO: 5.584e-23", result.stdout)
-        self.assertIn("Inspiral samples    : 789,004", result.stdout)
+        self.assertIn("ISCO cutoff         : 1570.4", result.stdout)
+        self.assertIn("Time to ISCO        : 157.868", result.stdout)
+        self.assertIn("Strain scale at ISCO: 5.583e-23", result.stdout)
+        self.assertIn("Inspiral samples    : 789,341", result.stdout)
         self.assertIn("Ringdown            : not included", result.stdout)
         self.assertNotIn("Traceback", result.stderr)
 
@@ -2346,7 +2532,7 @@ class TestCLI(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("QNM frequency       : 195.5", result.stdout)
-        self.assertIn("QNM decay time      : 3.418", result.stdout)
+        self.assertIn("QNM decay time      : 3.417", result.stdout)
 
     def test_invalid_inputs_produce_single_clean_error_line_no_traceback(self):
         cases = {
@@ -2430,7 +2616,7 @@ class TestCLI(unittest.TestCase):
     def test_exp7_revised_command_produces_a_small_csv_end_to_end(self):
         """Audit3 (Codex P2-2, recommended regression): the revised EXP-7
         data-generation command (--f_start 100, in place of the old
-        default --f_start 20 which produces a 789,004-row/~78 MiB export)
+        default --f_start 20 which produces a 789,341-row/~78 MiB export)
         must actually produce a small file end-to-end through the real
         CLI, and the exact two-point method described in the Help snippet
         must recover 1.2188 from rows this real run actually wrote --
@@ -2442,8 +2628,8 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(len(saved), 1)
             meta, rows = read_gw_csv(saved[0])
             data_rows = rows[1:]
-            # A generous ceiling: comfortably above the documented ~10,788
-            # rows, but two orders of magnitude below the old 789,004-row
+            # A generous ceiling: comfortably above the documented ~10,793
+            # rows, but two orders of magnitude below the old 789,341-row
             # default-f_start export this exercise used to require.
             self.assertLess(len(data_rows), 50_000)
             self.assertLess(saved[0].stat().st_size, 5 * 1024 * 1024)  # < 5 MiB
@@ -2478,7 +2664,7 @@ class TestCLI(unittest.TestCase):
     def test_n_tau_out_of_range_is_ignored_without_ringdown_end_to_end(self):
         """Audit2 (Copilot A2-4): an out-of-range --n_tau has no effect
         when --ringdown is not requested. Audit4 (Codex P2-3): --f_start 100
-        replaces the previous default f_start=20 (789,004 steps) -- this
+        replaces the previous default f_start=20 (789,341 steps) -- this
         gating behavior does not depend on the default step count, and the
         smaller run is far cheaper for an end-to-end subprocess check."""
         result = self._run(

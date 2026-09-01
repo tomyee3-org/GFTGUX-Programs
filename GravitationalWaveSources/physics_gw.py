@@ -15,7 +15,7 @@ import math
 import sys
 import numpy as np
 
-MODEL_VERSION = "1.4.0"
+MODEL_VERSION = "1.5.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -68,7 +68,17 @@ BUILD_ID = _compute_build_id()
 # Physical constants
 G = 6.674_30e-11       # m^3 kg^-1 s^-2
 c = 2.997_924_58e8     # m s^-1
-M_sun = 1.988_92e30    # kg
+
+#: Audit5: derived from the IAU 2015 Resolution B3 nominal solar-mass
+#: parameter, GM_sun_N = 1.327_1244e20 m^3 s^-2 (exact by definition),
+#: divided by G above: 1.327_1244e20 / 6.674_30e-11 = 1.988_4098...e30,
+#: rounded to the same 6-significant-figure precision as this program's own
+#: G. A commonly cited legacy adopted value, 1.988_92e30 kg, differs from
+#: this by about 0.026%; this program uses the nominal-parameter-derived
+#: value throughout rather than the legacy one (a deliberate choice, not an
+#: oversight -- see GravitationalWaveSources.html's "Physical constants
+#: used" note for the full rationale).
+M_sun = 1.988_41e30    # kg
 MPC_M = 3.085_677_581_49e22
 
 MAX_INSPIRAL_STEPS = 5_000_000
@@ -147,9 +157,15 @@ def chirp_mass(m1_kg, m2_kg):
     non-finite inputs) they raise whatever Python itself raises for the
     underlying arithmetic (a ZeroDivisionError, a complex result from a
     fractional power of a negative number, etc.) rather than a descriptive
-    ValueError -- this is intentional and is pinned down by
-    TestLowLevelHelperDomainContract in the test suite, not merely
-    undocumented behavior.
+    ValueError -- this is intentional: out-of-domain behavior for these
+    low-level helpers is simply unsupported and may change without notice,
+    since integrate_inspiral()'s own validation is what every real caller
+    actually relies on (Audit5 Codex P3-3: an earlier version of this
+    docstring claimed this behavior was pinned down by a
+    TestLowLevelHelperDomainContract test class; those outcome-pinning
+    tests were removed in the Audit4 round as testing incidental Python
+    arithmetic behavior rather than this program's own contract, and this
+    docstring was not updated to match at the time).
     """
     return (m1_kg * m2_kg) ** 0.6 / (m1_kg + m2_kg) ** 0.2
 
