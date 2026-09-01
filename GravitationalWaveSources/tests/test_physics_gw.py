@@ -26,12 +26,14 @@ Instead each quantity is cross-checked against at least one of:
 
 import ast
 from collections import Counter
+import contextlib
 from datetime import datetime, timezone
 import functools
 import hashlib
 import html
 from html.parser import HTMLParser
 import inspect
+import io
 import math
 import os
 from pathlib import Path
@@ -262,6 +264,39 @@ def ref_dfdt_hz_per_s(f_hz, Mc_kg):
     return (96.0 / 5.0) * math.pi ** (8.0 / 3.0) * Mc_geom ** (5.0 / 3.0) * f_hz ** (11.0 / 3.0)
 
 
+def ref_frequency_from_time_hz(f0_hz, t_s, Mc_kg):
+    """Closed-form leading-order GW frequency reached after integrating for
+    t_s seconds starting from f0_hz, derived (and coded) from scratch here
+    -- NOT by running physics_gw's RK4 stepper at a very fine dt.
+
+    Starting from the same governing ODE the model integrates,
+    df/dt = K f^(11/3) (K from ref_dfdt_hz_per_s above), this separates and
+    integrates directly:
+
+        f^(-11/3) df = K dt
+        (-3/8) [f^(-8/3) - f0^(-8/3)] = K t
+        f(t) = [f0^(-8/3) - (8/3) K t]^(-3/8)
+
+    Audit7 (Codex P2-1): the RK4-convergence-order regression previously
+    compared coarse-dt integrations against a dt=1e-5 numerical "reference"
+    integration -- itself only an approximation, and (at the specific
+    T_fixed values tried) actually LESS accurate than the finest coarse-dt
+    result it was meant to judge, so the comparison measured roundoff
+    cancellation between two noisy numbers rather than genuine truncation
+    error, and needed retuning every time a least-significant-digit
+    constants change (such as Audit6's M_sun/GM_sun_nominal switch) moved
+    which side of that cancellation the ratios landed on. This closed-form
+    oracle is exact (to double-precision arithmetic on elementary
+    functions, not to a chosen step size), algebraically independent of the
+    RK4 stepper physics_gw actually runs, and requires no retuning as
+    Mc drifts by a tiny amount -- the error of every dt tried is measured
+    against the true answer, not against another approximation.
+    """
+    Mc_geom = _G * Mc_kg / _C**3
+    K = (96.0 / 5.0) * math.pi ** (8.0 / 3.0) * Mc_geom ** (5.0 / 3.0)
+    return (f0_hz ** (-8.0 / 3.0) - (8.0 / 3.0) * K * t_s) ** (-3.0 / 8.0)
+
+
 def ref_phase_from_frequency(f0_hz, f_hz, Mc_kg):
     """Closed-form leading-order accumulated GW phase between f0 and f,
     derived (and coded) from scratch here -- NOT by calling physics_gw's
@@ -484,7 +519,18 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         # design rationale -- a documentation/readability change with no
         # effect on program behavior, so it does not by itself justify
         # this version bump (the umask and M_sun changes above do).
-        self.assertEqual(physics.MODEL_VERSION, "1.6.0")
+        #
+        # Audit7 round: bumped 1.6.0 -> 1.7.0 for this round's behavior
+        # changes to the permission-probe cleanup path (the disposable
+        # .gw_modeprobe_* file's close-then-unlink sequence no longer lets
+        # a close() failure skip the unlink attempt, and a failed unlink is
+        # now reported with a printed diagnostic rather than silently
+        # swallowed) -- a real, if narrow, behavior change to driver_gw.py
+        # and plot_gw.py, not merely a comment or test change. The RK4
+        # fourth-order convergence test's numerical dt=1e-5 "reference" was
+        # also replaced with an algebraically exact closed-form oracle
+        # (test-only; does not affect BUILD_ID).
+        self.assertEqual(physics.MODEL_VERSION, "1.7.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -1020,8 +1066,25 @@ class TestRK4Stepper(unittest.TestCase):
 
     def test_bulk_stepper_is_fourth_order_accurate_away_from_cutoff(self):
         """Away from the ISCO crossing (where no interpolation happens),
-        halving dt should shrink the error against a high-resolution
-        reference by close to 2^4 = 16, confirming true RK4 order."""
+        halving dt should shrink the error against the true answer by close
+        to 2^4 = 16, confirming true RK4 order.
+
+        Audit7 (Codex P2-1): this test previously judged each coarse-dt
+        integration against a dt=1e-5 numerical "reference" integration
+        rather than the true answer -- but that reference is itself only an
+        approximation, and at the T_fixed values this test tried, was
+        actually LESS accurate than the finest coarse-dt result it was
+        judging. Subtracting one noisy approximation from another measures
+        truncation error plus roundoff cancellation, not truncation error
+        alone; this is why the test needed retuning (T_fixed 0.3 -> 0.5 ->
+        0.6) every time a least-significant-digit constants change moved
+        which side of that cancellation the ratios landed on, rather than
+        because RK4's actual convergence changed. It now compares against
+        ref_frequency_from_time_hz(), the algebraically exact closed-form
+        solution of df/dt = K f^(11/3) (see that function's docstring),
+        which requires no retuning as Mc drifts by a tiny amount, and each
+        dt's error is measured against the true answer rather than against
+        another approximation."""
         Mc = physics.chirp_mass(36.0 * physics.M_sun, 29.0 * physics.M_sun)
 
         def integrate_n_steps(f0, dt, n):
@@ -1031,37 +1094,42 @@ class TestRK4Stepper(unittest.TestCase):
             return f, phase
 
         f0 = 20.0
-        # This comparison sits close to a double-precision noise floor
-        # (the finest-dt error against the high-resolution reference is
-        # only ~1e-13 in absolute frequency), so the measured ratios are
-        # sensitive to the exact value of Mc -- even a tiny change to
-        # M_sun's least-significant bits (such as switching M_sun from a
-        # rounded literal to an unrounded quotient, a ~1e-7 relative
-        # shift) can move which side of that floor a single T_fixed value
-        # lands on. Rather than re-tuning to another single knife-edge
-        # value, T_fixed=0.6 was chosen from a scan that confirmed both
-        # ratios stay comfortably inside their brackets across a broad
-        # plateau of nearby T_fixed values (0.548-0.604s), not only at
-        # this one point -- so a future small constants change is much
-        # less likely to flip this test again. The reached frequency
-        # (~31 Hz) remains well below this system's f_isco (~67.6 Hz), so
-        # this still measures genuine RK4 truncation error, not the
-        # steep, effectively-divergent behavior near coalescence.
+        # T_fixed and the three dt values are all exact multiples of one
+        # another (100, 200, and 400 steps respectively), so every
+        # integration reaches exactly the same physical end time -- checked
+        # explicitly below rather than trusted silently, per Codex's
+        # request, since a mismatched endpoint could otherwise masquerade
+        # as truncation error. The reached frequency (~31.8 Hz) remains
+        # well below this system's f_isco (~67.6 Hz), so this measures
+        # genuine RK4 truncation error, not near-coalescence behavior.
         T_fixed = 0.6
-        f_ref, _ = integrate_n_steps(f0, 1e-5, round(T_fixed / 1e-5))
+        dts = (6e-3, 3e-3, 1.5e-3)
+        ns = tuple(round(T_fixed / dt) for dt in dts)
+        for dt, n in zip(dts, ns):
+            self.assertEqual(n * dt, T_fixed, f"dt={dt} does not exactly tile T_fixed={T_fixed}")
+
+        f_exact = ref_frequency_from_time_hz(f0, T_fixed, Mc)
 
         errors = []
-        for dt in (4e-3, 2e-3, 1e-3):
-            f_val, _ = integrate_n_steps(f0, dt, round(T_fixed / dt))
-            errors.append(abs(f_val - f_ref))
+        for dt, n in zip(dts, ns):
+            f_val, _ = integrate_n_steps(f0, dt, n)
+            errors.append(abs(f_val - f_exact))
 
+        # Every error here (~1e-9 to ~2e-12) sits comfortably above the
+        # double-precision noise floor (~1e-15 relative, i.e. a few times
+        # 1e-15 absolute at this ~31.8 Hz scale) -- unlike the previous
+        # dt=1e-5 numerical reference, whose own ~7e-13 error was close
+        # enough to that floor to contaminate the comparison.
         ratio1 = errors[0] / errors[1]
         ratio2 = errors[1] / errors[2]
-        # Generous bracket around 16x for both halvings, now that both are
-        # comfortably resolved above the noise floor.
+        # Generous bracket around the true 16x fourth-order rate; deviation
+        # from exactly 16 reflects finite-step higher-order terms, not a
+        # defect. This is no longer a scan for a passing T_fixed -- these
+        # ratios are measured against the exact solution, so they reflect
+        # RK4's actual local convergence at this dt range.
         self.assertGreater(ratio1, 10.0)
         self.assertLess(ratio1, 24.0)
-        self.assertGreater(ratio2, 3.0)
+        self.assertGreater(ratio2, 10.0)
         self.assertLess(ratio2, 24.0)
 
     def test_numerically_integrated_time_to_isco_converges_to_analytic_value(self):
@@ -2270,6 +2338,54 @@ class TestDriverRun(unittest.TestCase):
         finally:
             os.umask(original_umask)
 
+    def test_default_output_file_mode_warns_but_succeeds_if_probe_unlink_fails(self):
+        """Audit7 (Codex P3-1, required regression): the disposable
+        .gw_modeprobe_* permission-probe file's own removal can itself fail
+        (a transient filesystem error, another process racing its removal,
+        or an abrupt kill between creation and cleanup). Confirms the
+        documented contract: the failure does not propagate and does not
+        fail the real export in progress -- _default_output_file_mode()
+        still returns the correct mode -- the probe file is left behind
+        exactly where it was created (not silently relocated, and not
+        actually removed by some other path), and the failure is not
+        silent: a diagnostic naming the stray path is printed rather than
+        swallowed by a bare `except OSError: pass`."""
+        real_unlink = os.unlink
+
+        def _flaky_unlink(path, *args, **kwargs):
+            if ".gw_modeprobe_" in os.path.basename(path):
+                raise OSError("simulated probe-cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            saved_umask = os.umask(0)
+            os.umask(saved_umask)
+            expected_mode = 0o666 & ~saved_umask
+
+            captured = io.StringIO()
+            with mock.patch("os.unlink", side_effect=_flaky_unlink):
+                with contextlib.redirect_stdout(captured):
+                    mode = driver._default_output_file_mode(d)
+
+            self.assertEqual(mode, expected_mode)
+            leftover = list(Path(d).glob(".gw_modeprobe_*"))
+            self.assertEqual(len(leftover), 1)
+            self.assertEqual(leftover[0].stat().st_size, 0)
+            self.assertIn(".gw_modeprobe_", captured.getvalue())
+            self.assertIn("Warning", captured.getvalue())
+
+    def test_default_output_file_mode_still_removes_probe_file_if_close_fails(self):
+        """Audit7 (Codex P3-1, required correction #2): a bare
+        `os.close(fd); os.unlink(path)` sequence would let a close()
+        failure skip the unlink attempt entirely, stranding the probe file
+        even though its removal itself would have succeeded. Confirms the
+        unlink is still attempted -- and succeeds -- even when close()
+        itself raises."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("os.close", side_effect=OSError("simulated close failure")):
+                driver._default_output_file_mode(d)
+            self.assertEqual(list(Path(d).glob(".gw_modeprobe_*")), [])
+
     def test_frozen_timestamp_two_complete_writes_both_survive_intact(self):
         """Audit3 (Codex P2-1, required regression #5): the collision tests
         above only prove _publish_atomically() claims three distinct real
@@ -2604,6 +2720,43 @@ class TestPlotting(unittest.TestCase):
             published = plotting._publish_or_cleanup(_write, d, "gw_inspiral", fixed)
             actual_mode = stat.S_IMODE(os.stat(published).st_mode)
             self.assertEqual(actual_mode, expected_mode)
+
+    def test_default_output_file_mode_warns_but_succeeds_if_probe_unlink_fails(self):
+        """Audit7 (Codex P3-1), plot_gw-layer counterpart to the driver_gw
+        test of the same name -- see that test's docstring for the full
+        rationale."""
+        real_unlink = os.unlink
+
+        def _flaky_unlink(path, *args, **kwargs):
+            if ".gw_modeprobe_" in os.path.basename(path):
+                raise OSError("simulated probe-cleanup failure")
+            return real_unlink(path, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as d:
+            saved_umask = os.umask(0)
+            os.umask(saved_umask)
+            expected_mode = 0o666 & ~saved_umask
+
+            captured = io.StringIO()
+            with mock.patch("os.unlink", side_effect=_flaky_unlink):
+                with contextlib.redirect_stdout(captured):
+                    mode = plotting._default_output_file_mode(d)
+
+            self.assertEqual(mode, expected_mode)
+            leftover = list(Path(d).glob(".gw_modeprobe_*"))
+            self.assertEqual(len(leftover), 1)
+            self.assertEqual(leftover[0].stat().st_size, 0)
+            self.assertIn(".gw_modeprobe_", captured.getvalue())
+            self.assertIn("Warning", captured.getvalue())
+
+    def test_default_output_file_mode_still_removes_probe_file_if_close_fails(self):
+        """Audit7 (Codex P3-1), plot_gw-layer counterpart to the driver_gw
+        test of the same name -- see that test's docstring for the full
+        rationale."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("os.close", side_effect=OSError("simulated close failure")):
+                plotting._default_output_file_mode(d)
+            self.assertEqual(list(Path(d).glob(".gw_modeprobe_*")), [])
 
     def test_savefig_failure_leaves_no_png_behind(self):
         """Audit3 (Codex P2-1 / Copilot A3-3, required regression): patch

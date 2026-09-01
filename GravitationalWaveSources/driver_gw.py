@@ -192,16 +192,49 @@ def _default_output_file_mode(directory):
     ordinary mode, 0o666, lets the kernel apply the umask atomically as
     part of that file's own creation, inspects the resulting mode, and
     discards the probe file.
+
+    Cleanup contract for that disposable probe file: this function always
+    attempts to remove it, but never lets a failed removal fail the export
+    in progress -- the file is empty, hidden (dot-prefixed), and unrelated
+    to the CSV/PNG artifact actually being published, so losing an export
+    over a harmless leftover probe would be a worse outcome than the
+    debris itself. A removal failure (or an abrupt process termination
+    between the probe's creation and its removal) is not silent, though: it
+    prints a diagnostic naming the stray path, and the Help file documents
+    ".gw_modeprobe_*" as a second, harmless temporary-file pattern a
+    student may occasionally see and can safely delete, alongside
+    ".gw_tmp_*".
     """
     fd, path = _create_mode_probe_file(directory)
     try:
         mode = stat.S_IMODE(os.fstat(fd).st_mode)
     finally:
-        os.close(fd)
+        # Attempt the unlink regardless of whether close() itself raises --
+        # a bare `os.close(fd); os.unlink(path)` sequence would let a
+        # close() failure skip the unlink entirely, leaving this disposable
+        # probe file behind even though cleanup was never actually
+        # attempted. Closing first (before unlinking) still matches
+        # ordinary Unix practice of closing a descriptor before removing
+        # its path, but each step's own failure must not suppress the
+        # other's attempt.
         try:
-            os.unlink(path)
+            os.close(fd)
         except OSError:
             pass
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            # This file is empty, hidden, and randomly named -- harmless
+            # debris, not a data-loss or security problem -- so a failed
+            # cleanup here does not fail the export in progress (the real
+            # artifact this call exists to permission-normalize may already
+            # be complete). It is not swallowed silently either: a
+            # diagnostic is printed so a student or instructor who notices
+            # a stray .gw_modeprobe_* file later has a trail explaining it
+            # (see the Help file's temporary-file-debris note, which now
+            # names this file pattern alongside .gw_tmp_*).
+            print(f"[gw] Warning: could not remove temporary "
+                  f"permission-probe file {path!r}: {exc}")
     return mode
 
 

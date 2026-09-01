@@ -99,11 +99,19 @@ def _default_output_file_mode(directory):
     try:
         mode = stat.S_IMODE(os.fstat(fd).st_mode)
     finally:
-        os.close(fd)
+        # See driver_gw._default_output_file_mode for why close() and
+        # unlink() each get their own try/except rather than a bare
+        # close-then-unlink -- a close() failure must not skip the unlink
+        # attempt, and a failed unlink is reported, not swallowed silently.
         try:
-            os.unlink(path)
+            os.close(fd)
         except OSError:
             pass
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            print(f"[gw] Warning: could not remove temporary "
+                  f"permission-probe file {path!r}: {exc}")
     return mode
 
 
