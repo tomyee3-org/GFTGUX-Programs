@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.1.2"
+MODEL_VERSION = "1.2.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -88,7 +88,7 @@ BUILD_ID = _compute_build_id()
 
 
 # ----------------------------------------------------------------------
-# Physical constants (SI, CODATA / IAU nominal values)
+# Physical constants (SI, CODATA 2022 / IAU nominal values)
 # ----------------------------------------------------------------------
 G       = 6.674_30e-11          # m^3 kg^-1 s^-2
 c       = 2.997_924_58e8        # m s^-1
@@ -96,14 +96,24 @@ h_pl    = 6.626_070_15e-34      # J s
 k_B     = 1.380_649e-23         # J K^-1
 sigma_SB = 5.670_374_419e-8     # W m^-2 K^-4
 a_rad   = 4.0 * sigma_SB / c    # J m^-3 K^-4
-m_u     = 1.660_539_066_60e-27  # kg   (atomic mass constant)
-m_e     = 9.109_383_701_5e-31   # kg
-m_n     = 1.674_927_498_04e-27  # kg
+m_u     = 1.660_539_068_92e-27  # kg   (atomic mass constant, CODATA 2022)
+m_e     = 9.109_383_713_9e-31   # kg   (electron mass, CODATA 2022)
+m_n     = 1.674_927_500_56e-27  # kg   (neutron mass, CODATA 2022)
 
-M_sun   = 1.988_92e30           # kg
+#: IAU 2015 Resolution B3 nominal solar mass parameter, exact by
+#: definition.  GM_sun is known from solar-system dynamics to a relative
+#: precision many orders better than G or M_sun individually, so the
+#: IAU-recommended way to fix the solar mass is to divide this nominal GM
+#: by the Newtonian constant actually used above -- not to hard-code an
+#: independently rounded M_sun in kilograms, which would be inconsistent
+#: with G everywhere the two appear together (surface gravity, the
+#: Kelvin-Helmholtz time, the TOV and Newtonian structure integrations).
+GM_SUN_NOMINAL = 1.327_124_4e20  # m^3 s^-2
+M_sun   = GM_SUN_NOMINAL / G     # kg     (derived, consistent with G above)
 R_sun   = 6.957e8               # m      (IAU nominal solar radius)
 L_sun   = 3.828e26              # W      (IAU nominal solar luminosity)
 TEFF_SUN = 5772.0               # K      (IAU nominal solar effective temp.)
+R_EARTH = 6.371e6               # m      (IUGG mean Earth radius)
 
 YEAR    = 365.25 * 86400.0      # s      (Julian year, exactly 365.25 d;
                                  #         IAU-recommended definition of a
@@ -118,6 +128,8 @@ MIN_TRACK_STEPS   = 50
 MAX_STRUCT_STEPS  = 400_000
 MAX_GRID_POINTS   = 20_000
 MAX_MASSES        = 40
+MAX_ISOCHRONES    = 10     # cap on the number of ages the hr mode will
+                            # interpolate isochrones for in one run
 
 # Range over which the closures of this one-zone model are pedagogically
 # reliable.  Masses outside it are still accepted -- watching the
@@ -318,6 +330,8 @@ def zams_radius(m_msun):
 
 def effective_temperature(L_lsun, R_rsun):
     """Effective temperature in K from L and R in solar units."""
+    L_lsun = _require_positive("L", L_lsun)
+    R_rsun = _require_positive("R", R_rsun)
     L = L_lsun * L_sun
     R = R_rsun * R_sun
     return (L / (4.0 * np.pi * R**2 * sigma_SB)) ** 0.25
@@ -355,6 +369,7 @@ def core_mass_luminosity(mc_msun):
     deliberately, over a slightly wider range as a smooth closure for the
     shell-burning phase; the help file discusses the consequences.
     """
+    mc_msun = _require_positive("core mass", mc_msun)
     return 2.3e5 * mc_msun ** 6.0
 
 
@@ -368,6 +383,8 @@ def hayashi_teff(m_msun, L_lsun):
     tip of the red-giant branch for a 1 solar-mass star.  It is a fit to
     detailed models, not a solution of the structure equations.
     """
+    m_msun = _require_positive("mass", m_msun)
+    L_lsun = _require_positive("L", L_lsun)
     return 6560.0 * L_lsun ** (-0.092) * m_msun ** 0.10
 
 
@@ -394,6 +411,9 @@ def helium_flash_core_mass():
 
 def kelvin_helmholtz_time(m_msun, r_rsun, l_lsun):
     """Thermal (Kelvin-Helmholtz) timescale t_KH = G M^2 / (R L), in seconds."""
+    m_msun = _require_positive("mass", m_msun)
+    r_rsun = _require_positive("radius", r_rsun)
+    l_lsun = _require_positive("L", l_lsun)
     return (G * (m_msun * M_sun) ** 2
             / (r_rsun * R_sun * l_lsun * L_sun))
 
@@ -413,6 +433,7 @@ def predicted_remnant(m_msun):
     therefore an extrapolation.  Later work (for example Cummings et
     al. 2018) shows that the real relation is not globally linear.
     """
+    m_msun = _require_positive("mass", m_msun)
     if m_msun < 0.5:
         return ("helium white dwarf",
                 0.109 * m_msun + 0.394,
@@ -710,7 +731,12 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
     L_tams = L_list[-1] if reached_tams else float("nan")
     T_tams = T_list[-1] if reached_tams else float("nan")
     R_tams = R_list[-1] if reached_tams else float("nan")
-    mc_tams = core_efficiency * qc * m_msun if reached_tams else float("nan")
+    # Must match the array formula used inside the main-sequence loop
+    # (mc_list.append(... * (1.0 - Xc/X)) above) evaluated at Xc = Xc_end,
+    # or mc_tams disagrees with the star's own last plotted core mass by an
+    # amount that depends on x_end -- a discontinuity, not a rounding error.
+    mc_tams = (core_efficiency * qc * m_msun * (1.0 - Xc_end / X)
+               if reached_tams else float("nan"))
     mc_end = mc_list[-1]
 
     phase_end = ("main sequence, integration stopped at t_max"
@@ -744,6 +770,14 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
     mc_ign = float("nan")
     t_cross = float("nan")
     regime = "none"
+    # True only once helium has actually ignited (either at the tip of the
+    # degenerate red-giant branch, or at the top of a Hertzsprung-gap
+    # crossing).  post_ms alone is not enough to test this: it is also true
+    # when the envelope is exhausted before the flash (a helium white
+    # dwarf) and when a track is stopped at t_max, neither of which ends at
+    # helium ignition.  driver_sev.py and plot_sev.py must use this flag,
+    # not post_ms, to decide whether to report/annotate "helium ignition".
+    helium_ignition = False
 
     if post_ok and m_msun <= M_DEGENERATE_CORE:
         regime = "degenerate red-giant branch"
@@ -758,6 +792,13 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
         if mc_ign <= mc_tams:
             # A rare corner: the burned core already exceeds the flash mass.
             post_ok = False
+            warnings.append(
+                "no post-main-sequence phase is reported: the core mass "
+                "already at the terminal-age main sequence "
+                f"({mc_tams:.4f} Msun) is at or above the helium-flash core "
+                f"mass ({mc_ign:.4f} Msun) used by this schematic model, so "
+                "there is no growing-core phase left to integrate."
+            )
         else:
             X_env = X
             mc_hayashi = min(mc_tams + 0.40 * (mc_ign - mc_tams), mc_ign)
@@ -821,6 +862,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
                          if flashes else
                          "hydrogen envelope exhausted before the helium core "
                          "reached the flash mass (helium white dwarf)")
+            helium_ignition = bool(flashes)
 
     elif post_ok:
         regime = "Hertzsprung-gap crossing"
@@ -830,6 +872,14 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
         if T_hay >= T_tams:
             # Already at or beyond the Hayashi line; nothing to cross.
             post_ok = False
+            warnings.append(
+                "no post-main-sequence phase is reported: the "
+                f"terminal-age main-sequence effective temperature "
+                f"({T_tams:.0f} K) is already at or below the Hayashi-line "
+                f"temperature this model predicts for the star ({T_hay:.0f} "
+                "K), so there is no Hertzsprung-gap crossing left to "
+                "integrate."
+            )
         else:
             log_T0, log_T1 = math.log10(T_tams), math.log10(T_hay)
             for i in range(1, n_post + 1):
@@ -851,6 +901,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
             t_he = t
             L_tip = L_list[-1]
             phase_end = "helium ignition at the base of the giant branch"
+            helium_ignition = True
 
     t_arr = np.asarray(t_list, dtype=float)
     L_arr = np.asarray(L_list, dtype=float)
@@ -862,6 +913,26 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
     ph_arr = np.asarray(phase_list, dtype=int)
 
     kind, mrem, note = predicted_remnant(m_msun)
+
+    # predicted_remnant() is a standalone, mass-only a-priori classifier
+    # (its own switch to "carbon-oxygen white dwarf" happens at 0.5 Msun),
+    # independent of what THIS track's own post-main-sequence integration
+    # actually found.  For initial masses roughly 0.5-0.67 Msun those two
+    # disagree: the degenerate-RGB branch above finds the envelope
+    # exhausted before the core reaches the helium-flash mass (a helium
+    # white dwarf) at the same time predicted_remnant() reports a
+    # carbon-oxygen white dwarf -- a genuine, simultaneous contradiction in
+    # one summary, not merely a labelling gap.  When a full track was
+    # actually integrated far enough to settle the question, that computed
+    # outcome must take precedence over the generic a-priori classification
+    # for this run's own remnant fields.
+    if post_ok and regime == "degenerate red-giant branch" and not flashes:
+        kind = "helium white dwarf"
+        mrem = mc_ign
+        note = ("this track's own post-main-sequence integration found the "
+                "hydrogen envelope exhausted before the degenerate helium "
+                "core reached the helium-flash mass, superseding the "
+                "generic mass-only classification for this run")
 
     summary = dict(
         m_msun=m_msun, X=X, Y=Y, Z=Z, qc=qc, expansion=expansion,
@@ -893,6 +964,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
         L_tip=L_tip,
         t_total_gyr=t_arr[-1] / GYR,
         phase_end=phase_end,
+        helium_ignition=helium_ignition,
         remnant_kind=kind, remnant_msun=mrem, remnant_note=note,
         n_points=t_arr.size,
         warnings=warnings,
@@ -954,11 +1026,18 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
     if len(set(masses)) != len(masses):
         raise ValueError("The mass list contains duplicates.")
 
+    if isochrone_gyr is not None and len(isochrone_gyr) > MAX_ISOCHRONES:
+        raise ValueError(
+            f"At most {MAX_ISOCHRONES} isochrone ages may be requested; "
+            f"got {len(isochrone_gyr)}."
+        )
+
     tracks = []
     for m in sorted(masses):
         tracks.append(integrate_track(m_msun=m, **track_kwargs))
 
     isochrones = []
+    grid_warnings = []
     if isochrone_gyr:
         lifetimes = [tr["summary"]["t_ms_gyr"] for tr in tracks]
         grid_masses = [tr["summary"]["m_msun"] for tr in tracks]
@@ -982,10 +1061,20 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
                     age_gyr=age, points=pts,
                     turnoff_mass=turnoff_mass(grid_masses, lifetimes, age),
                 ))
+            else:
+                # A requested isochrone age that no track (or only one
+                # track) spans is silently unusable -- report why instead
+                # of just shrinking n_isochrones with no explanation.
+                grid_warnings.append(
+                    f"isochrone at age = {age:g} Gyr was omitted: only "
+                    f"{len(pts)} of {len(tracks)} tracks in the mass grid "
+                    "span that age, and at least 2 are needed to draw an "
+                    "isochrone.  Widen the mass range or choose an age "
+                    "within the lifetimes actually spanned by this grid."
+                )
 
     m_z, logT_z, logL_z = zams_curve()
 
-    grid_warnings = []
     for tr in tracks:
         for w in tr["summary"]["warnings"]:
             grid_warnings.append(f"M = {tr['summary']['m_msun']:g} Msun: {w}")
@@ -1202,9 +1291,19 @@ def integrate_structure(eos, y_c, relativistic=False,
 
     Returns (M_kg, R_m, profile_or_None).
     """
-    y = float(y_c)
-    if y <= 0.0:
-        raise ValueError("The central EOS variable must be positive.")
+    # _require_positive (not a bare float()/<=0 check) so that a NaN
+    # central variable is rejected explicitly: NaN <= 0.0 is False in
+    # Python, so the old check let a NaN y_c silently through to a tiny,
+    # physically meaningless central seed instead of raising.
+    y = _require_positive("y_c", y_c)
+    r_scale = _require_positive("r_scale", r_scale)
+    y_floor = _require_finite("y_floor", y_floor)
+    if not (0.0 < y_floor < 1.0):
+        raise ValueError(f"y_floor must lie in (0, 1); got {y_floor:g}.")
+    step_frac = _require_finite("step_frac", step_frac)
+    if not (0.0 < step_frac <= 0.5):
+        raise ValueError(f"step_frac must lie in (0, 0.5]; got {step_frac:g}.")
+    max_steps = _require_int("max_steps", max_steps, lo=1)
 
     r = r_scale * step_frac * 1.0e-6
     rho_c = float(eos.mass_energy_density(y) if relativistic
@@ -1237,25 +1336,36 @@ def integrate_structure(eos, y_c, relativistic=False,
 
     steps = 0
     while y > y_floor * y_c:
-        dm_dr, dy_dr = derivs(r, m, y)
-        # Step control: never change y by more than step_frac, and never
-        # advance by more than step_frac of the current radius.
-        dr_cap = step_frac * max(r_scale, r)
-        if dy_dr != 0.0:
-            dr = min(dr_cap, step_frac * abs(y / dy_dr))
-        else:
-            dr = dr_cap
-        dr = max(dr, 1.0e-6)
-
-        k1m, k1y = dm_dr, dy_dr
+        # The initial derivs() call (k1) must be inside the same try/except
+        # as the k2-k4 stages: it is evaluated at the current (r, m, y)
+        # state using the same EOS calls that can fail (a bad y value can
+        # make dP/dy vanish, or drive the TOV metric non-positive), so
+        # leaving it outside let a first-stage failure propagate as an
+        # uncaught RuntimeError/ValueError instead of the intended,
+        # actionable message below.
         try:
+            dm_dr, dy_dr = derivs(r, m, y)
+            # Step control: never change y by more than step_frac, and
+            # never advance by more than step_frac of the current radius.
+            dr_cap = step_frac * max(r_scale, r)
+            if dy_dr != 0.0:
+                dr = min(dr_cap, step_frac * abs(y / dy_dr))
+            else:
+                dr = dr_cap
+            dr = max(dr, 1.0e-6)
+
+            k1m, k1y = dm_dr, dy_dr
             k2m, k2y = derivs(r + 0.5 * dr, m + 0.5 * dr * k1m, max(y + 0.5 * dr * k1y, 1e-30))
             k3m, k3y = derivs(r + 0.5 * dr, m + 0.5 * dr * k2m, max(y + 0.5 * dr * k2y, 1e-30))
             k4m, k4y = derivs(r + dr, m + dr * k3m, max(y + dr * k3y, 1e-30))
-        except (ValueError, FloatingPointError) as exc:
+        except (ValueError, FloatingPointError, OverflowError, RuntimeError) as exc:
             # A failed Runge-Kutta stage is a numerical or equation-of-state
             # failure, not a stellar surface.  Reporting it as a surface
-            # would return a plausible-looking but incomplete star.
+            # would return a plausible-looking but incomplete star.  This
+            # also catches the horizon RuntimeError that derivs() itself
+            # raises for the TOV metric, so that failure gets the same
+            # actionable message as every other stage failure instead of
+            # propagating with a different, inconsistent one.
             raise RuntimeError(
                 "The structure integration failed at r = "
                 f"{r:.4g} m (central EOS variable {y_c:.6g}): {exc}.  "
@@ -1333,15 +1443,26 @@ def chandrasekhar_mass(mu_e):
 
 
 def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
-                 rho_lo=1.0e7, rho_hi=1.0e13, tol=1.0e-5, max_iter=80):
+                 rho_lo=1.0e7, rho_hi=1.0e13, tol=1.0e-5, max_iter=80,
+                 max_bracket_expansions=40):
     """
     Find the central density that gives a white dwarf of the requested
     mass, by bisection on the exact Chandrasekhar structure integration.
+
+    rho_lo and rho_hi are starting points, not hard limits: if they do not
+    already bracket the requested mass the search widens them by decades
+    (up to max_bracket_expansions times per side) before giving up, since a
+    mass close to the Chandrasekhar limit needs a central density well
+    above the default rho_hi.
 
     Returns (rho_c, M_kg, R_m).
     """
     m_target_msun = _require_positive("white-dwarf mass", m_target_msun)
     mu_e = check_mu_e(mu_e)
+    tol = _require_positive("tol", tol)
+    if tol >= 1.0:
+        raise ValueError(f"tol must lie in (0, 1); got {tol:g}.")
+    max_iter = _require_int("max_iter", max_iter, lo=1)
     m_ch = chandrasekhar_mass(mu_e)
     if m_target_msun >= 0.999 * m_ch:
         raise ValueError(
@@ -1360,25 +1481,43 @@ def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
                                       step_frac=step_frac)
         return M, R
 
-    lo, hi = rho_lo, rho_hi
+    lo, hi = _require_positive("rho_lo", rho_lo), _require_positive("rho_hi", rho_hi)
     m_lo, _ = mass_of(lo)
     m_hi, _ = mass_of(hi)
+    n = 0
+    while m_lo > target and n < max_bracket_expansions:
+        lo /= 10.0
+        m_lo, _ = mass_of(lo)
+        n += 1
+    n = 0
+    while m_hi < target and n < max_bracket_expansions:
+        hi *= 10.0
+        m_hi, _ = mass_of(hi)
+        n += 1
     if m_lo > target or m_hi < target:
         raise RuntimeError(
-            "Bisection could not bracket the requested white-dwarf mass; "
-            "try a mass further from the Chandrasekhar limit."
+            "Bisection could not bracket the requested white-dwarf mass "
+            f"even after widening the search to rho_c in "
+            f"[{lo:.3e}, {hi:.3e}] kg/m^3; try a mass further from the "
+            "Chandrasekhar limit."
         )
-    M = R = float("nan")
+
+    # Keep mid, M and R computed together at every step so the value
+    # ultimately returned always reflects an actually-evaluated model,
+    # rather than recomputing sqrt(lo*hi) from post-update bounds that no
+    # longer correspond to the M, R last computed inside the loop.
+    mid = math.sqrt(lo * hi)
+    M, R = mass_of(mid)
     for _ in range(max_iter):
-        mid = math.sqrt(lo * hi)
-        M, R = mass_of(mid)
         if abs(M - target) / target < tol:
             return mid, M, R
         if M < target:
             lo = mid
         else:
             hi = mid
-    return math.sqrt(lo * hi), M, R
+        mid = math.sqrt(lo * hi)
+        M, R = mass_of(mid)
+    return mid, M, R
 
 
 def wd_mass_radius_curve(mu_e=2.0, n=40, rho_lo=1.0e8, rho_hi=1.0e14,
@@ -1389,6 +1528,10 @@ def wd_mass_radius_curve(mu_e=2.0, n=40, rho_lo=1.0e8, rho_hi=1.0e14,
     """
     n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
     mu_e = check_mu_e(mu_e)
+    rho_lo = _require_positive("rho_lo", rho_lo)
+    rho_hi = _require_positive("rho_hi", rho_hi)
+    if rho_hi <= rho_lo:
+        raise ValueError("rho_hi must exceed rho_lo.")
     eos = FermiGasEOS(m_e, mu_e * m_u)
     rho = np.geomspace(rho_lo, rho_hi, n)
     M = np.empty(n)
@@ -1440,10 +1583,13 @@ def kramers_kappa0(X, Z):
     both in cm^2/g with rho in g/cm^3.  Converting kappa to m^2/kg and rho to
     kg/m^3 multiplies both by 1e-4.
 
-    Note the strong dependence on Z.  A white-dwarf envelope is essentially
-    metal free because heavy elements sink out of it, so free-free
-    absorption dominates and the envelope is far more transparent than a
-    solar-composition envelope would be.
+    Note the strong dependence on Z.  Gravitational settling removes heavy
+    elements from a white dwarf's envelope on a short timescale, so a
+    settled envelope is close to metal free, free-free absorption
+    dominates, and the envelope is far more transparent than a
+    solar-composition envelope would be.  (Real white dwarfs can still show
+    detectable metals from ongoing accretion; Z_env=0 models the settled,
+    unpolluted case.)
     """
     X, Y, Z = check_composition(X, Z)
     kappa_cgs = 4.34e25 * Z * (1.0 + X) + 3.68e22 * (1.0 - Z) * (1.0 + X)
@@ -1486,8 +1632,28 @@ def integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=14.0,
     m_msun = _require_positive("white-dwarf mass", m_msun)
     mu_e = check_mu_e(mu_e)
     A_ion = _require_positive("A_ion", A_ion)
+    if not (1.0 <= A_ion <= 60.0):
+        raise ValueError(
+            f"A_ion = {A_ion:g} is outside [1, 60]: A_ion is the mean ionic "
+            "mass number setting the ion heat capacity (about 4 for a "
+            "helium core, 12-16 for carbon-oxygen, up to the mid-50s for "
+            "an oxygen-neon or iron-group core); values outside this range "
+            "do not correspond to any white-dwarf composition."
+        )
     Tc0 = _require_positive("Tc0", Tc0)
     Tc_end = _require_positive("Tc_end", Tc_end)
+    if Tc_end < 100.0:
+        # The analytic-age formula below evaluates Tc_end**-2.5; for a
+        # sufficiently small (but still positive) Tc_end that overflows a
+        # Python float (OverflowError) well before the cooling model has
+        # any physical content left to describe, since real white-dwarf
+        # cooling curves are not extended to near-absolute-zero core
+        # temperatures by this simple Mestel law.
+        raise ValueError(
+            f"Tc_end = {Tc_end:g} K is below 100 K, where this cooling "
+            "model has no physical content and the analytic-age formula "
+            "would overflow.  Use a larger --Tc_end."
+        )
     if Tc_end >= Tc0:
         raise ValueError(
             f"Tc_end ({Tc_end:g} K) must be below the starting core "
@@ -1567,7 +1733,7 @@ def integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=14.0,
         X_env=X_env, Z_env=Z_env, mu_env=mu_env, mu_e_env=mu_e_env,
         kappa0=kappa0,
         rho_c=rho_c, R_km=R_m / 1.0e3, R_rsun=R_m / R_sun,
-        R_rearth=R_m / 6.371e6,
+        R_rearth=R_m / R_EARTH,
         M_ch=chandrasekhar_mass(mu_e),
         Tc0=Tc0, Tc_end=Tc_end,
         L_start=L_lsun[0], L_end=L_lsun[-1],
@@ -1622,13 +1788,20 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
 
     M = np.full(n, np.nan)
     R = np.full(n, np.nan)
+    # Recording WHY each dropped model failed (rather than only that it
+    # failed) lets the summary warning describe the actual failure mix
+    # instead of assuming a horizon encounter, and keeps an unexpected
+    # programming defect from being silently indistinguishable from an
+    # ordinary non-convergence.
+    fail_reasons = {}
     for i, rc in enumerate(rho):
         y_c = eos.x_from_density(rc)
         r_scale = 1.5e4
         try:
             m_kg, r_m, _ = integrate_structure(eos, y_c, relativistic=relativistic,
                                                r_scale=r_scale, step_frac=step_frac)
-        except RuntimeError:
+        except RuntimeError as exc:
+            fail_reasons[i] = str(exc)
             continue
         M[i] = m_kg / M_sun
         R[i] = r_m / 1.0e3            # km
@@ -1639,6 +1812,8 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     # zero-radius neutron star would be worse than dropping it.
     good = (np.isfinite(M) & np.isfinite(R)
             & (M > 1.0e-4) & (R > 1.0e-2))
+    for i in np.where(~good)[0]:
+        fail_reasons.setdefault(int(i), "model rejected: mass or radius too small to be a star")
     M = np.where(good, M, np.nan)
     R = np.where(good, R, np.nan)
     if good.sum() < 3:
@@ -1649,11 +1824,23 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
 
     warnings = []
     if int(good.sum()) < n:
+        n_horizon = sum(1 for msg in fail_reasons.values() if "horizon" in msg)
+        n_dropped = n - int(good.sum())
+        if n_horizon == n_dropped:
+            cause = "the integration reached a horizon in every dropped case"
+        elif n_horizon == 0:
+            cause = "none of the dropped cases reached a horizon (see warnings_detail)"
+        else:
+            cause = (f"{n_horizon} of {n_dropped} dropped cases reached a "
+                     "horizon; the rest failed for other reasons "
+                     "(see warnings_detail)")
         warnings.append(
-            f"{n - int(good.sum())} of the {n} requested central densities "
-            "did not yield a valid stellar model and were dropped.  With a "
-            "very stiff equation of state this usually means the "
-            "integration reached a horizon; lower --rho_hi."
+            f"{n_dropped} of the {n} requested central densities did not "
+            f"yield a valid stellar model and were dropped ({cause}).  "
+            "With a very stiff equation of state near the horizon this "
+            "usually means lowering --rho_hi will help; a failure that is "
+            "NOT a horizon encounter may instead indicate a numerical or "
+            "programming problem worth investigating directly."
         )
 
     # GM/Rc^2 is always computable.  For a TOV sequence it is the physical
@@ -1673,23 +1860,44 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     gi = np.where(good)[0]
     i_max = int(gi[int(np.argmax(M[gi]))])
 
-    # A genuine maximum needs converged models on BOTH sides of it.  If the
-    # mass is still rising at the top of the grid there is no turning point,
-    # nothing has been shown to be unstable, and the largest sampled mass is
-    # not a maximum mass.
-    turning_point = bool(i_max < gi[-1])
+    # A genuine turning point needs converged models on BOTH sides of the
+    # maximum.  i_max == gi[0] (mass already falling at the lowest sampled
+    # density) is just as inconclusive as i_max == gi[-1] (mass still
+    # rising at the highest sampled density): in both cases the true
+    # extremum lies outside the sampled range.
+    turning_point = bool(gi[0] < i_max < gi[-1])
     if not turning_point:
-        warnings.append(
-            "the mass is still rising at the highest central density "
-            "sampled, so no turning point was found.  The value reported "
-            "is the largest sampled mass, not a maximum mass, and no model "
-            "in this sequence has been shown to be unstable.  Raise "
-            "--rho_hi to look for the true turning point."
-        )
+        if i_max >= gi[-1]:
+            warnings.append(
+                "the mass is still rising at the highest central density "
+                "sampled, so no turning point was found.  The value "
+                "reported is the largest sampled mass, not a maximum mass, "
+                "and no model in this sequence has been shown to be "
+                "unstable.  Raise --rho_hi to look for the true turning "
+                "point."
+            )
+        else:
+            warnings.append(
+                "the mass is already falling at the lowest central density "
+                "sampled, so the maximum lies below the sampled range and "
+                "no turning point was found within it.  The value reported "
+                "is the largest sampled mass, not a maximum mass, and no "
+                "model in this sequence has been shown to be unstable.  "
+                "Lower --rho_lo to look for the true turning point."
+            )
 
     # Sound speed over the whole stable (or, without a turning point, the
-    # whole sampled) branch, not only at the extremum.
-    stable_idx = gi[gi <= i_max]
+    # whole sampled) branch, not only at the extremum.  The branch is the
+    # single contiguous run of converged models ending at i_max, not every
+    # converged index below it: an isolated non-converged density inside
+    # that range must not be silently bridged over as if the branch were
+    # unbroken on both sides of the gap.
+    stable_idx = [i_max]
+    _i = i_max - 1
+    while _i >= 0 and good[_i]:
+        stable_idx.append(_i)
+        _i -= 1
+    stable_idx = np.array(sorted(stable_idx))
     cs_branch = np.array([float(eos.sound_speed_ratio(eos.x_from_density(rho[i])))
                           for i in stable_idx])
     cs_max_branch = float(np.max(cs_branch))
@@ -1732,11 +1940,22 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         causal=causal,
         z_at_Mmax=float(z_surf[i_max]),
         turning_point=turning_point,
+        # Equal to turning_point by construction: a turning point is only
+        # ever reported once a genuine stable/unstable split has been
+        # identified, so there is currently no case where the two differ.
+        # Kept as a separate field for API stability; do not rely on any
+        # future difference between the two without checking this module's
+        # current version.
         stable_branch=turning_point,
         M_min=float(np.nanmin(M[good])),
         R_min=float(np.nanmin(R[good])),
         R_max=float(np.nanmax(R[good])),
         warnings=warnings,
+        # One entry per central density that did NOT yield an accepted
+        # model, giving the actual reason instead of forcing a caller to
+        # guess from the aggregate warning text above.
+        warnings_detail=[f"rho_c={rho[i]:.4e} kg/m^3: {reason}"
+                         for i, reason in sorted(fail_reasons.items())],
         model_version=MODEL_VERSION,
         build_id=BUILD_ID,
     )

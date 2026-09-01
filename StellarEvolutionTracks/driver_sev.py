@@ -104,6 +104,23 @@ PARAMS_BY_MODE = {
 }
 
 
+def _python_version():
+    import sys
+    return "{}.{}.{}".format(*sys.version_info[:3])
+
+
+def _module_version(module):
+    return getattr(module, "__version__", "unknown")
+
+
+def _matplotlib_version():
+    try:
+        import matplotlib
+        return matplotlib.__version__
+    except ImportError:
+        return "not installed"
+
+
 def _provenance(mode, kw):
     """
     Comment lines recording exactly how a data file was produced.
@@ -117,6 +134,8 @@ def _provenance(mode, kw):
         f"(build {phys.BUILD_ID})",
         f"mode = {mode}",
         f"run at {datetime.now().isoformat(timespec='seconds')}",
+        f"environment: Python {_python_version()}, NumPy {_module_version(np)}"
+        f", Matplotlib {_matplotlib_version()}",
         "parameters actually used by this mode:",
     ]
     for name in PARAMS_BY_MODE[mode]:
@@ -136,6 +155,15 @@ def _write_csv(csvdir, prefix, header, rows, comments=()):
     os.makedirs(csvdir, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = os.path.join(csvdir, f"{prefix}_{stamp}.csv")
+    if os.path.exists(path):
+        # Two runs within the same second (a scripted batch, or two modes
+        # writing the same prefix back to back) would otherwise silently
+        # overwrite each other's output with no warning.
+        n = 2
+        while os.path.exists(
+                candidate := os.path.join(csvdir, f"{prefix}_{stamp}_{n}.csv")):
+            n += 1
+        path = candidate
     with open(path, "w", newline="", encoding="utf-8") as fh:
         for line in comments:
             fh.write(f"# {line}\n")
@@ -247,7 +275,7 @@ def _print_track_summary(s):
     print(f"  Schematic remnant   : {s['remnant_kind']}"
           f",  about {s['remnant_msun']:.3f} Msun")
     print(f"                        ({s['remnant_note']})")
-    if s["post_ms"]:
+    if s["helium_ignition"]:
         print("  The track above stops at helium ignition.  The remnant is a")
         print("  classification from the initial mass, not an integrated result.")
     else:
@@ -280,10 +308,15 @@ def _print_hr_summary(s):
         print(SEP)
         print(f"  {'age [Gyr]':>10}  {'turn-off mass [Msun]':>22}")
         for age, mto in zip(s["isochrone_ages"], s["isochrone_turnoffs"]):
-            text = f"{mto:22.3f}" if mto is not None else f"{'outside the mass grid':>22}"
+            text = (f"{mto:22.3f}" if mto is not None
+                    else f"{'age outside t_MS(M) range':>22}")
             print(f"  {age:10.4g}  {text}")
         print("  Turn-off masses come from t_MS(M) over the tracks that")
-        print("  reached the TAMS; widen --masses or --t_max to cover an age.")
+        print("  reached the TAMS.  A blank turn-off means this age falls")
+        print("  outside the span of main-sequence lifetimes those tracks")
+        print("  actually reached -- not necessarily outside the mass grid")
+        print("  itself: widen --masses, or raise --t_max so more of the")
+        print("  requested masses reach the TAMS, to cover an age.")
     print(SEP)
     _print_warnings(s)
 
@@ -398,11 +431,29 @@ def _run_tracks(kw, outdir, csvdir, dpi, lw):
     return result
 
 
+#: Per-track step counts (n_ms, n_post) are validated individually up to
+#: phys.MAX_TRACK_STEPS each, and the mass list up to phys.MAX_MASSES; the
+#: product of the two can still be large enough that an hr run takes an
+#: unreasonable time to finish even though every individual argument was
+#: within its own allowed range.  This is an aggregate workload cap, not a
+#: physics limit.
+MAX_HR_WORKLOAD_STEPS = 20_000_000
+
+
 def _run_hr(kw, outdir, csvdir, dpi, lw):
     masses = _parse_float_list("masses", kw["masses"], lo=0.08, hi=120.0,
                                max_items=phys.MAX_MASSES)
     ages = _parse_float_list("isochrones", kw["isochrones"], lo=1e-6, hi=1e3,
-                             max_items=10)
+                             max_items=phys.MAX_ISOCHRONES)
+    workload = len(masses) * (kw["n_ms"] + kw["n_post"])
+    if workload > MAX_HR_WORKLOAD_STEPS:
+        raise ValueError(
+            f"{len(masses)} masses times (n_ms + n_post) = "
+            f"{kw['n_ms'] + kw['n_post']:,} steps is {workload:,} "
+            f"integration steps, above the {MAX_HR_WORKLOAD_STEPS:,}-step "
+            "aggregate limit for one hr run.  Use fewer masses, or lower "
+            "--n_ms/--n_post."
+        )
     result = phys.build_hr_grid(
         masses, isochrone_gyr=ages,
         X=kw["X"], Z=kw["Z"], qc=kw["qc"],
@@ -442,7 +493,10 @@ def _run_hr(kw, outdir, csvdir, dpi, lw):
                        comments=["isochrones interpolated along the tracks",
                                  "turnoff_mass_Msun is the mass whose t_MS "
                                  "equals the isochrone age; blank if that age "
-                                 "falls outside the mass grid"]
+                                 "falls outside the span of main-sequence "
+                                 "lifetimes t_MS(M) actually reached by the "
+                                 "tracks that reached the TAMS (not "
+                                 "necessarily outside the mass grid itself)"]
                        + _provenance("hr", kw))
     if not kw["no_plot"]:
         viz.plot_hr_diagram(result, outdir=outdir, dpi=dpi, lw=lw)

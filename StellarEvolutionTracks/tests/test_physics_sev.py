@@ -7,7 +7,7 @@ main.py, plot_sev.py).  Both layouts are exercised by
 ``TestModuleDiscovery``, but that does not mean two complete rounds of the
 suite are run: the flattened layout is only checked with a trivial smoke
 test (module import + a two-line calculation) that proves the discovery
-helper itself works from a flattened directory.  The full ~200-test suite is
+helper itself works from a flattened directory.  The full test suite is
 run exactly once, from the canonical ``tests/`` layout.  Reviewer AIs
 (Copilot, Codex, Gemini) should follow the same convention: run the full
 suite once from ``tests/``, and treat any flattened-layout run as a
@@ -43,6 +43,147 @@ plot_sev.py docstrings or output):
         rather than by which critique first raised it, per the project's
         standing instruction that test names/comments describe the lasting
         physics, not the audit history.
+
+  2026-09-01  Claude (principal developer).  Response to Audit1 (Gemini,
+    Codex, Copilot reviewing the Kickoff round).  Version 1.1.2 -> 1.2.0,
+    BUILD_ID f9f19e598626 -> e6b4674d23c6.  Full disposition of every
+    finding is in StellarEvolutionTracks-Claude-Response-to-Audit1-
+    20260901.txt; this entry lists only what changed in the source tree.
+      * Fixed four release-blocking (P1) defects, each confirmed with an
+        independent reproducer before fixing, each now guarded by a
+        regression test: (1) ns_mass_radius_curve()'s turning-point check
+        accepted a maximum at the edge of the sampled range as genuine
+        (i_max < gi[-1] alone), so a monotonically falling M(rho_c) sampled
+        entirely above the true turning point was reported as a confirmed,
+        stable turning point with no warning; fixed to require the maximum
+        to be interior on both sides (gi[0] < i_max < gi[-1]), with
+        separate warnings for "raise rho_hi" and "lower rho_lo".
+        (2) integrate_track()'s summary conflated "a post-main-sequence
+        phase was computed" (post_ms) with "the track reached helium
+        ignition"; a helium white dwarf (envelope exhausted before the
+        flash) has post_ms=True but never ignites, so driver_sev.py and
+        plot_sev.py were printing/annotating "stops at helium ignition" for
+        tracks that do not.  Added a distinct helium_ignition summary flag
+        and switched both consumers to it.  (3) mc_tams was computed as
+        core_efficiency*qc*m_msun, ignoring the (1 - Xc_end/X) factor the
+        array formula (mc_list) uses, so the reported terminal-age core
+        mass jumped discontinuously (up to ~70x at large --x_end) relative
+        to the star's own last plotted core-mass point; fixed to match.
+        (4) integrate_track()'s remnant_kind came from predicted_remnant(),
+        a mass-only classifier that switches from "helium white dwarf" to
+        "carbon-oxygen white dwarf" at 0.5 Msun, while the same summary's
+        phase_end/helium_ignition came from the track's own integration,
+        which (via the 0.70*m_msun helium-core cap) switches at ~0.6714
+        Msun; for initial masses in [0.5, 0.6714) the two fields
+        contradicted each other in the same summary dict and in
+        driver_sev.py's printed report (e.g. remnant_kind="carbon-oxygen
+        white dwarf" together with phase_end="...helium white dwarf").
+        Fixed by having integrate_track() override predicted_remnant()'s
+        classification with the track's own computed outcome whenever the
+        track actually completed a non-igniting degenerate-red-giant-branch
+        post-MS phase, with a note explaining the override; verified
+        against Codex's five-mass probe (0.49, 0.50, 0.60, 0.67, 0.68 Msun).
+      * Fixed nine P2 numerical-safety and validation gaps, each with a
+        regression test: wd_structure()'s fixed bisection bracket
+        [1e7,1e13] kg/m^3 failed for white-dwarf masses legitimately close
+        to (but below the hard 0.999*M_Ch cutoff for) the Chandrasekhar
+        limit -- now widens adaptively by decades, with the fixed-bracket
+        behaviour still reachable and tested via max_bracket_expansions=0;
+        wd_structure()'s tol and max_iter parameters were unvalidated (a
+        non-positive tol or max_iter<1 could hang or silently return a
+        meaningless result) -- both now validated; integrate_wd_cooling()'s
+        analytic-age formula could overflow a Python float for a
+        sufficiently small Tc_end -- added a 100 K floor;
+        integrate_structure() accepted y_c<=0 or y_c>=1 without validation,
+        so a caller-supplied NaN or out-of-range y_c bypassed the intended
+        _require_positive guard and propagated silently into the RK4 loop
+        -- y_c is now validated the same way as the module's other
+        physical inputs; integrate_structure()'s first RK4 stage (k1) was
+        computed outside the try/except that wraps the k2-k4 stages, so a
+        first-stage failure (including the TOV horizon RuntimeError raised
+        inside derivs()) propagated with an inconsistent message instead of
+        the unified, actionable one -- moved inside; ns_mass_radius_curve()
+        discarded the specific reason each non-converged sample point
+        failed (bisection did not bracket a root, versus the interior RK4
+        integration itself raising) and its "stable branch" search could
+        bridge over a gap of non-converged points between two converged
+        runs straddling the maximum, reporting a branch as contiguous when
+        it was not -- now preserves a per-point failure reason (surfaced in
+        a new warnings_detail summary field) and restricts the stable
+        branch to an unbroken run of converged points walking back from
+        the maximum; build_hr_grid() never enforced the isochrone-count cap
+        the Help file documents, and silently dropped an isochrone age no
+        track (or only one track) spanned with no explanation -- added the
+        cap and an explanatory warning; _write_csv() and _finish()
+        (plot_sev.py) could silently overwrite a same-second output file --
+        both now avoid the collision; and an hr run's aggregate workload
+        (masses times n_ms+n_post) was unbounded even though each factor
+        was individually capped -- added an aggregate cap in driver_sev.py.
+      * Added validation previously missing from several direct-API entry
+        points (effective_temperature, core_mass_luminosity, hayashi_teff,
+        kelvin_helmholtz_time, predicted_remnant, wd_mass_radius_curve,
+        integrate_structure's r_scale/y_floor/step_frac/max_steps, and a
+        physical [1,60] bound on A_ion), and added explanatory warnings for
+        the two silent post-main-sequence-suppression corners in
+        integrate_track (mc_ign <= mc_tams; T_hay >= T_tams).
+      * Updated constants: m_u, m_e, m_n to CODATA 2022 recommended values
+        (from CODATA ~2018); M_sun is now derived from the IAU 2015
+        Resolution B3 nominal GM_sun (1.3271244e20 m^3/s^2) divided by G,
+        rather than an independently rounded kg literal, so M_sun and G are
+        never inconsistent wherever both appear together; added a shared
+        R_EARTH constant and removed the duplicated 6.371e6/6371.0 Earth-
+        radius literals from physics_sev.py and plot_sev.py; added
+        MAX_ISOCHRONES=10, now enforced.
+      * Strengthened four weak tests identified by this round's own
+        antagonistic review: the mu_e-lower-bound-documented test was
+        tautological (assertIn("mu_e","mu_e")) and now checks the actual
+        \\mu_e\\ge1 bound statement in the Help file; the mu_e^-5/3
+        radius-scaling test computed but never checked the scaling and now
+        does (to 5%); test_driver_and_help_report_same_build was renamed
+        (it never touched the Help file) to
+        test_driver_summary_reports_same_build_as_physics_module; and
+        test_low_mass_extreme_t_max_does_not_crash now also asserts the
+        endpoint semantics (reaches TAMS, runs post-MS, does not ignite
+        helium) instead of only checking for finite output.  Also corrected
+        this docstring's "~200-test" figure to non-numeric phrasing, since
+        it goes stale every round.
+      * Declined, with rationale recorded in the Response-to-Audit1 report:
+        Gemini's "L_post(mc) evaluated before the mc>=mc_ign break check"
+        finding (verified against the code -- L_post and teff_post are
+        smooth, domain-unrestricted functions of mc, so floating-point
+        drift past mc_ign cannot produce an out-of-bounds evaluation or a
+        crash) and Gemini's "FloatingPointError is not raised by default
+        under NumPy's default seterr" observation (accurate, but the
+        pre-existing math.isfinite(m_next)/isfinite(y_next) check
+        immediately downstream already catches a silent numpy inf/nan and
+        raises the same clear RuntimeError, so no student-visible behaviour
+        was actually wrong; OverflowError and RuntimeError were still added
+        to the except tuple as defense in depth for the pure-Python paths).
+      * HTML wording/documentation fixes: "tracks -- main sequence" table
+        row corrected from "two integrated ODEs" to "one" (only dXc/dt is
+        integrated on the main sequence; dMc/dt is post-main-sequence);
+        softened "exact TOV gravity" and fixed the self-contradictory
+        "fitted to nothing" polytrope description; corrected the false
+        universal claim that 0.7 Msun is "less than half the mass of every
+        neutron star ever weighed"; reworded the white-dwarf "exact to the
+        accuracy of the step size" phrasing; softened "essentially metal
+        free" (here and in physics_sev.py's kramers_kappa0 docstring) and
+        the binarity paragraph's absolute claims; documented the 10-
+        isochrone and [1,60] A_ion bounds in the parameter table and
+        runtime-safeguards note; added the explicit piecewise ZAMS
+        luminosity/radius formulas Gemini flagged as missing; added a
+        "known model artefacts and caveats" section covering the pp/CNO
+        1.2-solar-mass burning-law discontinuity, a citation for the K1
+        non-relativistic degenerate-pressure constant, and the causality
+        check's assumption of a monotonic sound speed; and reworded EXP-3,
+        EXP-5, EXP-6, EXP-12, EXP-13, EXP-14 and EXP-18 per the reviewers'
+        specific wording findings (a concrete 13.8 Gyr age of the Universe;
+        "evolved off the main sequence" instead of "died"; the explicit
+        Teq ~ L^(1/4) scaling; a well-posed turn-off-mass target instead of
+        an ambiguous log L value; a precise compactness framing instead of
+        "more compact than a black hole"; a note on how to hit an exact
+        central density outside the CLI's geometric grid; and the explicit
+        Eobs = Eemit/(1+z) relation).
 """
 
 import ast
@@ -283,8 +424,13 @@ class TestMetadataAndCompatibility(unittest.TestCase):
             f"StellarEvolutionTracks {phys.MODEL_VERSION} (build {phys.BUILD_ID})",
         )
 
-    def test_driver_and_help_report_same_build(self):
-        # Every summary dict must carry the same version/build as physics_sev.
+    def test_driver_summary_reports_same_build_as_physics_module(self):
+        # Renamed from test_driver_and_help_report_same_build (Audit1
+        # P2-10): the old name claimed to check the HELP file too, but this
+        # test only ever exercised driver.run()'s summary dict.  The actual
+        # help-file-vs-BUILD_ID check lives in
+        # TestHelpFile.test_version_and_build_match_program; every summary
+        # dict must carry the same version/build as physics_sev itself.
         result = driver.run(mode="tracks", mass=1.0, no_plot=True,
                              csvdir=tempfile.mkdtemp())
         self.assertEqual(result["summary"]["model_version"], phys.MODEL_VERSION)
@@ -311,6 +457,29 @@ class TestPhysicalConstants(unittest.TestCase):
         # a re-statement of the constant.
         teff = phys.effective_temperature(1.0, 1.0)
         self.assertAlmostEqual(teff, phys.TEFF_SUN, delta=0.5)
+
+    def test_particle_masses_match_codata_2022(self):
+        # Regression test for the Audit1 constants-currency fix: m_u, m_e
+        # and m_n must be the CODATA 2022 recommended values, not the
+        # CODATA ~2018 values previously used.
+        self.assertAlmostEqual(phys.m_u, 1.66053906892e-27, delta=1e-36)
+        self.assertAlmostEqual(phys.m_e, 9.1093837139e-31, delta=1e-40)
+        self.assertAlmostEqual(phys.m_n, 1.67492750056e-27, delta=1e-36)
+
+    def test_solar_mass_derived_from_iau_nominal_gm_sun(self):
+        # Regression test for the Audit1 P-level constants fix: M_sun must
+        # be derived as GM_sun_nominal / G (the IAU-recommended way to fix
+        # the solar mass, since GM_sun is known far more precisely than G
+        # or M_sun individually), not an independently rounded kg literal
+        # that can be inconsistent with G wherever the two appear together.
+        self.assertEqual(phys.GM_SUN_NOMINAL, 1.3271244e20)
+        self.assertAlmostEqual(phys.M_sun, phys.GM_SUN_NOMINAL / phys.G,
+                                delta=1.0)
+        self.assertAlmostEqual(phys.G * phys.M_sun, phys.GM_SUN_NOMINAL,
+                                delta=1.0e10)
+
+    def test_earth_radius_constant_matches_km_conventions(self):
+        self.assertAlmostEqual(phys.R_EARTH, 6.371e6, delta=1.0)
 
     def test_year_and_gigayear(self):
         # The source comment labels YEAR as "the Julian year (365.25 d)",
@@ -525,6 +694,80 @@ class TestTrackIntegration(unittest.TestCase):
                                 places=8)
         self.assertAlmostEqual(result["L"][0], s["L_zams"], places=8)
 
+    def test_mc_tams_matches_last_main_sequence_core_mass(self):
+        # Regression test for Audit1 P1-3: mc_tams must equal mc_end (the
+        # array's own last main-sequence Mcore point, mc_list[-1]) whatever
+        # x_end is, not just at the default x_end=1e-3.  Before the fix,
+        # mc_tams = core_efficiency*qc*m_msun ignored the (1 - Xc_end/X)
+        # factor the array formula uses, producing a discontinuity that
+        # grew as x_end grew (Codex measured a roughly 70x jump at
+        # x_end=0.690 for a 1-Msun track).
+        for x_end in (1.0e-3, 0.10, 0.50, 0.690):
+            with self.subTest(x_end=x_end):
+                result = phys.integrate_track(m_msun=1.0, x_end=x_end,
+                                              include_postms=False)
+                s = result["summary"]
+                self.assertAlmostEqual(s["mc_tams"], s["mc_end"], delta=1e-10)
+                self.assertAlmostEqual(
+                    s["mc_tams"],
+                    s["core_efficiency"] * s["qc"] * s["m_msun"]
+                    * (1.0 - s["Xc_end"] / s["X"]),
+                    delta=1e-10)
+
+    def test_helium_ignition_flag_distinguishes_from_post_ms(self):
+        # Regression test for Audit1 P1-2: post_ms alone cannot tell a
+        # caller whether a track actually reached helium ignition, since it
+        # is also True for a helium white dwarf (envelope exhausted before
+        # the flash) and False for both a normal TAMS-only run and a
+        # t_max-truncated run.  helium_ignition must distinguish all four.
+        ignites = phys.integrate_track(m_msun=1.0)["summary"]
+        self.assertTrue(ignites["post_ms"])
+        self.assertTrue(ignites["helium_ignition"])
+        self.assertIn("helium flash", ignites["phase_end"])
+
+        no_postms = phys.integrate_track(m_msun=1.0, include_postms=False)["summary"]
+        self.assertFalse(no_postms["post_ms"])
+        self.assertFalse(no_postms["helium_ignition"])
+
+        truncated = phys.integrate_track(m_msun=1.0, t_max_gyr=5.0)["summary"]
+        self.assertFalse(truncated["post_ms"])
+        self.assertFalse(truncated["helium_ignition"])
+
+        # A low-enough mass exhausts its envelope before the degenerate
+        # core reaches the helium-flash mass: post_ms is True (a
+        # post-main-sequence phase WAS integrated) but helium_ignition must
+        # be False (it never actually ignited helium).
+        white_dwarf_end = phys.integrate_track(m_msun=0.65, t_max_gyr=200.0)["summary"]
+        self.assertTrue(white_dwarf_end["post_ms"])
+        self.assertFalse(white_dwarf_end["helium_ignition"])
+        self.assertIn("helium white dwarf", white_dwarf_end["phase_end"])
+
+    def test_remnant_kind_agrees_with_the_tracks_own_computed_endpoint(self):
+        # Regression test for Audit1 P1-2's second contradiction (Codex's
+        # 0.49/0.50/0.60/0.67/0.68 probe): predicted_remnant() is a
+        # standalone, mass-only classifier that switches to "carbon-oxygen
+        # white dwarf" at 0.5 Msun, independent of what a specific track's
+        # own post-main-sequence integration found.  For roughly
+        # 0.5-0.67 Msun the degenerate-RGB branch finds the envelope
+        # exhausted before the flash (a helium white dwarf) while
+        # predicted_remnant() simultaneously reported carbon-oxygen --
+        # both displayed as fact in the same summary.  The track's own
+        # computed outcome must now take precedence for its own remnant
+        # fields.
+        for m in (0.49, 0.50, 0.60, 0.67):
+            with self.subTest(m=m):
+                s = phys.integrate_track(m_msun=m, t_max_gyr=1000.0)["summary"]
+                self.assertIn("helium white dwarf", s["phase_end"])
+                self.assertEqual(s["remnant_kind"], "helium white dwarf")
+                self.assertFalse(s["helium_ignition"])
+                self.assertAlmostEqual(s["remnant_msun"], s["mc_ign"], delta=1e-9)
+        # Just above the 0.47/0.70 boundary (~0.6714 Msun) the star DOES
+        # flash, and the ordinary mass-based classification is restored.
+        s_flash = phys.integrate_track(m_msun=0.68, t_max_gyr=1000.0)["summary"]
+        self.assertIn("helium flash", s_flash["phase_end"])
+        self.assertEqual(s_flash["remnant_kind"], "carbon-oxygen white dwarf")
+        self.assertTrue(s_flash["helium_ignition"])
+
     def test_central_hydrogen_is_monotonically_non_increasing_on_ms(self):
         result = phys.integrate_track(m_msun=1.0, include_postms=False)
         Xc = result["Xc"]
@@ -662,11 +905,22 @@ class TestTrackIntegration(unittest.TestCase):
 
     def test_low_mass_extreme_t_max_does_not_crash(self):
         # A very low-mass star given enough time to finish the main
-        # sequence and (if physically able) reach the helium flash.
+        # sequence and (if physically able) reach the helium flash.  Beyond
+        # not crashing, the endpoint semantics must be self-consistent: this
+        # star's envelope is exhausted before its degenerate core reaches
+        # the helium-flash mass, so it must reach the TAMS and run a
+        # post-main-sequence phase, but must NOT be reported as having
+        # ignited helium.
         result = phys.integrate_track(m_msun=0.4, t_max_gyr=500.0, n_ms=500,
                                        n_post=500)
+        s = result["summary"]
         self.assertTrue(np.all(np.isfinite(result["L"])))
         self.assertTrue(np.all(np.isfinite(result["R"])))
+        self.assertTrue(s["reached_tams"])
+        self.assertFalse(s["truncated"])
+        self.assertTrue(s["post_ms"])
+        self.assertFalse(s["helium_ignition"])
+        self.assertIn("helium white dwarf", s["phase_end"])
 
 
 # ======================================================================
@@ -744,6 +998,28 @@ class TestHrGridAndIsochrones(unittest.TestCase):
         result = phys.build_hr_grid([0.2, 1.0])
         self.assertTrue(any("M = 0.2" in w for w in result["summary"]["warnings"]))
 
+    def test_too_many_isochrones_rejected(self):
+        # Regression test for Audit1: the help file documented a 10-age cap
+        # on --isochrones but the code never enforced one, exposing an
+        # undocumented downstream ValueError instead of a clear one here.
+        with self.assertRaisesRegex(ValueError, str(phys.MAX_ISOCHRONES)):
+            phys.build_hr_grid(
+                [1.0, 2.0, 3.0],
+                isochrone_gyr=list(range(1, phys.MAX_ISOCHRONES + 2)),
+            )
+
+    def test_omitted_isochrone_age_produces_an_explanatory_warning(self):
+        # Regression test for Audit1 P2-4: an isochrone age that no track
+        # (or only one track) spans used to be dropped from the isochrones
+        # list with no explanation at all -- n_isochrones would just be
+        # smaller than requested with nothing to say why.  A 1 and a 10
+        # Msun track have total ages of about 11.7 Gyr and 0.035 Gyr
+        # respectively, so age = 5 Gyr is spanned by only the 1-Msun track.
+        result = phys.build_hr_grid([1.0, 10.0], isochrone_gyr=[5.0])
+        self.assertEqual(result["isochrones"], [])
+        self.assertTrue(any("5" in w and "omitted" in w
+                             for w in result["summary"]["warnings"]))
+
 
 # ======================================================================
 class TestFermiGasEos(unittest.TestCase):
@@ -800,6 +1076,105 @@ class TestFermiGasEos(unittest.TestCase):
     def test_x_from_density_rejects_non_positive(self):
         with self.assertRaises(ValueError):
             self.eos.x_from_density(-1.0)
+
+
+# ======================================================================
+class TestStructureIntegration(unittest.TestCase):
+    """integrate_structure(): the shared Newtonian/TOV RK4 integrator."""
+
+    def setUp(self):
+        self.eos = phys.FermiGasEOS(phys.m_e, 2.0 * phys.m_u)
+
+    def test_rejects_non_positive_central_variable(self):
+        with self.assertRaises(ValueError):
+            phys.integrate_structure(self.eos, 0.0)
+        with self.assertRaises(ValueError):
+            phys.integrate_structure(self.eos, -1.0)
+
+    def test_rejects_invalid_step_frac_and_y_floor(self):
+        x_c = self.eos.x_from_density(1.0e9)
+        for bad in (0.0, -0.1, 0.6, 1.0):
+            with self.subTest(step_frac=bad):
+                with self.assertRaises(ValueError):
+                    phys.integrate_structure(self.eos, x_c, step_frac=bad)
+        for bad in (0.0, -1e-8, 1.0, 2.0):
+            with self.subTest(y_floor=bad):
+                with self.assertRaises(ValueError):
+                    phys.integrate_structure(self.eos, x_c, y_floor=bad)
+
+    def test_rejects_non_positive_r_scale(self):
+        x_c = self.eos.x_from_density(1.0e9)
+        with self.assertRaises(ValueError):
+            phys.integrate_structure(self.eos, x_c, r_scale=0.0)
+        with self.assertRaises(ValueError):
+            phys.integrate_structure(self.eos, x_c, r_scale=-1.0)
+
+    def test_ordinary_model_integrates_successfully(self):
+        x_c = self.eos.x_from_density(1.0e9)
+        M, R, _ = phys.integrate_structure(self.eos, x_c, r_scale=1.0e7,
+                                           step_frac=0.01)
+        self.assertTrue(math.isfinite(M) and math.isfinite(R))
+        self.assertGreater(M, 0.0)
+        self.assertGreater(R, 0.0)
+
+    def test_toy_eos_k1_failure_wrapped_same_as_k2_failure(self):
+        # Regression test for Audit1 P2-3, using a deterministic toy EOS
+        # instead of a contrived physical density (Codex's specific
+        # request): a ValueError from the very first derivs() call (k1)
+        # must be wrapped into the same contextual RuntimeError as a
+        # ValueError from any later stage (k2/k3/k4), not leak through
+        # unwrapped.  Before the fix, k1 was evaluated outside the
+        # try/except, so this test would have failed with a bare
+        # ValueError instead of the wrapped RuntimeError.
+        class ToyEOS:
+            """Fails dP/dx exactly once, at a call count fixed by
+            fail_at_call, to pin down exactly which RK4 stage failed."""
+            def __init__(self, fail_at_call):
+                self.fail_at_call = fail_at_call
+                self.calls = 0
+
+            def rest_mass_density(self, y):
+                return 1.0e9
+
+            def mass_energy_density(self, y):
+                return 1.0e9
+
+            def pressure(self, y):
+                return 1.0e20
+
+            def dP_dx(self, y):
+                self.calls += 1
+                if self.calls == self.fail_at_call:
+                    raise ValueError(f"forced failure at call {self.calls}")
+                return 1.0e20
+
+            def x_from_density(self, rho):
+                return 1.0
+
+        for fail_at_call, label in ((1, "k1"), (2, "k2")):
+            with self.subTest(stage=label):
+                eos = ToyEOS(fail_at_call)
+                with self.assertRaisesRegex(RuntimeError,
+                                            "structure integration failed"):
+                    phys.integrate_structure(eos, 1.0, relativistic=False,
+                                             r_scale=1.0e7, step_frac=0.01)
+
+    def test_tov_horizon_failure_raises_the_same_actionable_runtimeerror(self):
+        # Regression test for Audit1 P2-3: the k1 = derivs(r, m, y) call
+        # used to sit OUTSIDE the try/except that wraps the k2-k4 stages,
+        # so a first-stage failure (including the TOV horizon check inside
+        # derivs()) propagated with a different, less actionable message
+        # than every other stage failure, instead of the unified
+        # "structure integration failed ... reduce --step_frac" message.
+        # An extreme central density for a very stiff polytrope drives the
+        # TOV metric non-positive on the very first derivs() call (k1,
+        # before any RK4 stage has been taken) -- exactly the call that
+        # used to sit outside the try/except.
+        eos = phys.PolytropeEOS(p_nuc=0.999999, gamma=1.01)
+        x_c = eos.x_from_density(1.0e21)
+        with self.assertRaisesRegex(RuntimeError, "structure integration failed"):
+            phys.integrate_structure(eos, x_c, relativistic=True,
+                                     r_scale=1.5e4, step_frac=0.1)
 
 
 class TestPolytropeEos(unittest.TestCase):
@@ -860,12 +1235,47 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Chandrasekhar"):
             phys.wd_structure(1.6, mu_e=2.0)
 
-    def test_mass_too_close_to_chandrasekhar_limit_fails_cleanly(self):
-        # Below the hard 0.999*M_Ch cutoff but still too close for the
-        # default bisection bracket [1e7, 1e13] kg/m^3 to reach: must raise
-        # a clear, documented RuntimeError, never crash or hang.
+    def test_mass_close_to_chandrasekhar_limit_widens_bracket_and_succeeds(self):
+        # Regression test for the Audit1 P2-1 fix: 1.455 Msun (mu_e=2, so
+        # M_Ch = 1.459 Msun) is below the default bisection bracket's reach
+        # at rho_c in [1e7, 1e13] kg/m^3 -- the old code raised RuntimeError
+        # here even though the mass is well inside the allowed range (below
+        # the hard 0.999*M_Ch cutoff).  wd_structure must now widen the
+        # bracket automatically and return a converged, physically sensible
+        # (very compact, very dense) white dwarf instead of failing.
+        rho_c, M_kg, R_m = phys.wd_structure(1.455, mu_e=2.0)
+        self.assertAlmostEqual(M_kg / phys.M_sun, 1.455, delta=1e-3)
+        self.assertGreater(rho_c, 1.0e13)          # outside the old default bracket
+        self.assertLess(R_m, 5.0e5)                # much smaller than a 0.6 Msun WD
+
+    def test_low_mass_within_documented_range_no_longer_fails(self):
+        # Regression test for Audit1 P2-1 (Codex reproducer): the Help file
+        # documents the accepted white-dwarf mass range as "anything below
+        # M_Ch(mu_e)", but the fixed bisection bracket [1e7, 1e13] kg/m^3
+        # only actually reached masses from about 0.049 to 1.432 Msun for
+        # mu_e=2 -- 0.01 Msun (already well AWAY from the Chandrasekhar
+        # limit) used to fail with the directionally wrong advice "try a
+        # mass further from the Chandrasekhar limit".  The adaptive bracket
+        # must now reach it.
+        rho_c, M_kg, R_m = phys.wd_structure(0.01, mu_e=2.0)
+        self.assertAlmostEqual(M_kg / phys.M_sun, 0.01, delta=1e-4)
+        self.assertGreater(R_m, 0.0)
+
+    def test_bracket_expansion_limit_still_fails_cleanly(self):
+        # With bracket expansion disabled (max_bracket_expansions=0), a
+        # mass the default bracket cannot reach must still fail with a
+        # clear, documented RuntimeError, never crash or hang -- the
+        # adaptive search is a convenience, not a way to silently hide a
+        # bracket that truly cannot be found.
         with self.assertRaisesRegex(RuntimeError, "bracket"):
-            phys.wd_structure(1.455, mu_e=2.0)
+            phys.wd_structure(1.455, mu_e=2.0, max_bracket_expansions=0)
+
+    def test_mass_too_close_to_chandrasekhar_limit_rejected_outright(self):
+        # Above the hard 0.999*M_Ch cutoff: rejected before any bisection
+        # is attempted, regardless of bracket expansion.
+        mch = phys.chandrasekhar_mass(2.0)
+        with self.assertRaisesRegex(ValueError, "Chandrasekhar"):
+            phys.wd_structure(0.999 * mch, mu_e=2.0)
 
     def test_mestel_constant_k1_matches_the_exact_nonrelativistic_eos(self):
         # Independent check of the non-relativistic degenerate-pressure
@@ -894,15 +1304,31 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         self.assertTrue(np.all(np.diff(M) > 0.0))   # mass rises with density
         self.assertTrue(np.all(np.diff(R) < 0.0))   # radius falls (heavier=smaller)
 
+    def test_mass_radius_curve_rejects_bad_density_range(self):
+        # Regression test for Audit1: wd_mass_radius_curve previously
+        # validated mu_e and n but not rho_lo/rho_hi at all, so a
+        # non-positive density or an inverted range reached np.geomspace
+        # (and eventually the EOS) unvalidated instead of a clear message.
+        with self.assertRaises(ValueError):
+            phys.wd_mass_radius_curve(mu_e=2.0, rho_lo=-1.0, rho_hi=1.0e13)
+        with self.assertRaises(ValueError):
+            phys.wd_mass_radius_curve(mu_e=2.0, rho_lo=1.0e13, rho_hi=1.0e8)
+
     def test_radius_scales_as_mu_e_to_minus_five_thirds_non_relativistic(self):
-        _, M1, R1 = phys.wd_structure(0.2, mu_e=2.0)
-        _, M2, R2 = phys.wd_structure(0.2 * (1.5 / 2.0) ** 2, mu_e=1.5)
-        # At fixed mass and non-relativistic densities R ~ mu_e^-5/3; here we
-        # instead hold M/M_Ch(mu_e) fixed to stay non-relativistic and check
-        # the ratio is finite and in the expected direction (lower mu_e =
-        # larger radius at comparable central conditions).
-        self.assertGreater(R2, 0.0)
-        self.assertGreater(R1, 0.0)
+        # Regression test for Audit1 P2-10: the previous version of this
+        # test computed R1, R2 but only asserted they were positive --
+        # never actually checking the mu_e^-5/3 scaling promised by its own
+        # name.  At fixed mass, well inside the non-relativistic regime
+        # (0.2 Msun, far below either mu_e's Chandrasekhar mass), the
+        # non-relativistic degenerate-electron polytrope predicts
+        # R(mu_e=1.5)/R(mu_e=2.0) = (2.0/1.5)^(5/3).
+        _, M1, R1 = phys.wd_structure(0.20, mu_e=1.5)
+        _, M2, R2 = phys.wd_structure(0.20, mu_e=2.0)
+        self.assertAlmostEqual(M1 / phys.M_sun, 0.20, delta=1e-3)
+        self.assertAlmostEqual(M2 / phys.M_sun, 0.20, delta=1e-3)
+        ratio = R1 / R2
+        expected = (2.0 / 1.5) ** (5.0 / 3.0)
+        self.assertAlmostEqual(ratio, expected, delta=0.05 * expected)
 
 
 class TestMestelCooling(unittest.TestCase):
@@ -968,6 +1394,32 @@ class TestMestelCooling(unittest.TestCase):
         expected = 1e-4 * 3.68e22 * 1.0 * 1.70
         self.assertAlmostEqual(kappa0, expected, delta=1e-6 * expected)
 
+    def test_tc_end_below_floor_rejected_instead_of_overflowing(self):
+        # Regression test for Audit1 P2-2: the analytic-age formula
+        # evaluates Tc_end**-2.5, which overflows a Python float
+        # (OverflowError) for a sufficiently small but still positive
+        # Tc_end.  A validation floor must turn that into a clear ValueError
+        # raised before the overflow-prone calculation runs.
+        with self.assertRaisesRegex(ValueError, "100"):
+            phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0,
+                                      Tc0=3.0e7, Tc_end=1.0e-6)
+        # A value just above the floor must still work normally.
+        result = phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0,
+                                           Tc0=3.0e7, Tc_end=150.0)
+        self.assertTrue(math.isfinite(result["summary"]["t_end_gyr"]))
+
+    def test_a_ion_out_of_physical_range_rejected(self):
+        # Regression test for Audit1 P2-level validation gap: A_ion is the
+        # mean ionic mass number and has no meaning outside roughly [1, 60]
+        # for any white-dwarf composition.
+        with self.assertRaises(ValueError):
+            phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=0.5)
+        with self.assertRaises(ValueError):
+            phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=200.0)
+        # A_ion = 12 (carbon core) must still work normally.
+        result = phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=12.0)
+        self.assertTrue(math.isfinite(result["summary"]["t_end_gyr"]))
+
     def test_composition_controls_are_separable(self):
         # Changing core mu_e changes structure but not the Mestel constant;
         # changing envelope Z changes the cooling age but not the structure.
@@ -1019,6 +1471,25 @@ class TestNeutronStarSequence(unittest.TestCase):
         s = result["summary"]
         self.assertFalse(s["turning_point"])
         self.assertTrue(any("largest sampled mass" in w for w in s["warnings"]))
+
+    def test_turning_point_requires_both_sides_not_just_below_the_top(self):
+        # Regression test for Audit1 P1-1 (Codex reproducer): a density
+        # range sampled entirely above the true turning point gives a mass
+        # array that is monotonically DECREASING from the very first point
+        # (i_max = 0).  The old check "i_max < gi[-1]" is satisfied by this
+        # (0 < 7), so it wrongly reported turning_point=True/stable_branch
+        # =True with no warning at all.  The maximum must be interior to
+        # the sampled range on both sides before it counts as a genuine
+        # turning point.
+        result = phys.ns_mass_radius_curve(eos_name="neutron", n=8,
+                                           rho_lo=1.0e19, rho_hi=5.0e19)
+        s = result["summary"]
+        self.assertEqual(result["i_max"], 0)
+        self.assertTrue(np.all(np.diff(result["M"]) < 0.0))
+        self.assertFalse(s["turning_point"])
+        self.assertFalse(s["stable_branch"])
+        self.assertTrue(any("lower" in w.lower() and "rho_lo" in w
+                             for w in s["warnings"]))
 
     def test_gm_over_rc2_is_always_reported_relativistic_or_not(self):
         rel = phys.ns_mass_radius_curve(eos_name="neutron", n=16,
@@ -1130,6 +1601,21 @@ class TestDriverValidation(unittest.TestCase):
             driver.run(mode="hr", no_plot=True, csvdir=self.tmp,
                        isochrones=ages)
 
+    def test_hr_aggregate_workload_cap_rejected_before_running(self):
+        # Regression test for Audit1 I6: n_ms and n_post are each validated
+        # individually up to phys.MAX_TRACK_STEPS, and the mass list up to
+        # phys.MAX_MASSES, but the PRODUCT of a large mass count and large
+        # per-track step counts could still take an unreasonable time.  This
+        # must be rejected immediately (before any track is integrated),
+        # not merely eventually finish.
+        import time
+        t0 = time.time()
+        with self.assertRaises(ValueError):
+            driver.run(mode="hr", no_plot=True, csvdir=self.tmp,
+                       masses="1,2,3,4,5,6",
+                       n_ms=2_000_000, n_post=2_000_000)
+        self.assertLess(time.time() - t0, 2.0)   # rejected, not computed
+
 
 class TestCsvOutput(unittest.TestCase):
     def setUp(self):
@@ -1159,6 +1645,27 @@ class TestCsvOutput(unittest.TestCase):
         self.assertIn("mode = tracks", joined_comments)
         # A parameter belonging only to wdcool/nsmr must not appear as if used.
         self.assertNotIn("wd_mass", joined_comments)
+
+    def test_provenance_records_python_numpy_matplotlib_versions(self):
+        # Regression test for Audit1 J3: a CSV's provenance comments must
+        # record the environment (interpreter and library versions) a run
+        # was produced with, not just the program version/build.
+        driver.run(mode="tracks", mass=1.0, no_plot=True, csvdir=self.tmp)
+        files = [f for f in os.listdir(self.tmp) if f.startswith("sev_track_")]
+        comments, _ = self._read_csv(os.path.join(self.tmp, files[0]))
+        joined = "".join(comments)
+        self.assertIn("Python", joined)
+        self.assertIn("NumPy", joined)
+        self.assertIn("Matplotlib", joined)
+
+    def test_two_runs_in_the_same_second_do_not_overwrite_each_other(self):
+        # Regression test for Audit1 P2-5: two CSVs written with the same
+        # prefix inside the same wall-clock second used to collide on
+        # filename and silently overwrite one another.
+        driver.run(mode="tracks", mass=1.0, no_plot=True, csvdir=self.tmp)
+        driver.run(mode="tracks", mass=1.0, no_plot=True, csvdir=self.tmp)
+        files = [f for f in os.listdir(self.tmp) if f.startswith("sev_track_")]
+        self.assertEqual(len(files), 2)
 
     def test_wdcool_csv_two_files_and_relative_difference_is_tiny(self):
         driver.run(mode="wdcool", wd_mass=0.6, no_plot=True, csvdir=self.tmp)
@@ -1284,6 +1791,30 @@ class TestPlotting(unittest.TestCase):
             pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
             self.assertEqual(len(pngs), 1)
 
+    def test_two_saves_in_the_same_second_do_not_overwrite_each_other(self):
+        # Regression test for Audit1 P2-5: two PNGs from the same mode in
+        # the same wall-clock second used to collide on filename.
+        import matplotlib.pyplot as plt
+        result = phys.integrate_track(m_msun=1.0, n_ms=200, n_post=200)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(plt, "show"):
+                plotting.plot_track(result, outdir=tmp, dpi=60)
+                plotting.plot_track(result, outdir=tmp, dpi=60)
+            pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
+            self.assertEqual(len(pngs), 2)
+
+    def test_figure_carries_a_version_build_footer(self):
+        # Regression test for Audit1 P2-6: every saved figure must carry a
+        # small version/build footer so a printed or screenshotted plot can
+        # be traced back to the exact source revision that produced it.
+        import matplotlib.pyplot as plt
+        result = phys.integrate_track(m_msun=1.0, n_ms=200, n_post=200)
+        with mock.patch.object(plt, "show"), mock.patch.object(plt, "close"):
+            plotting.plot_track(result)
+            texts = [t.get_text() for t in plt.gcf().texts]
+        self.assertTrue(any(phys.MODEL_VERSION in t and phys.BUILD_ID in t
+                             for t in texts))
+
     def test_csvdir_only_still_displays(self):
         import matplotlib.pyplot as plt
         with tempfile.TemporaryDirectory() as tmp:
@@ -1400,9 +1931,17 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("at least 1", params)
 
     def test_mu_e_lower_bound_documented(self):
-        self.assertIn("mu_e", "mu_e")  # placeholder to keep structure
+        # Regression test for Audit1 P2-10: the previous version of this
+        # test asserted assertIn("mu_e", "mu_e"), a tautology that always
+        # passes and the second assertion only checked that the literal
+        # substring "mu_e" appears somewhere -- true of nearly every
+        # mu_e-related sentence on the page, so it could not have caught a
+        # missing or wrong bound.  This checks the actual bound statement
+        # (mu_e >= 1, in the LaTeX source used throughout this page) is
+        # present in the runtime-safeguards note.
         algo = normalized_text(nodes_by_id(self.root, "algorithm")[0])
-        self.assertIn("mu_e", algo.replace("\\(", "").replace("\\)", "") + algo)
+        self.assertIn(r"\mu_e\ge1", algo)
+        self.assertIn("fewer than one nucleon per electron", algo)
 
     def test_m_observed_negative_rejection_documented(self):
         params = normalized_text(nodes_by_id(self.root, "parameters")[0])

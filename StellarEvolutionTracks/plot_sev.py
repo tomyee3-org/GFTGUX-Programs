@@ -44,11 +44,27 @@ def _timestamp_name(prefix):
     return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
 
+def _unique_path(outdir, name):
+    """Avoid silently overwriting a PNG from a run in the same second."""
+    path = os.path.join(outdir, name)
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(name)
+    n = 2
+    while os.path.exists(candidate := os.path.join(outdir, f"{stem}_{n}{ext}")):
+        n += 1
+    return candidate
+
+
 def _finish(fig, outdir, prefix, dpi):
     """Optionally save a timestamped PNG, then display the figure."""
+    fig.text(0.995, 0.005,
+             f"StellarEvolutionTracks {phys.MODEL_VERSION} "
+             f"(build {phys.BUILD_ID})",
+             ha="right", va="bottom", fontsize=6, color="0.55")
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        path = os.path.join(outdir, _timestamp_name(prefix))
+        path = _unique_path(outdir, _timestamp_name(prefix))
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
         print(f"[plot_sev] PNG saved -> {path}")
     print("[plot_sev] Displaying figure on screen ...")
@@ -129,7 +145,7 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
                  color="k", ls="none",
                  label=fr"stopped at $t_{{\rm max}}={s['t_stop_gyr']:.3g}\,$Gyr",
                  zorder=5)
-    if s["post_ms"]:
+    if s["helium_ignition"]:
         ax1.plot(np.log10(T[-1]), np.log10(L[-1]), marker="*", ms=13,
                  color=C_MARK, ls="none", label="He ignition", zorder=5)
     if abs(s["m_msun"] - 1.0) < 1e-9:
@@ -186,7 +202,10 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
         note = [fr"$t_{{\rm MS}}>{s['t_stop_gyr']:.3g}\,$Gyr (not reached)"]
     if s["post_ms"]:
         note.append(fr"$t_{{\rm post}}={s['t_post_gyr']:.3g}\,$Gyr")
-        note.append("track ends at He ignition")
+        if s["helium_ignition"]:
+            note.append("track ends at He ignition")
+        else:
+            note.append("track ends without He ignition (see phase_end)")
     note.append(f"schematic remnant: {s['remnant_kind']}")
     note.append(fr"$M_{{\rm rem}}\approx{s['remnant_msun']:.2f}\,M_\odot$"
                 " (not integrated)")
@@ -291,7 +310,8 @@ def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
                 label=fr"$M_{{\rm Ch}}={s['M_ch']:.3f}\,M_\odot$")
     ax1.plot([s["m_msun"]], [s["R_km"]], marker="*", ms=15, color=C_MARK,
              ls="none", label="this white dwarf")
-    ax1.axhline(6371.0, color=C_ZAMS, lw=0.9, ls=":", label="Earth radius")
+    ax1.axhline(phys.R_EARTH / 1.0e3, color=C_ZAMS, lw=0.9, ls=":",
+                label="Earth radius")
     ax1.set_xlabel(r"$M/M_\odot$")
     ax1.set_ylabel("Radius [km]")
     ax1.set_yscale("log")
