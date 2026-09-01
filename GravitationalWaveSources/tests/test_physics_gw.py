@@ -104,10 +104,26 @@ def _default_bns_result():
     case integration; these two were also still present. Caching here
     means the expensive integration itself runs once while both tests
     still exercise physics.integrate_inspiral()'s real, unmodified return
-    value -- callers must treat the returned dict/arrays as read-only
-    (not mutate them), since the same object is shared across tests.
+    value -- callers must treat the returned dict/arrays as read-only,
+    since the same object is shared across tests.
+
+    Audit6 (Codex P3-4): a docstring warning against mutation is not
+    enforced -- a test that accidentally mutated one of these arrays in
+    place would silently corrupt every other test that later reads the
+    same cached object, with the failure surfacing (if at all) in an
+    unrelated test far from its actual cause. Every NumPy array in the
+    returned dict is therefore marked read-only (setflags(write=False))
+    before this function returns, so an accidental in-place mutation
+    raises ValueError immediately, at the point of the mistake, instead
+    of corrupting shared state silently. This does not cover the
+    scalar/summary entries (plain Python floats/ints/dicts have no such
+    mechanism), so callers must still avoid mutating those.
     """
-    return physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
+    result = physics.integrate_inspiral(1.4, 1.4, 400.0, dt=2e-4, f_start=20.0)
+    for value in result.values():
+        if isinstance(value, np.ndarray):
+            value.setflags(write=False)
+    return result
 
 
 def read_gw_csv(path):
@@ -173,10 +189,15 @@ def recompute_build_id(directory):
 # ---------------------------------------------------------------------------
 _G = 6.674_30e-11
 _C = 2.997_924_58e8
-# Audit5: updated to match physics_gw.py's switch from a legacy adopted
-# M_sun to the value derived from the IAU 2015 nominal solar-mass
-# parameter (see that file's comment on its own M_sun constant).
-_MSUN = 1.988_41e30
+# The IAU 2015 Resolution B3 nominal solar-mass parameter (exact by
+# definition), copied here independently of physics_gw.py's own
+# GM_sun_nominal constant. _MSUN is derived from this and _G above, exactly
+# as physics_gw.py derives its own M_sun -- but from this file's own
+# independent copies of the parameter and G, not by importing or copying
+# physics_gw's computed M_sun value. See test_g_times_msun_matches_iau_
+# nominal_gm below for the check this independence actually buys.
+_GM_SUN_NOMINAL = 1.327_1244e20
+_MSUN = _GM_SUN_NOMINAL / _G
 _MPC = 3.085_677_581_49e22
 
 
@@ -445,7 +466,25 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         # legacy adopted value to the value derived from the IAU 2015
         # nominal solar-mass parameter, a deliberate physical-constant
         # policy decision, not a bug fix).
-        self.assertEqual(physics.MODEL_VERSION, "1.5.0")
+        #
+        # Audit6 round: bumped 1.5.0 -> 1.6.0 for this round's behavior
+        # changes (the permission-normalization helper no longer touches
+        # the process-wide os.umask() at all -- it now derives the
+        # effective mode from a real O_CREAT|O_EXCL probe-file creation,
+        # closing the multi-threaded race the previous
+        # os.umask(0)/os.umask(saved) toggle was exposed to; and M_sun is
+        # now stored as the unrounded quotient GM_sun_nominal / G rather
+        # than a manually-rounded literal, so G * M_sun reproduces
+        # GM_sun_nominal to full floating-point precision instead of only
+        # approximately -- physics_gw.py's own comments and the Help
+        # file's "Physical constants used" note now describe this
+        # accurately). The Python source files' comments were also
+        # stripped of round-by-round audit-history labels this round, per
+        # direct user instruction, leaving only permanent, present-tense
+        # design rationale -- a documentation/readability change with no
+        # effect on program behavior, so it does not by itself justify
+        # this version bump (the umask and M_sun changes above do).
+        self.assertEqual(physics.MODEL_VERSION, "1.6.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
@@ -519,6 +558,22 @@ class TestPhysicsIndependentReferences(unittest.TestCase):
         self.assertEqual(physics.c, 2.99792458e8)  # defined exactly by SI
         self.assertAlmostEqual(physics.M_sun, _MSUN, delta=1e20)
         self.assertAlmostEqual(physics.MPC_M, _MPC, delta=1e10)
+
+    def test_g_times_msun_matches_iau_nominal_gm(self):
+        """physics_gw.py computes M_sun as GM_sun_nominal / G (unrounded),
+        so physics.G * physics.M_sun should reproduce the IAU 2015
+        Resolution B3 nominal solar-mass parameter to full floating-point
+        precision, not merely to the handful of significant figures a
+        rounded, independently-stored M_sun literal would agree to. This
+        compares against this file's own independent copy of the nominal
+        parameter (_GM_SUN_NOMINAL, defined above from the same public
+        IAU value, not imported from physics_gw), so a bug that rounded or
+        mis-derived M_sun in physics_gw.py -- even one that happened to
+        also get copied into this file's _MSUN -- would still be caught
+        here."""
+        self.assertAlmostEqual(
+            physics.G * physics.M_sun / _GM_SUN_NOMINAL, 1.0, places=12
+        )
 
     def test_chirp_mass_matches_symmetric_mass_ratio_form(self):
         rng = np.random.default_rng(20260831)  # deterministic seed
@@ -694,7 +749,7 @@ class TestChirpMassFromFdot(unittest.TestCase):
         # 0.002 s apart) are identical, so this pins down the Help text's
         # own numbers, not merely a similar independent scenario.
         self.assertEqual((t1, f1), (0.0, 100.0))
-        self.assertEqual((t2, f2), (0.0020000000000000005, 100.03475042806328))
+        self.assertEqual((t2, f2), (0.0020000000000000005, 100.03475042429461))
         fdot_est = (f2 - f1) / (t2 - t1)
         f_mid = 0.5 * (f1 + f2)
         Mc_kg = physics.chirp_mass_from_fdot(f_mid, fdot_est)
@@ -887,6 +942,21 @@ class TestDefaultAndBBHReferenceCase(unittest.TestCase):
         self.assertAlmostEqual(s["A_isco"] / A, 1.0, places=9)
         self.assertEqual(s["inspiral_steps"], 789_341)
 
+    def test_default_bns_result_arrays_are_read_only(self):
+        """Audit6 (Codex P3-4): _default_bns_result() is process-wide cached
+        (lru_cache) and shared by multiple tests; an in-place mutation by
+        one test would silently corrupt every other test that later reads
+        the same cached arrays. Confirms that guarantee is actually
+        enforced -- not just documented -- for every array field this
+        function returns."""
+        result = _default_bns_result()
+        for key in ("t", "h", "A", "f", "phase"):
+            with self.subTest(field=key):
+                array = result[key]
+                self.assertFalse(array.flags.writeable)
+                with self.assertRaises(ValueError):
+                    array[0] = array[0] + 1.0
+
     def test_bbh_ringdown_case_matches_hand_computation(self):
         m1, m2 = 36.0 * _MSUN, 29.0 * _MSUN
         Mc = ref_chirp_mass_kg(m1, m2)
@@ -961,19 +1031,23 @@ class TestRK4Stepper(unittest.TestCase):
             return f, phase
 
         f0 = 20.0
-        # Audit5: T_fixed=0.3 (used through Audit4) pushed the second
-        # halving's error down to ~1e-13 -- the double-precision noise
-        # floor the comment below already anticipated. That was already
-        # fragile in principle, and the M_sun policy change this round
-        # (a ~0.026% shift in Mc, see physics_gw.py's M_sun comment) was
-        # enough to flip which side of the noise floor that comparison
-        # landed on, turning a real but tiny (~1e-13) improvement into an
-        # apparent regression. T_fixed=0.5 keeps the finest-dt error above
-        # ~1e-13 (verified with both the current and the previous M_sun
-        # value) while the reached frequency (~28 Hz) remains well below
-        # this system's f_isco (~67.6 Hz), so this still measures genuine
-        # RK4 truncation error, not floating-point round-off noise.
-        T_fixed = 0.5
+        # This comparison sits close to a double-precision noise floor
+        # (the finest-dt error against the high-resolution reference is
+        # only ~1e-13 in absolute frequency), so the measured ratios are
+        # sensitive to the exact value of Mc -- even a tiny change to
+        # M_sun's least-significant bits (such as switching M_sun from a
+        # rounded literal to an unrounded quotient, a ~1e-7 relative
+        # shift) can move which side of that floor a single T_fixed value
+        # lands on. Rather than re-tuning to another single knife-edge
+        # value, T_fixed=0.6 was chosen from a scan that confirmed both
+        # ratios stay comfortably inside their brackets across a broad
+        # plateau of nearby T_fixed values (0.548-0.604s), not only at
+        # this one point -- so a future small constants change is much
+        # less likely to flip this test again. The reached frequency
+        # (~31 Hz) remains well below this system's f_isco (~67.6 Hz), so
+        # this still measures genuine RK4 truncation error, not the
+        # steep, effectively-divergent behavior near coalescence.
+        T_fixed = 0.6
         f_ref, _ = integrate_n_steps(f0, 1e-5, round(T_fixed / 1e-5))
 
         errors = []
@@ -2104,6 +2178,98 @@ class TestDriverRun(unittest.TestCase):
             actual_mode = stat.S_IMODE(os.stat(published).st_mode)
             self.assertEqual(actual_mode, expected_mode)
 
+    def test_default_output_file_mode_never_calls_os_umask(self):
+        """Audit6 (Codex P2-1, required regression): os.umask() has no
+        atomic read-only form -- the only way to read it is to
+        simultaneously set a new value and receive the old one back -- and
+        umask is process-wide, not per-thread, state. Audit5's
+        os.umask(0); os.umask(saved) approach therefore raced every other
+        thread in the process that created a file during that window.
+        _default_output_file_mode() must instead derive the effective mode
+        by letting the kernel apply the umask atomically to a real
+        O_CREAT|O_EXCL file-creation call and inspecting the resulting
+        inode -- it must never call os.umask() at all. Patching os.umask()
+        to raise if called at all is a stronger check than merely
+        comparing before/after values."""
+        saved_umask = os.umask(0)
+        os.umask(saved_umask)
+        expected_mode = 0o666 & ~saved_umask
+
+        def _forbidden(*_args, **_kwargs):
+            raise AssertionError("os.umask() must not be called")
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch("os.umask", side_effect=_forbidden):
+                self.assertEqual(driver._default_output_file_mode(d), expected_mode)
+                self.assertEqual(plotting._default_output_file_mode(d), expected_mode)
+
+    def test_default_output_file_mode_concurrent_calls_never_disturb_process_umask(self):
+        """Audit6 (Codex P2-1, required regressions #1-#3): reproduces
+        Codex's own deterministic two-thread probe, which -- against the
+        prior os.umask(0); os.umask(saved) implementation -- demonstrated
+        corrupted output modes and left the process umask changed from
+        0027 to 0000. This runs many concurrent calls to both driver_gw's
+        and plot_gw's _default_output_file_mode() from several threads
+        while a separate thread continuously creates real files (via the
+        same O_CREAT|O_EXCL-plus-fstat mechanism the helper itself uses)
+        and checks every single mode observed -- by the helper and by the
+        unrelated concurrent creator alike -- matches the one umask fixed
+        for the whole test implies; the concurrent creator's file is never
+        "weakened" (or strengthened) by a helper call racing it. The
+        process umask is checked to be bit-for-bit unchanged at the end.
+        The test's own umask change is restored in an outer finally
+        regardless of assertion outcome, so a failure here never leaves
+        the test process's umask altered for later tests."""
+        original_umask = os.umask(0)
+        os.umask(original_umask)
+        try:
+            test_umask = 0o027
+            os.umask(test_umask)
+            expected_mode = 0o666 & ~test_umask
+            errors = []
+
+            def _watcher(directory):
+                for n in range(200):
+                    path = os.path.join(directory, f".watch_{n}_{threading.get_ident()}")
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+                    try:
+                        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+                    finally:
+                        os.close(fd)
+                        os.unlink(path)
+                    if mode != expected_mode:
+                        errors.append(("watcher", n, oct(mode)))
+
+            def _prober(directory, module, n_calls):
+                for _ in range(n_calls):
+                    mode = module._default_output_file_mode(directory)
+                    if mode != expected_mode:
+                        errors.append(("prober", module.__name__, oct(mode)))
+
+            with tempfile.TemporaryDirectory() as d:
+                threads = [
+                    threading.Thread(target=_watcher, args=(d,)),
+                    threading.Thread(target=_prober, args=(d, driver, 100)),
+                    threading.Thread(target=_prober, args=(d, plotting, 100)),
+                    threading.Thread(target=_prober, args=(d, driver, 100)),
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=30)
+                    self.assertFalse(t.is_alive(), "a thread failed to finish in time")
+
+            final_umask = os.umask(0)
+            os.umask(final_umask)
+            self.assertEqual(
+                final_umask, test_umask,
+                "process umask must be bit-for-bit unchanged by concurrent "
+                "_default_output_file_mode() calls",
+            )
+            self.assertEqual(errors, [])
+        finally:
+            os.umask(original_umask)
+
     def test_frozen_timestamp_two_complete_writes_both_survive_intact(self):
         """Audit3 (Codex P2-1, required regression #5): the collision tests
         above only prove _publish_atomically() claims three distinct real
@@ -2727,6 +2893,39 @@ class TestHelpFile(unittest.TestCase):
         nearby = self.html[provenance_idx:provenance_idx + 1200]
         self.assertIn("normaliz", nearby.lower())
         self.assertIn("CRLF", nearby)
+
+    def test_untrusted_directory_boundary_is_stated_at_both_output_notes(self):
+        """Audit6 (Codex P2-2): the code docstrings for _verify_temp_identity
+        scope the atomicity/security guarantee to an "ordinary,
+        non-adversarial" output directory -- a shared or attacker-writable
+        --csvdir/--outdir can still let a symlink or substituted file get
+        published, because the identity check happens before publication,
+        not atomically with it. The Help file must state this same boundary,
+        and it must do so at both places a student would actually be reading
+        when they decide where to point --csvdir/--outdir: the Algorithm
+        section's description of the atomic-publish step, and the "Input and
+        runtime safeguards" note. A generic disclaimer somewhere else on the
+        page is not sufficient -- Audit5's version of this text was checked
+        only for the word "atomically" appearing anywhere, which is why the
+        missing scope survived that round undetected."""
+        needle = "untrusted co-tenant"
+        first = self.html.find(needle)
+        self.assertNotEqual(first, -1, "no untrusted-co-tenant wording found")
+        second = self.html.find(needle, first + 1)
+        self.assertNotEqual(
+            second, -1,
+            "untrusted-co-tenant wording must appear at both the Algorithm "
+            "section's output-file description and the 'Input and runtime "
+            "safeguards' note, not just once",
+        )
+
+        algorithm_idx = self.html.find('id="algorithm"')
+        safeguards_idx = self.html.find("Input and runtime safeguards")
+        self.assertNotEqual(algorithm_idx, -1)
+        self.assertNotEqual(safeguards_idx, -1)
+        self.assertLess(algorithm_idx, first)
+        self.assertLess(first, safeguards_idx)
+        self.assertLess(safeguards_idx, second)
 
     def test_default_case_numbers_are_current(self):
         for required in ("158 seconds",):

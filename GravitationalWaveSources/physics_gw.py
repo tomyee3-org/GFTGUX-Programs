@@ -15,7 +15,7 @@ import math
 import sys
 import numpy as np
 
-MODEL_VERSION = "1.5.0"
+MODEL_VERSION = "1.6.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -69,16 +69,23 @@ BUILD_ID = _compute_build_id()
 G = 6.674_30e-11       # m^3 kg^-1 s^-2
 c = 2.997_924_58e8     # m s^-1
 
-#: Audit5: derived from the IAU 2015 Resolution B3 nominal solar-mass
-#: parameter, GM_sun_N = 1.327_1244e20 m^3 s^-2 (exact by definition),
-#: divided by G above: 1.327_1244e20 / 6.674_30e-11 = 1.988_4098...e30,
-#: rounded to the same 6-significant-figure precision as this program's own
-#: G. A commonly cited legacy adopted value, 1.988_92e30 kg, differs from
-#: this by about 0.026%; this program uses the nominal-parameter-derived
-#: value throughout rather than the legacy one (a deliberate choice, not an
-#: oversight -- see GravitationalWaveSources.html's "Physical constants
-#: used" note for the full rationale).
-M_sun = 1.988_41e30    # kg
+#: IAU 2015 Resolution B3 nominal solar-mass parameter, GM_sun^N -- exact by
+#: definition, not a measured or rounded quantity. This program's author has
+#: chosen to base M_sun on this modern nominal parameter rather than on a
+#: commonly cited legacy adopted mass value (1.988_92e30 kg, about 0.026%
+#: different); see GravitationalWaveSources.html's "Physical constants used"
+#: note for the full rationale.
+GM_sun_nominal = 1.327_1244e20   # m^3 s^-2
+
+#: Derived, not independently rounded: computing M_sun as this unrounded
+#: quotient (rather than rounding the quotient to a fixed number of
+#: significant figures before storing it) means G * M_sun reproduces
+#: GM_sun_nominal above to full floating-point precision, so the two
+#: constants stay exactly consistent with each other by construction. Any
+#: display of M_sun's value to a fixed number of digits (e.g. in
+#: documentation) is a presentation choice, not the value this program
+#: actually computes with.
+M_sun = GM_sun_nominal / G       # kg
 MPC_M = 3.085_677_581_49e22
 
 MAX_INSPIRAL_STEPS = 5_000_000
@@ -143,29 +150,24 @@ def chirp_mass(m1_kg, m2_kg):
     frequency and its rate of change, the calculation actually used to
     estimate chirp mass from a detected chirp.
 
-    Low-level helper, deliberately unvalidated (Audit3 Codex P3-3): this
-    and the five functions below it (dfdt, strain_amplitude, f_isco,
-    qnm_params, inspiral_time) are trusted-input arithmetic building
-    blocks, not part of this program's user-facing safety net --
-    integrate_inspiral() performs all input validation once, up front, and
-    is the only place these should be called with unvalidated values.
-    Several of these (dfdt above all, called four times per RK4 step) run
-    millions of times inside a single long integration, so they
-    deliberately do not repeat per-call validation on every invocation;
-    the cost of an isinstance/isfinite check on every one of those calls is
-    not free at that scale. Outside their physical domain (non-positive or
-    non-finite inputs) they raise whatever Python itself raises for the
-    underlying arithmetic (a ZeroDivisionError, a complex result from a
-    fractional power of a negative number, etc.) rather than a descriptive
-    ValueError -- this is intentional: out-of-domain behavior for these
-    low-level helpers is simply unsupported and may change without notice,
-    since integrate_inspiral()'s own validation is what every real caller
-    actually relies on (Audit5 Codex P3-3: an earlier version of this
-    docstring claimed this behavior was pinned down by a
-    TestLowLevelHelperDomainContract test class; those outcome-pinning
-    tests were removed in the Audit4 round as testing incidental Python
-    arithmetic behavior rather than this program's own contract, and this
-    docstring was not updated to match at the time).
+    Low-level helper, deliberately unvalidated: this and the five functions
+    below it (dfdt, strain_amplitude, f_isco, qnm_params, inspiral_time) are
+    trusted-input arithmetic building blocks, not part of this program's
+    user-facing safety net -- integrate_inspiral() performs all input
+    validation once, up front, and is the only place these should be
+    called with unvalidated values. Several of these (dfdt above all,
+    called four times per RK4 step) run millions of times inside a single
+    long integration, so they deliberately do not repeat per-call
+    validation on every invocation; the cost of an isinstance/isfinite
+    check on every one of those calls is not free at that scale. Outside
+    their physical domain (non-positive or non-finite inputs) they raise
+    whatever Python itself raises for the underlying arithmetic (a
+    ZeroDivisionError, a complex result from a fractional power of a
+    negative number, etc.) rather than a descriptive ValueError -- this is
+    intentional: out-of-domain behavior for these low-level helpers is
+    simply unsupported and may change without notice, since
+    integrate_inspiral()'s own validation is what every real caller
+    actually relies on.
     """
     return (m1_kg * m2_kg) ** 0.6 / (m1_kg + m2_kg) ** 0.2
 
@@ -206,14 +208,14 @@ def chirp_mass_from_fdot(f_hz, fdot_hz_per_s):
             "binary's GW frequency always increases under this model)."
         )
     # Evaluate in the log domain rather than forming f**(-11/3) and
-    # fdot**1 as intermediate powers/products directly. Audit2 (Codex P2-1)
-    # found that the direct form can individually overflow (OverflowError)
-    # or underflow to exactly 0.0 for f or fdot near the extreme ends of
-    # the representable float range, even when the true, mathematically
-    # implied chirp mass is a normal, representable, nonzero number -- or,
-    # in the opposite direction, is genuinely outside any representable
-    # range and should be reported as such rather than silently returned
-    # as 0.0. Working in log space keeps every intermediate value in a
+    # fdot**1 as intermediate powers/products directly. The direct form can
+    # individually overflow (OverflowError) or underflow to exactly 0.0 for
+    # f or fdot near the extreme ends of the representable float range,
+    # even when the true, mathematically implied chirp mass is a normal,
+    # representable, nonzero number -- or, in the opposite direction, is
+    # genuinely outside any representable range and should be reported as
+    # such rather than silently returned as 0.0. Working in log space keeps
+    # every intermediate value in a
     # moderate numeric range (natural logs of doubles span roughly
     # -745..+709, never overflowing/underflowing on their own), so the
     # only overflow/underflow decision left is the single explicit
@@ -233,13 +235,11 @@ def chirp_mass_from_fdot(f_hz, fdot_hz_per_s):
             "the units and magnitude of the inputs."
         )
     if log_Mc_kg < _LOG_FLOAT_MIN:
-        # Audit3 (Codex P3-2): a result down here is *not* unrepresentable
-        # -- positive subnormal doubles extend roughly four more orders of
-        # magnitude below sys.float_info.min, down to ~4.94e-324 -- so the
-        # old wording ("too small to represent") was factually wrong for
-        # this specific boundary. What is true, and is the actual reason
-        # this is rejected, is that _LOG_FLOAT_MIN is deliberately set at
-        # the smallest *normal* double (see the module-level comment on
+        # A result down here is not unrepresentable -- positive subnormal
+        # doubles extend roughly four more orders of magnitude below
+        # sys.float_info.min, down to ~4.94e-324. The actual reason this is
+        # rejected is that _LOG_FLOAT_MIN is deliberately set at the
+        # smallest *normal* double (see the module-level comment on
         # _LOG_FLOAT_MIN): a chirp mass only representable as a reduced-
         # precision subnormal float is not a value this program treats as
         # meaningful at its leading-order pedagogical level, independent of
@@ -395,7 +395,7 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
 
     # n_ringdown_tau/ringdown_pts are meaningless when ringdown is not
     # requested, so they are validated (and can only reject the call) when
-    # include_ringdown is True -- see the API note above (Audit2/Copilot A2-4).
+    # include_ringdown is True -- see the API note above.
     if include_ringdown:
         n_ringdown_tau = _require_finite("n_ringdown_tau", n_ringdown_tau)
         ringdown_pts = _require_finite("ringdown_pts", ringdown_pts)
@@ -440,12 +440,11 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
     # Validate the optional ringdown's coupled sampling requirement here,
     # as soon as M_total (and hence the toy remnant mass and QNM
     # parameters) is known -- deliberately *before* estimating or running
-    # the inspiral integration below. Audit2 (Codex P2-3 / Copilot A2-2)
-    # found that checking this only after the full inspiral had already
-    # been integrated and copied into NumPy arrays let an invalid ringdown
-    # request (e.g. the default BNS case with --rd_pts 2) burn several
-    # seconds and ~200 MiB before being rejected, even though nothing
-    # about this check depends on the inspiral waveform itself.
+    # the inspiral integration below. An invalid ringdown request (e.g. the
+    # default BNS case with --rd_pts 2) must be rejected before the
+    # potentially expensive inspiral integration runs and is copied into
+    # NumPy arrays, since nothing about this check depends on the inspiral
+    # waveform itself.
     f_qnm = np.nan
     tau_qnm = np.nan
     M_final = np.nan
@@ -479,7 +478,7 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
         # overflow to float('inf') -- float multiplication overflows
         # silently to inf rather than raising, unlike float()/** -- so
         # isfinite() is checked explicitly before math.ceil(), which does
-        # raise OverflowError on an infinite input (Audit2 Codex P2-2).
+        # raise OverflowError on an infinite input.
         try:
             duration = n_ringdown_tau * tau_qnm
             cycles = duration * f_qnm
@@ -583,35 +582,28 @@ def integrate_inspiral(m1_msun, m2_msun, d_mpc,
             )
 
         if f_next >= f_isco_hz:
-            # Interpolate the final partial step to end exactly at the ISCO cutoff.
-            #
-            # Audit3 (Gemini): this is a *linear* interpolation in frac, but
-            # phase is not linear over the step (dPhase/dt = 2*pi*f, and f
-            # itself is increasing), so this is only approximate. Audit4
-            # (Codex P2-2): an earlier version of this comment additionally
-            # claimed the resulting error is "sub-milliradian at this
-            # program's pedagogical default" -- that number was measured on
-            # the Help file's 36+29 Msun BBH example at dt=1e-4 s (final
-            # error there is indeed tiny, about 1e-5 rad), not on the actual
-            # default 1.4+1.4 Msun BNS case at dt=2e-4 s, where an
-            # independent closed-form phase oracle (see
-            # test_default_bns_final_phase_absolute_interpolation_error_is_
-            # measured_not_assumed in the test suite) shows this final-step
-            # interpolation error is instead about 0.03 rad (roughly 0.005
-            # of a cycle) -- some 30 times larger, though still a tiny
-            # fraction of the ~31,706 rad accumulated over the full run and
-            # far below anything the plotted waveform can visually
-            # distinguish. The error scale is case-dependent (it shrinks
-            # with smaller dt and varies with the masses/f_start chosen), so
-            # it should be re-measured for other parameter combinations
-            # rather than assumed; it is left as linear interpolation rather
-            # than a root-find on this one boundary step because this
-            # program is a leading-order teaching tool, not a high-precision
-            # template generator. A future adaptation aimed at high-
-            # precision template generation should revisit this, e.g. with a
-            # proper root-finding boundary crossing (see Help Algorithm step
-            # 6 / EXP-8 for the corresponding student-facing caveat, which
-            # was already correctly qualitative and needs no change).
+            # Interpolate the final partial step to end exactly at the ISCO
+            # cutoff. This is a *linear* interpolation in frac, but phase is
+            # not linear over the step (dPhase/dt = 2*pi*f, and f itself is
+            # increasing), so it is only approximate: for the program's
+            # actual pedagogical default (1.4+1.4 Msun BNS, dt=2e-4 s), the
+            # measured absolute final-step phase error is about 0.03 rad
+            # (roughly 0.005 of a cycle) against an independent closed-form
+            # phase oracle -- for the documented 36+29 Msun BBH example at
+            # dt=1e-4 s it is much smaller, about 1e-5 rad. Both are a tiny
+            # fraction of the tens of thousands of radians accumulated over
+            # a full run and far below anything the plotted waveform can
+            # visually distinguish, but the error scale is case-dependent
+            # (it shrinks with smaller dt and varies with the masses/
+            # f_start chosen), so it should be re-measured for other
+            # parameter combinations rather than assumed. It is left as
+            # linear interpolation rather than a root-find on this one
+            # boundary step because this program is a leading-order
+            # teaching tool, not a high-precision template generator; a
+            # future adaptation aimed at high-precision template generation
+            # should revisit this, e.g. with a proper root-finding boundary
+            # crossing (see Help Algorithm step 6 / EXP-8 for the
+            # corresponding student-facing caveat).
             frac = (f_isco_hz - f) / (f_next - f)
             t += frac * dt
             phase += frac * (phase_next - phase)

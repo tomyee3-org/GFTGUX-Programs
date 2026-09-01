@@ -9,6 +9,7 @@ import math
 import os
 import stat
 import tempfile
+import uuid
 from datetime import datetime, timezone
 
 import numpy as np
@@ -39,9 +40,9 @@ def _finite_number(name, value):
     try:
         value = float(value)
     except (TypeError, ValueError, OverflowError) as exc:
-        # See the matching comment in physics_gw._require_finite: a Python
-        # int too large to represent as a float is a value problem for this
-        # caller, not a programming error.
+        # A Python int too large to represent as a float is a value problem
+        # for this caller, not a programming error (see the matching comment
+        # in physics_gw._require_finite).
         raise ValueError(f"{name} must be a finite number.") from exc
     if not math.isfinite(value):
         raise ValueError(f"{name} must be finite.")
@@ -89,27 +90,24 @@ def _timestamp_fname(now, prefix="gw_inspiral", ext="csv"):
     """Format an already-captured aware UTC datetime as a
     "prefix_YYYYMMDD_HHMMSS_ffffff.ext" filename.
 
-    Audit4 (Codex P3-1): this now takes the instant to format as an
-    explicit argument rather than calling datetime.now() itself, so a
-    caller that also needs that same instant elsewhere (e.g. _write_csv()'s
-    export_timestamp_utc metadata field) can capture it exactly once and
-    reuse it for both the filename and the metadata, instead of two
-    independent datetime.now() calls that can straddle a second or date
-    boundary and never quite agree.
+    Takes the instant to format as an explicit argument rather than calling
+    datetime.now() itself, so a caller that also needs that same instant
+    elsewhere (e.g. _write_csv()'s export_timestamp_utc metadata field) can
+    capture it exactly once and reuse it for both the filename and the
+    metadata, instead of two independent datetime.now() calls that could
+    straddle a second or date boundary and never quite agree. Using UTC
+    (not local time) lets a filename's embedded timestamp be compared
+    directly against the UTC export_timestamp_utc field inside the CSV's
+    own metadata block, without a reader needing to know or convert the
+    local timezone this program happened to run in.
 
     Microsecond resolution makes two rapid saves in the same directory
-    (e.g. a scripted parameter sweep) collide far less often than under
-    the previous second-resolution timestamp, but does not make a
-    collision impossible (a coarser OS clock, two calls landing in the
-    same microsecond, or a clock adjustment can still repeat a value).
+    (e.g. a scripted parameter sweep) collide far less often than a
+    second-resolution timestamp would, but does not make a collision
+    impossible (a coarser OS clock, two calls landing in the same
+    microsecond, or a clock adjustment can still repeat a value).
     _publish_atomically() below is what actually guarantees no silent
     overwrite; this function only formats the first candidate name.
-
-    Audit3 (Gemini): this uses UTC (not local time) so a filename's
-    embedded timestamp can be compared directly against the UTC
-    export_timestamp_utc field inside the CSV's own metadata block,
-    without a reader needing to know or convert the local timezone this
-    program happened to run in.
     """
     ts = now.strftime("%Y%m%d_%H%M%S_%f")
     return f"{prefix}_{ts}.{ext}"
@@ -117,68 +115,94 @@ def _timestamp_fname(now, prefix="gw_inspiral", ext="csv"):
 
 def _create_private_temp_file(directory, ext):
     """Securely create an empty, randomly-named temporary file in
-    `directory` to build one artifact's content into before publication.
+    `directory` to build one artifact's content into before publication,
+    and return its open file descriptor together with its path.
 
-    Audit4 (Codex P2-1): the previous design wrote content to a
-    caller-predictable "<final-name>.tmp" path. That path is guessable in
-    advance (it is derived from the same timestamp as the eventual public
-    name) and was opened with an ordinary open(path, "w"), which follows a
-    pre-existing symlink at that path rather than refusing to -- a
-    pre-planted symlink at the guessed .tmp name could redirect this
-    program's write to overwrite an unrelated file. tempfile.mkstemp()
-    instead draws its filename from a wide random namespace unrelated to
-    any published name and creates it with O_CREAT|O_EXCL (refusing to
-    follow an existing path/symlink), so nothing else on the system can
-    anticipate or pre-plant a symlink at this name.
+    tempfile.mkstemp() draws its filename from a wide random namespace
+    unrelated to any published name and creates it with O_CREAT|O_EXCL
+    (refusing to follow a pre-existing path or symlink), so nothing else on
+    the system can anticipate or pre-plant a symlink at this name.
 
-    Audit5 (Codex P2-1): the returned file descriptor `fd` is kept open
-    (mkstemp already created it) and returned alongside tmp_path, instead
-    of being closed here. The earlier Audit4 version closed fd immediately
-    and had every caller reopen tmp_path by name to write content -- but
-    that reopen is itself a second, path-based operation, separated in
-    time from the fd-based creation above, and nothing stops something
-    else from deleting tmp_path and creating a symlink in its place during
-    that gap (e.g. a shared/world-writable output directory, or another
-    process racing this one). Reopening by name would then silently follow
-    that symlink. Keeping the original fd open and writing through it
-    (os.fdopen(fd, ..., closefd=False), see _write_csv/_do_write and the
-    plot_gw counterpart) means the bytes always land in the exact inode
-    mkstemp created, never in whatever tmp_path happens to resolve to by
-    the time writing starts. _verify_temp_identity() below adds a second,
-    independent check of this immediately before publication.
+    The returned descriptor `fd` is kept open rather than closed here, and
+    every caller writes through it (os.fdopen(fd, ..., closefd=False), see
+    _write_csv's _do_write and the plot_gw counterpart) instead of
+    reopening `tmp_path` by name. Reopening by name would be a second,
+    path-based operation, separated in time from this secure creation --
+    and nothing would stop something else with write access to `directory`
+    from deleting tmp_path and creating a symlink in its place during that
+    gap. Writing through the original fd means the bytes this program
+    produces always land in the exact inode mkstemp created here, never in
+    whatever tmp_path happens to resolve to by the time writing starts.
+    _verify_temp_identity() below adds a second, independent check of this
+    immediately before publication.
     """
     fd, tmp_path = tempfile.mkstemp(prefix=".gw_tmp_", suffix=f".{ext}", dir=directory)
     return fd, tmp_path
 
 
-def _default_output_file_mode():
-    """Return the permission mode an ordinary open(path, "w") would have
-    produced for a new file, given the process's current umask.
+def _create_mode_probe_file(directory):
+    """Create a uniquely-named, empty file in `directory`, requesting the
+    widest ordinary data-file mode (0o666), and return its open descriptor
+    and path.
 
-    Audit5 (Codex P3-1): tempfile.mkstemp() always creates its file with
-    mode 0o600 (owner read/write only), regardless of umask -- that is
-    mkstemp's own documented, deliberately conservative default, chosen
-    because a temp file's name is normally private to the process that
-    created it. Once this program links that same file out under a public,
-    predictable name for a student to open (see _publish_atomically), a
-    mode of 0o600 is a behavior change from the pre-Audit4 design (which
-    used a plain open(path, "w") and therefore got the ordinary
-    umask-controlled mode, typically 0o644) -- and an unwelcome one, since
-    it silently makes exported CSVs/PNGs unreadable by anyone but the user
-    who ran the program, on a multi-user machine or a shared directory.
-    This computes what that ordinary open() would have produced, so the
-    published file's permissions can be normalized to match (see
-    _publish_or_cleanup below) rather than inheriting mkstemp's stricter
-    default. Reading the umask requires briefly setting it (os.umask() has
-    no read-only form) and then immediately restoring the original value;
-    this is not atomic with respect to other threads in the same process
-    that also touch the umask, but CPython's umask is process-wide and
-    this program does not otherwise set it, so in practice this executes
-    without any other umask change interleaved.
+    The kernel applies the process's current umask to the requested mode
+    atomically as part of the underlying file-creation system call -- that
+    application is what a umask is actually designed to do. Inspecting the
+    resulting file's mode (see _default_output_file_mode below) therefore
+    reveals exactly what an ordinary open(path, "w") would have produced
+    under the current umask, without this program ever reading or mutating
+    that process-wide umask itself.
     """
-    saved = os.umask(0)
-    os.umask(saved)
-    return 0o666 & ~saved
+    for _ in range(1000):
+        candidate = os.path.join(directory, f".gw_modeprobe_{uuid.uuid4().hex}")
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            continue
+        return fd, candidate
+    raise RuntimeError(
+        f"Could not create a uniquely-named permission-probe file in "
+        f"{directory!r} after 1000 attempts."
+    )
+
+
+def _default_output_file_mode(directory):
+    """Return the permission mode an ordinary open(path, "w") in `directory`
+    would produce under the process's current umask, without reading or
+    changing that umask.
+
+    tempfile.mkstemp() always creates its file with mode 0o600 (owner
+    read/write only), regardless of umask -- a deliberately conservative
+    default for a file meant to be private to the process that created it.
+    Once this program publishes that same file under a public, predictable
+    name for a student to open (see _publish_atomically), inheriting 0o600
+    would silently make every export unreadable by anyone but the user who
+    ran the program, on a multi-user machine or a shared directory -- so
+    the published file's mode is normalized to match ordinary file creation
+    instead (see _publish_or_cleanup below).
+
+    umask has no atomic read-only form: the only way to read it through
+    os.umask() is to simultaneously set a new value and receive the
+    previous one back. Because umask is process-wide state, not per-thread,
+    briefly setting it to read it back would race every other thread in the
+    same process that creates a file during that window -- including this
+    program's own concurrent driver.run()/plot_inspiral() calls. This
+    function therefore never calls os.umask() at all: it creates a
+    throwaway probe file (_create_mode_probe_file) requesting the widest
+    ordinary mode, 0o666, lets the kernel apply the umask atomically as
+    part of that file's own creation, inspects the resulting mode, and
+    discards the probe file.
+    """
+    fd, path = _create_mode_probe_file(directory)
+    try:
+        mode = stat.S_IMODE(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    return mode
 
 
 def _verify_temp_identity(fd, tmp_path):
@@ -186,17 +210,17 @@ def _verify_temp_identity(fd, tmp_path):
     `fd` was opened against, immediately before that path is used to
     publish the file under a public name.
 
-    Audit5 (Codex P2-1): _create_private_temp_file() creates tmp_path
-    securely and this program always writes through `fd`, not by
-    reopening tmp_path -- but _publish_atomically() below still uses
-    tmp_path (a name, not a descriptor) as the *source* of os.link(), since
-    os.link() has no fd-based form in the standard library usable here.
-    Between tmp_path's creation and that os.link() call, something else
-    with access to `directory` could in principle delete tmp_path and
-    create a new file or a symlink at that same name (e.g. to a sensitive
-    file elsewhere) -- os.link() would then publish that substituted
-    target's content under this program's output name instead of the
-    content this program actually wrote.
+    _create_private_temp_file() creates tmp_path securely and every writer
+    writes through `fd`, not by reopening tmp_path -- but _publish_
+    atomically() below still uses tmp_path (a name, not a descriptor) as
+    the *source* of os.link(), since os.link() has no fd-based form in the
+    standard library usable here. Between tmp_path's creation and that
+    os.link() call, something else with write access to `directory` could
+    in principle delete tmp_path and create a new file or a symlink at that
+    same name (e.g. pointing at a sensitive file elsewhere) -- os.link()
+    would then publish that substituted target's content under this
+    program's output name instead of the content this program actually
+    wrote.
 
     This narrows that window rather than eliminating it: os.lstat(tmp_path)
     (which does NOT follow a symlink) is compared against os.fstat(fd)
@@ -204,14 +228,16 @@ def _verify_temp_identity(fd, tmp_path):
     and inode number. A mismatch, or tmp_path having become a symlink at
     all, means the name no longer identifies the file this program wrote,
     and publication is refused. This still leaves a narrow race between
-    this check and the os.link() call immediately after it (a true
+    this check and the os.link() call immediately after it -- a fully
     TOCTOU-free guarantee would require an operation that both verifies
-    identity and links atomically by fd, which POSIX does not offer
-    through Python's standard library) -- so this is a defense-in-depth
-    check, not an airtight one, and the atomicity/security claims this
-    program makes are scoped to ordinary, non-adversarial output
-    directories (a student's own working directory), not to a directory
-    under an untrusted party's control.
+    identity and links atomically by file descriptor, which POSIX does not
+    offer through Python's standard library. This function is therefore a
+    defense-in-depth check, not an airtight one: the atomicity/security
+    claims this program makes assume an ordinary output directory under the
+    student's own control, not one writable by an untrusted co-tenant
+    process actively trying to interfere with a run in progress (the Help
+    file states this same boundary for students; see the "Input and
+    runtime safeguards" note).
     """
     try:
         entry = os.lstat(tmp_path)
@@ -265,35 +291,28 @@ def _publish_atomically(fd, tmp_path, directory, prefix, ext, now, max_attempts=
     "prefix_timestamp[_n].ext" public name in `directory`, without ever
     creating that public name before the content is complete.
 
-    Audit4 (Codex P2-1): the previous design (see _reserve_unique_path in
-    earlier revisions) created the *final* public filename itself, empty,
-    as a reservation placeholder before any content existed, then wrote
-    content elsewhere and used os.replace() to overwrite that placeholder.
-    Between reservation and replace, the public path was visibly present
-    with 0 bytes -- observable by a directory watcher, file browser, or a
-    student opening the file mid-write -- and a process killed in that
-    window left exactly that misleading zero-byte file behind permanently.
     This function never creates the public path until it is already the
     finished file: os.link() creates a second name (this one) pointing at
     tmp_path's already-complete content, and fails atomically with
     FileExistsError if the candidate name is already taken rather than
     silently replacing it -- so a collision is detected and retried with a
-    "_1", "_2", ... suffix at the actual publish operation, not merely at
-    an earlier placeholder claim. At every instant an external observer
-    could inspect `directory`, the public name is therefore either
-    completely absent or the complete, correctly named file -- never a
-    partial or empty one. os.link() requires tmp_path and the destination
-    to be on the same filesystem, which holds here because
+    "_1", "_2", ... suffix at the actual publish operation. At every
+    instant an external observer could inspect `directory`, the public name
+    is therefore either completely absent or the complete, correctly named
+    file -- never a partial or empty one. os.link() requires tmp_path and
+    the destination to be on the same filesystem, which holds here because
     _create_private_temp_file() always creates tmp_path inside this same
     `directory`.
 
-    Audit4 (Copilot A4-1): as with any atomicity claim built on a single
-    filesystem operation, this holds specifically on filesystems that
-    implement POSIX hard-link/rename semantics as the OS documents them
-    (the ordinary case for local Linux/macOS/Windows-NTFS filesystems this
-    program is expected to run on) -- not as a claim that spans every
-    filesystem a Python program could conceivably be pointed at (e.g. some
-    network or FAT-family filesystems weaken these guarantees).
+    As with any atomicity claim built on a single filesystem operation,
+    this holds specifically on filesystems that implement POSIX hard-
+    link/rename semantics as the OS documents them (the ordinary case for
+    local Linux/macOS/Windows-NTFS filesystems this program is expected to
+    run on) -- not as a claim that spans every filesystem a Python program
+    could conceivably be pointed at (e.g. some network or FAT-family
+    filesystems weaken these guarantees). On a filesystem that does not
+    support creating hard links at all, os.link() raises and publication
+    fails outright rather than falling back to a weaker save strategy.
 
     This guarantees atomicity/visibility, not full crash durability: an
     fsync of file content is the caller's responsibility (see _write_csv's
@@ -301,13 +320,11 @@ def _publish_atomically(fd, tmp_path, directory, prefix, ext, now, max_attempts=
     _fsync_directory() above is only a best-effort attempt to make the new
     directory entry itself durable, not a guaranteed one.
 
-    Audit5 (Codex P2-1): now also takes the open `fd` from
-    _create_private_temp_file() and calls _verify_temp_identity(fd,
-    tmp_path) immediately before the first os.link() attempt, so a
-    tmp_path that has been deleted-and-recreated or replaced with a
-    symlink since creation is caught here rather than silently linked in.
-    See _verify_temp_identity's docstring for exactly what this does and
-    does not guarantee.
+    Immediately before the first os.link() attempt, _verify_temp_identity
+    (fd, tmp_path) is called so a tmp_path that has been deleted-and-
+    recreated or replaced with a symlink since creation is caught here
+    rather than silently linked in -- see that function's docstring for
+    exactly what this does and does not guarantee.
     """
     _verify_temp_identity(fd, tmp_path)
     base = _timestamp_fname(now, prefix=prefix, ext=ext)
@@ -343,32 +360,26 @@ def _publish_or_cleanup(write_fn, directory, prefix, ext, now):
     from write_fn or publication, remove the temporary file and re-raise
     without ever having created a public name.
 
-    Audit3 (Codex P2-1; Copilot A3-2/A3-3) originally raised the failure-
-    cleanup requirement this implements; Audit4 (Codex P2-1) is the reason
-    the underlying reservation/publish mechanism changed; Audit5 (Codex
-    P2-1) is why write_fn now receives the open fd instead of just a path
-    -- see _create_private_temp_file's and _publish_atomically's
-    docstrings for what changed and why.
-
     write_fn is expected to write through fd (e.g. via
     os.fdopen(fd, mode, ..., closefd=False)) and must NOT close fd itself
     -- this function always closes it exactly once, in the finally block
-    below, regardless of how write_fn or publication finishes. Audit5
-    (Codex P3-1): on the success path, before publication, the file's
-    permissions are normalized from mkstemp's fixed 0o600 to the ordinary
-    umask-controlled mode a plain open(path, "w") would have produced (see
+    below, regardless of how write_fn or publication finishes.
+
+    On the success path, before publication, the file's permissions are
+    normalized from mkstemp's fixed 0o600 to the ordinary umask-controlled
+    mode a plain open(path, "w") would have produced (see
     _default_output_file_mode) -- using os.fchmod(fd, ...), which acts on
     the descriptor rather than the path, so this cannot be redirected by a
     symlink substituted at tmp_path the way a path-based os.chmod() could
     be. os.fchmod is POSIX-only (absent on Windows), so it is skipped
-    there; Windows' own ACL-based permission model does not have an
-    equivalent umask-driven "default mode" for this to normalize toward.
+    there; Windows' own ACL-based permission model has no equivalent
+    umask-driven "default mode" for this to normalize toward.
     """
     fd, tmp_path = _create_private_temp_file(directory, ext)
     try:
         write_fn(fd, tmp_path)
         if hasattr(os, "fchmod"):
-            os.fchmod(fd, _default_output_file_mode())
+            os.fchmod(fd, _default_output_file_mode(directory))
         return _publish_atomically(fd, tmp_path, directory, prefix, ext, now)
     except BaseException:
         try:
@@ -394,34 +405,25 @@ def _write_csv(result, csvdir):
     convergence comparison -- without requiring every student to write a
     Python import snippet.
 
-    Audit2 (Codex P1-1 / Copilot A2-5) found that the original export --
-    a bare "t_s,f_hz,A,h" table with only a timestamped filename -- could
-    not be traced back to the executable revision or run parameters that
-    produced it once separated from the terminal output, which defeats the
-    point of EXP-8's multi-dt comparison (four files that differ only by
-    --dt, with nothing in the files themselves saying which is which). A
-    commented metadata block (mirroring the convention Gemini/Codex point
-    to in StellarEvolutionTracks) is written before the header row, naming
+    A commented metadata block is written before the header row, naming
     MODEL_VERSION, BUILD_ID, a UTC export timestamp, and every input
-    parameter that affects the numerical waveform this run produced (Audit2
-    Copilot A2-6 additionally asked for the phase array, which is now a
-    fifth data column). This records masses, distance, dt, f_start, and the
-    ringdown settings -- not plotting/output-only options such as
-    --t_before, --lw, or --dpi, which do not change the numerical arrays
-    themselves (Audit3 Copilot A3-4).
+    parameter that affects the numerical waveform this run produced
+    (masses, distance, dt, f_start, and the ringdown settings) -- not
+    plotting/output-only options such as --t_before, --lw, or --dpi, which
+    do not change the numerical arrays themselves -- so a file kept on its
+    own, separated from the terminal it was run in, can still be
+    identified and reproduced.
 
-    The metadata field is named export_timestamp_utc, not run_timestamp_utc
-    (Audit3 Copilot A3-5): it is captured once, right here, before this
-    export's write begins -- which for a long integration can be
-    measurably earlier than when the CSV write actually finishes on disk,
-    so this is an export-*initiation* timestamp, not a completion one
-    (Audit4 Codex P3-1 -- an earlier response's wording overstated this as
-    an "export-completion timestamp", which was never accurate). That same
-    captured instant is also reused, via _publish_or_cleanup()/
-    _publish_atomically(), to build this file's own published filename, so
-    the filename's embedded timestamp and this metadata field always agree
-    exactly (Audit4 Codex P3-1) rather than coming from two independent
-    datetime.now() calls that could straddle a second or date boundary.
+    The metadata field is named export_timestamp_utc, not run_timestamp_utc:
+    it is captured once, right here, before this export's write begins --
+    which for a long integration can be measurably earlier than when the
+    CSV write actually finishes on disk, so this is an export-*initiation*
+    timestamp, not a completion one. That same captured instant is also
+    reused, via _publish_or_cleanup()/_publish_atomically(), to build this
+    file's own published filename, so the filename's embedded timestamp and
+    this metadata field always agree exactly, rather than coming from two
+    independent datetime.now() calls that could straddle a second or date
+    boundary.
     """
     os.makedirs(csvdir, exist_ok=True)
     now = datetime.now(timezone.utc)
@@ -454,10 +456,10 @@ def _write_csv(result, csvdir):
     ]
 
     def _do_write(fd, tmp_path):
-        # Audit5 (Codex P2-1): write through the already-open fd (via
-        # os.fdopen(..., closefd=False)) instead of reopening tmp_path by
-        # name -- see _create_private_temp_file's docstring for why a
-        # path-based reopen here would reintroduce the race this fixes.
+        # Write through the already-open fd (via os.fdopen(...,
+        # closefd=False)) instead of reopening tmp_path by name -- see
+        # _create_private_temp_file's docstring for why a path-based
+        # reopen here would reintroduce a symlink-substitution race.
         # closefd=False means the `with` block's close() at the end closes
         # only this Python-level file object, not the underlying fd, which
         # _publish_or_cleanup() owns and closes itself.
@@ -505,46 +507,42 @@ def run(m1_msun=1.4, m2_msun=1.4, d_mpc=400.0,
 
     _print_summary(result["summary"])
 
-    # Validate the zoom window against the actual computed data range
-    # before writing any requested output file. Audit2 (Codex P3-5) found
-    # that a request whose zoom window ends up empty (e.g. --t_before 0
-    # --t_after 0) still left a complete CSV behind, because the CSV was
-    # written before plot_inspiral()'s own data-dependent window check --
-    # so a failed run's exit code did not match what was left on disk. This
-    # duplicates a cheap check (plot_inspiral() below still performs its
-    # own, so calling plot_inspiral() directly without going through run()
-    # is equally safe), buying a clean failure here before either output
-    # file is written.
+    # Validate the zoom window against the actual computed data range before
+    # writing any requested output file: a request whose zoom window ends up
+    # empty (e.g. --t_before 0 --t_after 0) must not leave a complete CSV
+    # behind just because plot_inspiral()'s own data-dependent window check
+    # runs later. This duplicates a cheap check (plot_inspiral() below still
+    # performs its own, so calling plot_inspiral() directly without going
+    # through run() is equally safe), buying a clean failure here before
+    # either output file is written.
     viz._xlim(result["t_isco"], t_before, t_after, result["t"][0], result["t"][-1])
 
     # Validate/create both requested output directories up front, before
-    # writing either artifact. Audit3 (Codex P2-1) found that an invalid
-    # --outdir (e.g. a path that already exists as a regular file, so
-    # os.makedirs() raises FileExistsError) was previously only discovered
-    # inside plot_inspiral(), by which point a --csvdir export had already
-    # completed and been left on disk -- a plotting-only mistake caused an
-    # unrelated, already-successful CSV export to look like a failed run.
-    # Checking both directories here, before either write begins, prevents
-    # that specific ordering problem outright rather than cleaning up after
-    # it. (plot_inspiral() still performs its own os.makedirs(outdir, ...)
-    # too, so it remains safe to call directly without going through run().)
+    # writing either artifact, so an invalid --outdir (e.g. a path that
+    # already exists as a regular file, so os.makedirs() raises
+    # FileExistsError) is never discovered only after a --csvdir export has
+    # already completed and been left on disk -- a plotting-only mistake
+    # must not make an unrelated, already-successful CSV export look like a
+    # failed run. (plot_inspiral() still performs its own
+    # os.makedirs(outdir, ...) too, so it remains safe to call directly
+    # without going through run().)
     if csvdir is not None:
         os.makedirs(csvdir, exist_ok=True)
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
 
-    # Transaction contract (Audit3 Codex P2-1, item 4): each requested
-    # artifact is independently atomic -- _write_csv()/plot_inspiral() each
-    # either produce their complete file or leave none behind (see
-    # _publish_or_cleanup() above and its plot_gw counterpart). This is
-    # NOT a cross-artifact all-or-nothing guarantee: if both --csvdir and
-    # --outdir are requested and the CSV export succeeds but the PNG save
-    # then fails, the completed CSV is kept, not retroactively deleted.
-    # Rolling back a genuinely successful, independent export because a
-    # later, unrelated artifact failed would discard correct data the user
-    # may still want, for no real safety benefit -- so a run that requests
-    # multiple artifacts can complete some and fail others; it is only
-    # each individual artifact that is guaranteed never to be partial.
+    # Transaction contract: each requested artifact is independently atomic
+    # -- _write_csv()/plot_inspiral() each either produce their complete
+    # file or leave none behind (see _publish_or_cleanup() above and its
+    # plot_gw counterpart). This is NOT a cross-artifact all-or-nothing
+    # guarantee: if both --csvdir and --outdir are requested and the CSV
+    # export succeeds but the PNG save then fails, the completed CSV is
+    # kept, not retroactively deleted. Rolling back a genuinely successful,
+    # independent export because a later, unrelated artifact failed would
+    # discard correct data the user may still want, for no real safety
+    # benefit -- so a run that requests multiple artifacts can complete
+    # some and fail others; it is only each individual artifact that is
+    # guaranteed never to be partial.
     if csvdir is not None:
         _write_csv(result, csvdir)
 
