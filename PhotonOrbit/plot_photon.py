@@ -22,8 +22,8 @@ def _base_stem(prefix):
 
 def _reserve_unique_stem(outdir, prefix):
     """
-    Atomically reserve a filename stem in `outdir` for which neither
-    "<stem>.png" nor "<stem>.provenance.txt" already exists, and return
+    Reserve a filename stem in `outdir` for which neither "<stem>.png"
+    nor "<stem>.provenance.txt" already exists, and return
     (stem, png_path, sidecar_path). The PNG path is left behind as an
     empty, exclusively-created placeholder that fig.savefig() then
     overwrites with real image data.
@@ -31,17 +31,18 @@ def _reserve_unique_stem(outdir, prefix):
     Two runs with the same impact parameter and outcome status (for
     example the repeated d_lambda convergence runs of EXP-9) that both
     land in the same wall-clock second would otherwise collide on a plain
-    timestamped name; appending "_2", "_3", ... resolves that. Audit1
-    Codex P3-1 / Copilot F-3: a plain "does it exist yet?" check followed
-    by a later write is a check-then-act race between two concurrent
-    PhotonOrbit processes -- both can observe the same candidate name as
-    free before either has written to it. os.open(..., O_CREAT|O_EXCL) is
-    a single atomic syscall: it either creates the file because no one
-    else got there first, or fails with FileExistsError because someone
-    did, with no window in between. Reserving the PNG path this way (and
-    checking the sidecar path is also free before attempting it) makes
-    the stem genuinely unique across concurrent processes, not merely
-    across sequential calls in one process.
+    timestamped name; appending "_2", "_3", ... resolves that.
+
+    The PNG path itself is reserved atomically with
+    os.open(..., O_CREAT|O_EXCL): a single syscall that either creates the
+    file because no other process got there first, or fails with
+    FileExistsError because one did, with no window in between where two
+    concurrent PhotonOrbit processes could both observe the same candidate
+    name as free. That guarantee covers the PNG stem only -- the sidecar
+    path is checked with a plain existence test just above the atomic PNG
+    reservation, not reserved by the same atomic call, so the PNG and its
+    sidecar are not a single atomic unit; see _finish() below for what
+    that means in practice.
     """
     base = _base_stem(prefix)
     n = None
@@ -64,17 +65,20 @@ def _format_provenance(b, info, dpi, lw, GM_over_c2, r0, lambda_max, d_lambda):
     """
     Build the text written to a saved run's ``.provenance.txt`` sidecar.
 
-    Audit1 Codex P1-3 / Copilot Section 7: a saved PNG's on-figure
-    annotation states only b, status, closest approach and delta_phi --
-    not GM_over_c2, r0, lambda_max, d_lambda, dpi, lw, or the program's
-    version/build -- so the PNG alone could not be used to independently
-    reconstruct the run that produced it. Every value below is written
-    with Python's repr() (the shortest string that round-trips back to
-    the exact same float), not the console's human-readable .6g/.4g
-    formatting, so copying a value out of this file and back into
-    --GM_over_c2/--r0/--b/--lambda_max/--d_lambda reproduces the exact
-    run, including numerically sensitive near-separatrix cases where a
-    six-significant-digit rounding of b changes the outcome.
+    A saved PNG's on-figure annotation states only b, status, closest
+    approach and delta_phi -- not GM_over_c2, r0, lambda_max, d_lambda,
+    dpi, lw, or the program's version/build -- so the PNG alone cannot be
+    used to independently reconstruct the run that produced it. Every
+    value below is written with Python's repr() (the shortest string that
+    round-trips back to the exact same float), not the console's
+    human-readable .6g/.4g formatting, so copying a value out of this
+    file and back into the command line reproduces the exact run,
+    including numerically sensitive near-separatrix cases where a
+    six-significant-digit rounding of b changes the outcome. The
+    "Reproduce with:" command line includes both the physics parameters
+    and the rendering settings (dpi, lw) that together determine the
+    saved image; it omits --outdir, since where to save a new copy is a
+    per-invocation choice rather than part of what produced this run.
     """
     def line(name, value):
         if value is None:
@@ -106,8 +110,8 @@ def _format_provenance(b, info, dpi, lw, GM_over_c2, r0, lambda_max, d_lambda):
         lines.append("Reproduce with:")
         lines.append(
             "    python main.py --GM_over_c2 {0!r} --r0 {1!r} --b {2!r} "
-            "--lambda_max {3!r} --d_lambda {4!r}".format(
-                GM_over_c2, r0, b, lambda_max, d_lambda
+            "--lambda_max {3!r} --d_lambda {4!r} --lw {5!r} --dpi {6!r}".format(
+                GM_over_c2, r0, b, lambda_max, d_lambda, lw, dpi
             )
         )
     else:
@@ -156,7 +160,7 @@ def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5,
         diagnostics can omit them -- but when given (as driver_photon.py
         always does) and outdir is also given, they are written losslessly
         into a ``.provenance.txt`` sidecar next to the saved PNG, so the
-        run can be exactly reproduced later (Audit1 Codex P1-3).
+        run can be exactly reproduced later.
     """
     if not x_values or len(x_values) != len(y_values):
         raise ValueError("x_values and y_values must be nonempty arrays of equal length.")

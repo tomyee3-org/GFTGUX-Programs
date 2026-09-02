@@ -22,7 +22,7 @@ def _validate_plot_inputs(dpi, lw):
     return int(dpi), lw
 
 
-def _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, info):
+def _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, dpi, lw, info):
     W = 62
     sep = "-" * W
     print(sep)
@@ -44,16 +44,18 @@ def _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, info):
     print(f"  RK4 step size d_lambda: {d_lambda:.6g}")
     print(f"  RK4 steps taken      : {info['steps']:,}")
     print(sep)
-    # Audit1 Codex P1-3: the fields above are rounded to 6 significant
-    # digits for readability, which is not enough to round-trip a
-    # numerically sensitive near-separatrix b (e.g. the exact circular
-    # orbit at b=3*sqrt(3)) back into the program unchanged. repr() below
-    # is the shortest string that reconstructs the exact float, so this
-    # command line reproduces THIS run exactly, not an approximation of it.
+    # The fields above are rounded to 6 significant digits for
+    # readability, which is not enough to round-trip a numerically
+    # sensitive near-separatrix b (e.g. the exact circular orbit at
+    # b=3*sqrt(3)) back into the program unchanged. repr() below is the
+    # shortest string that reconstructs the exact float, so this command
+    # line reproduces this run's physics and rendering exactly, not an
+    # approximation of it; add --outdir yourself to also save a new copy.
     print("  Reproduce this exact run with:")
     print(
         f"    python main.py --GM_over_c2 {GM_over_c2!r} --r0 {r0!r} "
-        f"--b {b!r} --lambda_max {lambda_max!r} --d_lambda {d_lambda!r}"
+        f"--b {b!r} --lambda_max {lambda_max!r} --d_lambda {d_lambda!r} "
+        f"--lw {lw!r} --dpi {dpi!r}"
     )
     print(sep)
 
@@ -82,7 +84,7 @@ def driver_photon_orbit(
         lambda_max=lambda_max,
         d_lambda=d_lambda,
     )
-    _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, info)
+    _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, dpi, lw, info)
     plot_photon_orbit(x_vals, y_vals, b, info, outdir=outdir, dpi=dpi, lw=lw,
                        GM_over_c2=GM_over_c2, r0=r0, lambda_max=lambda_max,
                        d_lambda=d_lambda)
