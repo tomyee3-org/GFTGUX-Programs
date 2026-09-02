@@ -1,4 +1,4 @@
-"""
+ """
 transport_codec.py
 ===================
 Build-time helper used only to generate the .py.txt transport-encoded
