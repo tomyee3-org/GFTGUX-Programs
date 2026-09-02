@@ -318,6 +318,90 @@ plot_sev.py docstrings or output):
         already validates immediately and fails fast within that same
         call; the deferred item is purely about failing even earlier, not
         about correctness).
+
+  2026-09-02  Claude (principal developer).  Response to Audit3 (Gemini,
+    Codex, Copilot reviewing the Response-to-Audit2 round).  Version
+    1.3.0 -> 1.4.0, BUILD_ID 7703fa47bf20 -> 16faf4c1e9f5.  No P1 defect
+    was reported this round by any of the three reviewers.  Full
+    disposition of every finding is in StellarEvolutionTracks-Claude-
+    Response-to-Audit3-20260902.txt; this entry lists only what changed
+    in the source tree.
+      * Fixed all four P2 findings, which Codex separated into one
+        cluster around the Audit2-round PNG-provenance-sidecar feature:
+        (a) plot_sev._finish() only wrote a sidecar when the caller
+        supplied a nonempty `provenance` list, so a direct
+        plot_track(result, outdir=...) Python-API call -- bypassing
+        driver_sev.run() -- saved a PNG with no sidecar at all, directly
+        contradicting the "unconditionally" claim already in that
+        function's own docstring; a sidecar is now always written
+        whenever outdir is given, and when no scientific-parameter list
+        was supplied it says so explicitly rather than silently omitting
+        it. (b) the sidecar recorded every mode-specific scientific
+        parameter but never --dpi or --lw, even though both change the
+        actual saved image; _finish() now always records a "rendering
+        parameters" section with dpi and lw, independent of whether a
+        scientific-parameter list was supplied. (c) the PNG-uniqueness
+        check (_unique_path(), now _unique_stem()) tested only whether
+        the candidate PNG path existed, so a pre-existing same-stem
+        orphaned .provenance.txt (left by, say, an earlier no-provenance
+        call, or a manual copy) was silently overwritten the instant a
+        new run picked that stem; stem selection now requires that
+        NEITHER the PNG nor its sidecar already exist. (d) the sidecar
+        regression coverage exercised only a manually-assembled helper
+        case (driver._provenance() built by hand and passed directly to
+        plotting.plot_track(), never through driver.run()) for the
+        "tracks" mode alone, so a driver runner that stopped forwarding
+        provenance, or any of the other three modes losing a parameter,
+        would not have been caught -- a new end-to-end test now drives
+        all four modes through the real driver.run() entry point and
+        checks the sidecar's keys against driver.PARAMS_BY_MODE.
+      * Fixed all four P3 findings: FermiGasEOS's public evaluators
+        (pressure, energy_density, number_density, rest_mass_density,
+        dP_dx, sound_speed_ratio) accepted negative x -- physically
+        undefined, since x = p_F/(m c) -- and returned negative
+        pressures, energy densities and number densities with no warning;
+        a new _require_nonneg_x() helper (deliberately not
+        _require_positive(), since x=0 is the legitimate zero-density
+        limit and must still be accepted) is now called first by every
+        one of those six methods.  wd_structure()'s bracket-exhausted
+        RuntimeError used one generic message ("try a mass further from
+        the Chandrasekhar limit") for both bracket-failure directions,
+        which is backwards advice when the requested mass is actually
+        BELOW the reachable low-density end of the search (the fix there
+        is a LARGER mass, not a smaller one) -- the message is now
+        side-specific, naming the achieved mass at whichever bracket end
+        failed and pointing the requested-mass change in the correct
+        direction.  Also documented, per Codex's specific wording
+        suggestion: the Help's --wd_mass row and general safeguards
+        paragraph now distinguish the hard 0.999*M_Ch formal rejection
+        from the separate, narrower practical range the numerical bracket
+        search can actually reach.  The fourth P3 (report headings
+        overstating closure, e.g. "ALL SIX FIXED") is a report-writing
+        habit, not a code defect; this and future reports state counts
+        for fixed/deferred/declined rather than a single unqualified
+        heading.
+      * Declined, with rationale recorded in the Response-to-Audit3
+        report: Copilot's A3-P3-1 (full-suite runtime under a third-
+        party hosted command runner's short time limit) and A3-P3-4
+        (upstream PyparsingDeprecationWarning volume from installed
+        Matplotlib/pyparsing) are both properties of the reviewer's own
+        execution environment and dependency versions, not of this
+        program's code, so no source change was made for either;
+        Copilot's A3-P3-3 (scientific wording duplicated across several
+        consumer layers) is a maintainability observation Copilot itself
+        recommended no immediate redesign for, and this round agrees;
+        Codex's continued mention of an external published white-dwarf
+        mass-radius benchmark remains open as a validation limitation, as
+        in the Audit2 response, not as a defect requiring a code change.
+      * The full regression suite grew from 197 to 207 tests: four
+        FermiGasEOS negative/nonfinite/zero-boundary-x tests, two
+        wd_structure side-specific bracket-failure-message tests, three
+        new plotting tests (direct-call sidecar-always-written,
+        orphan-sidecar-preserved, and all-four-modes-through-driver.run()
+        matched-pair coverage), one strengthened same-second-collision
+        plotting test that now also checks the sidecar half of each pair,
+        and one Help-documentation test for the provenance sidecar's
+        three Help locations.
 """
 
 import ast
@@ -1302,6 +1386,51 @@ class TestFermiGasEos(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.eos.x_from_density(-1.0)
 
+    def test_public_evaluators_reject_negative_x_scalar(self):
+        # Regression test for Audit3 Codex A3-P3-1 / Copilot A3-P3-2: the
+        # relativity parameter x = p_F/(m c) is physically nonnegative,
+        # but the public evaluators used to pass a negative x straight
+        # through to the arithmetic and silently return negative
+        # pressures, energy densities and number densities.  No caller
+        # inside this module ever reaches this state (integrate_structure
+        # and wd_structure only ever derive x from a validated positive
+        # density), but these methods are also a reusable public API.
+        methods = (self.eos.pressure, self.eos.energy_density,
+                  self.eos.number_density, self.eos.rest_mass_density,
+                  self.eos.dP_dx, self.eos.sound_speed_ratio)
+        for method in methods:
+            with self.subTest(method=method.__name__):
+                with self.assertRaisesRegex(ValueError, "x >= 0|non-negative"):
+                    method(-0.01)
+
+    def test_public_evaluators_reject_negative_x_array_element(self):
+        # A single negative element inside an otherwise valid array must
+        # still be caught, not silently averaged away or skipped by the
+        # small-x boolean mask.
+        xs = np.array([0.1, -0.2, 0.3])
+        for method in (self.eos.pressure, self.eos.energy_density,
+                      self.eos.dP_dx, self.eos.number_density):
+            with self.subTest(method=method.__name__):
+                with self.assertRaises(ValueError):
+                    method(xs)
+
+    def test_public_evaluators_reject_nonfinite_x(self):
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(x=bad):
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    self.eos.pressure(bad)
+                with self.assertRaisesRegex(ValueError, "finite"):
+                    self.eos.energy_density(bad)
+
+    def test_public_evaluators_accept_zero_boundary(self):
+        # x=0 is the legitimate zero-density limit, not an error: it must
+        # not be rejected by whatever check now excludes negative x.
+        self.assertEqual(float(self.eos.pressure(0.0)), 0.0)
+        self.assertEqual(float(self.eos.energy_density(0.0)), 0.0)
+        self.assertEqual(float(self.eos.number_density(0.0)), 0.0)
+        self.assertEqual(float(self.eos.dP_dx(0.0)), 0.0)
+        self.assertEqual(float(self.eos.sound_speed_ratio(0.0)), 0.0)
+
 
 # ======================================================================
 class TestStructureIntegration(unittest.TestCase):
@@ -1501,6 +1630,33 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         mch = phys.chandrasekhar_mass(2.0)
         with self.assertRaisesRegex(ValueError, "Chandrasekhar"):
             phys.wd_structure(0.999 * mch, mu_e=2.0)
+
+    def test_wd_low_bracket_failure_advice_points_upward(self):
+        # Regression test for Audit3 Codex A3-P3-2: when even the LOWEST
+        # central density tried already overshoots the target (the
+        # requested mass sits below the reachable bracket), the old
+        # message said "try a mass further from the Chandrasekhar limit"
+        # -- backwards advice, since the fix is a LARGER mass.  With
+        # bracket widening disabled, 0.01 Msun is below the default
+        # bracket's low-density reach (about 0.049 Msun).
+        with self.assertRaisesRegex(RuntimeError, "too small") as ctx:
+            phys.wd_structure(0.01, mu_e=2.0, max_bracket_expansions=0)
+        msg = str(ctx.exception)
+        self.assertIn("larger mass", msg)
+        self.assertNotIn("Chandrasekhar limit) for this search", msg)
+
+    def test_wd_high_bracket_failure_advice_points_downward(self):
+        # The opposite direction: even the HIGHEST central density tried
+        # still falls short, so the requested mass really is too close to
+        # the Chandrasekhar limit and the advice must point to a SMALLER
+        # mass.  1.455 Msun is above the default bracket's high-density
+        # reach (about 1.433 Msun) with widening disabled.
+        with self.assertRaisesRegex(RuntimeError, "too close to the "
+                                    "Chandrasekhar limit") as ctx:
+            phys.wd_structure(1.455, mu_e=2.0, max_bracket_expansions=0)
+        msg = str(ctx.exception)
+        self.assertIn("smaller mass", msg)
+        self.assertNotIn("larger mass", msg)
 
     def test_wd_structure_raises_when_max_iter_is_exhausted_unconverged(self):
         # Regression test for Audit2 P1-2 (Codex reproducer): wd_structure
@@ -2207,7 +2363,106 @@ class TestPlotting(unittest.TestCase):
                 plotting.plot_track(result, outdir=tmp, dpi=60)
             show.assert_called_once_with()
             pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
+            sidecars = [f for f in os.listdir(tmp)
+                       if f.endswith(".provenance.txt")]
             self.assertEqual(len(pngs), 1)
+            self.assertEqual(len(sidecars), 1)
+
+    def test_direct_plot_call_without_provenance_still_writes_a_sidecar(self):
+        # Regression test for Audit3 Codex A3-P2-1: a bare
+        # plot_track(result, outdir=...) call -- no provenance argument,
+        # i.e. plot_sev.py used directly as a Python API rather than
+        # through driver_sev.run() -- used to save a PNG with NO sidecar
+        # at all, contradicting _finish()'s own "unconditionally" claim.
+        # A sidecar must now always appear, always carrying the rendering
+        # settings, and must say plainly that the scientific run
+        # parameters were not supplied rather than silently omitting them.
+        import matplotlib.pyplot as plt
+        result = phys.integrate_track(m_msun=1.0, n_ms=50, n_post=50)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(plt, "show"):
+                plotting.plot_track(result, outdir=tmp, dpi=88, lw=2.5)
+            pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
+            sidecars = [f for f in os.listdir(tmp)
+                       if f.endswith(".provenance.txt")]
+            self.assertEqual(len(pngs), 1)
+            self.assertEqual(len(sidecars), 1)
+            with open(os.path.join(tmp, sidecars[0])) as f:
+                content = f.read()
+            self.assertIn("dpi = 88", content)
+            self.assertIn("lw = 2.5", content)
+            self.assertIn("not supplied", content)
+
+    def test_orphan_sidecar_is_not_overwritten(self):
+        # Regression test for Audit3 Codex A3-P2-3: _unique_path() used
+        # to check only whether the candidate PNG path existed, so a
+        # pre-existing same-stem .provenance.txt (left behind by, say, an
+        # earlier plot_track() call made without a provenance argument,
+        # or a manual copy) was silently destroyed the moment a new run
+        # picked that same stem and opened the sidecar with mode "w".
+        # The clock is frozen so the stem is deterministic.
+        import matplotlib.pyplot as plt
+        result = phys.integrate_track(m_msun=1.0, n_ms=50, n_post=50)
+        fixed = datetime(2026, 1, 1, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            stamp = fixed.strftime("%Y%m%d_%H%M%S")
+            stem = f"sev_track_1.00Msun_{stamp}"
+            orphan = os.path.join(tmp, stem + ".provenance.txt")
+            with open(orphan, "w") as f:
+                f.write("ORIGINAL ORPHAN CONTENT\n")
+            with mock.patch.object(plt, "show"), \
+                 mock.patch.object(plotting, "datetime") as mock_dt:
+                mock_dt.now.return_value = fixed
+                plotting.plot_track(result, outdir=tmp, dpi=60)
+            pngs = sorted(f for f in os.listdir(tmp) if f.endswith(".png"))
+            # The new PNG must NOT take the orphaned stem -- it must be
+            # bumped to "_2", exactly as if a PNG had already existed.
+            self.assertEqual(pngs, [f"{stem}_2.png"])
+            with open(orphan) as f:
+                self.assertEqual(f.read(), "ORIGINAL ORPHAN CONTENT\n")
+            new_sidecar = os.path.join(tmp, f"{stem}_2.provenance.txt")
+            self.assertTrue(os.path.exists(new_sidecar))
+
+    def test_driver_writes_matched_png_and_sidecar_for_every_mode(self):
+        # Regression test for Audit3 Codex A3-P2-4: the previous sidecar
+        # coverage only exercised a manually-assembled helper case for
+        # the "tracks" mode (driver._provenance() built by hand and
+        # passed directly into plotting.plot_track(), never going through
+        # driver.run() at all), so a driver runner that stopped
+        # forwarding provenance, or lost a parameter for one of the other
+        # three modes, would not have been caught.  This drives all four
+        # modes through the real driver.run() entry point with small/fast
+        # grids and checks the produced sidecar's keys against driver's
+        # own authoritative per-mode parameter list, plus the
+        # rendering settings that are always recorded regardless of mode.
+        import matplotlib.pyplot as plt
+        calls = dict(
+            tracks=dict(mode="tracks", mass=1.0, n_ms=50, n_post=50),
+            hr=dict(mode="hr", masses="1.0,2.0", n_ms=50, n_post=50),
+            wdcool=dict(mode="wdcool", wd_mass=0.6, n_cool=50),
+            nsmr=dict(mode="nsmr", eos="neutron", n_mr=8,
+                      rho_lo=1.0e17, rho_hi=5.0e19),
+        )
+        for mode, kwargs in calls.items():
+            with self.subTest(mode=mode):
+                with tempfile.TemporaryDirectory() as tmp:
+                    with mock.patch.object(plt, "show"):
+                        driver.run(outdir=tmp, dpi=77, lw=2.25, **kwargs)
+                    pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
+                    sidecars = [f for f in os.listdir(tmp)
+                               if f.endswith(".provenance.txt")]
+                    self.assertEqual(len(pngs), 1)
+                    self.assertEqual(len(sidecars), 1)
+                    self.assertEqual(os.path.splitext(pngs[0])[0],
+                                     sidecars[0][:-len(".provenance.txt")])
+                    with open(os.path.join(tmp, sidecars[0])) as f:
+                        content = f.read()
+                    self.assertIn("dpi = 77", content)
+                    self.assertIn("lw = 2.25", content)
+                    for param in driver.PARAMS_BY_MODE[mode]:
+                        self.assertIn(param, content)
+                    self.assertIn(phys.MODEL_VERSION, content)
+                    self.assertIn(phys.BUILD_ID, content)
 
     def test_low_mass_remnant_plot_annotation_matches_its_basis(self):
         # Regression test for Audit2 P1-1 (Codex reproducer, mass=0.60,
@@ -2234,7 +2489,11 @@ class TestPlotting(unittest.TestCase):
         # x_end/qc/core_weight/expansion/core_efficiency/homology/postms
         # appeared anywhere near it.  A provenance sidecar must now be
         # written next to the PNG unconditionally, whether or not
-        # --csvdir was also requested.
+        # --csvdir was also requested.  This test still assembles the
+        # provenance list by hand for one mode as a close-in check;
+        # test_driver_writes_matched_png_and_sidecar_for_every_mode below
+        # supplements it by driving all four modes through the real
+        # driver.run() entry point (Audit3 Codex A3-P2-4).
         import matplotlib.pyplot as plt
         result = phys.integrate_track(m_msun=1.0, n_ms=200, n_post=200)
         provenance = driver._provenance("tracks", dict(
@@ -2271,22 +2530,42 @@ class TestPlotting(unittest.TestCase):
         # land in the same wall-clock second): the clock is frozen so
         # both saves are forced into the same second, and the exact
         # expected "_2" disambiguated filename is asserted explicitly.
+        # Strengthened again for Audit3 Codex A3-P2-1/A3-P2-3: both saves
+        # now include a provenance list, and BOTH artifacts of each
+        # PNG/sidecar pair -- not just the PNGs -- are checked, so a
+        # regression that mismatched a PNG with the wrong sidecar stem
+        # would be caught here.
         import matplotlib.pyplot as plt
         result = phys.integrate_track(m_msun=1.0, n_ms=200, n_post=200)
+        provenance = driver._provenance("tracks", dict(
+            mass=1.0, X=0.7, Z=0.02, qc=None, burning=None, opacity="thomson",
+            core_weight=0.36, expansion=1.7, core_efficiency=0.75,
+            homology=False, postms=True, n_ms=200, n_post=200,
+            t_max=15.0, x_end=1.0e-3))
         fixed = datetime(2026, 1, 1, 12, 0, 0)
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(plt, "show"), \
                  mock.patch.object(plotting, "datetime") as mock_dt:
                 mock_dt.now.return_value = fixed
-                plotting.plot_track(result, outdir=tmp, dpi=60)
-                plotting.plot_track(result, outdir=tmp, dpi=60)
+                plotting.plot_track(result, outdir=tmp, dpi=60,
+                                    provenance=provenance)
+                plotting.plot_track(result, outdir=tmp, dpi=60,
+                                    provenance=provenance)
             pngs = sorted(f for f in os.listdir(tmp) if f.endswith(".png"))
+            sidecars = sorted(f for f in os.listdir(tmp)
+                              if f.endswith(".provenance.txt"))
             stamp = fixed.strftime("%Y%m%d_%H%M%S")
             first = f"sev_track_1.00Msun_{stamp}.png"
             second = f"sev_track_1.00Msun_{stamp}_2.png"
             self.assertEqual(pngs, sorted([first, second]))
+            first_sc = f"sev_track_1.00Msun_{stamp}.provenance.txt"
+            second_sc = f"sev_track_1.00Msun_{stamp}_2.provenance.txt"
+            self.assertEqual(sidecars, sorted([first_sc, second_sc]))
             for f in pngs:
                 self.assertGreater(os.path.getsize(os.path.join(tmp, f)), 0)
+            for f in sidecars:
+                with open(os.path.join(tmp, f)) as fh:
+                    self.assertIn("n_ms", fh.read())
 
     def test_figure_carries_a_version_build_footer(self):
         # Regression test for Audit1 P2-6: every saved figure must carry a
@@ -2359,6 +2638,23 @@ class TestHelpFile(unittest.TestCase):
         text = normalized_text(version_nodes[0])
         self.assertIn(f"Version {phys.MODEL_VERSION}", text)
         self.assertIn(f"Build {phys.BUILD_ID}", text)
+
+    def test_help_documents_png_provenance_sidecar(self):
+        # Regression test for Audit3 Codex A3-P2-2/A3-P3-4: version 1.3.0
+        # added a same-stem .provenance.txt sidecar next to every saved
+        # PNG, but the Help never mentioned it at all -- no file-naming
+        # description, no statement that a second artifact is produced,
+        # and no guidance to keep the PNG and sidecar together.  This
+        # checks the three Help locations Codex named: the Plot Layer
+        # module card, the --outdir parameter row, and the PNG-file
+        # output-table row.
+        modules = normalized_text(nodes_by_id(self.root, "modules")[0])
+        self.assertIn("provenance", modules)
+        params = normalized_text(nodes_by_id(self.root, "parameters")[0])
+        self.assertIn("provenance", params)
+        output = normalized_text(nodes_by_id(self.root, "output")[0])
+        self.assertIn("provenance", output)
+        self.assertIn(".provenance.txt", self.html)
 
     def test_mu_e_defined_correctly_not_reversed(self):
         # Legacy critique: help previously said "electrons per nucleon" for

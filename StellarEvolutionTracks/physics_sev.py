@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -1172,6 +1172,38 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
 _FERMI_SMALL_X = 0.05
 
 
+def _require_nonneg_x(name, x):
+    """
+    Validate the Fermi-gas relativity parameter x = p_F/(m c), which is
+    physically defined only for x >= 0 (x = 0 is the legitimate
+    zero-density limit, so this deliberately does not reuse
+    _require_positive, which would reject it).  Accepts a scalar or an
+    array_like; returns a float64 ndarray (0-d for a scalar input, same
+    shape as the input otherwise) so callers can keep using .shape to
+    distinguish the two.
+
+    Every public FermiGasEOS evaluator (pressure, energy_density,
+    number_density, rest_mass_density, dP_dx, sound_speed_ratio) calls
+    this first.  Nothing inside this module ever calls them with negative
+    x -- integrate_structure() and wd_structure() only ever derive x from
+    a validated positive density -- but these methods are also a public,
+    independently reusable API, and negative x previously passed straight
+    through to the arithmetic and returned negative pressures, energy
+    densities and number densities with no warning (Audit3 Codex A3-P3-1 /
+    Copilot A3-P3-2).
+    """
+    arr = np.asarray(x, dtype=float)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite; got {x!r}.")
+    if np.any(arr < 0.0):
+        raise ValueError(
+            f"{name} is the Fermi-gas relativity parameter x = p_F/(m c), "
+            f"which is physically defined only for x >= 0 (x = 0 is the "
+            f"zero-density limit); got {x!r}."
+        )
+    return arr
+
+
 class FermiGasEOS:
     """
     Ideal completely degenerate Fermi gas, exact special-relativistic form.
@@ -1210,7 +1242,7 @@ class FermiGasEOS:
         1e-10 relative accuracy everywhere it is used, and is what the
         closed form itself would give at infinite precision.
         """
-        x = np.asarray(x, dtype=float)
+        x = _require_nonneg_x("x", x)
         small = x < _FERMI_SMALL_X
         if np.any(small):
             xs = x[small] if x.shape else x
@@ -1229,11 +1261,12 @@ class FermiGasEOS:
         return self.A * (x * (2.0 * x * x - 3.0) * s + 3.0 * np.arcsinh(x))
 
     def dP_dx(self, x):
-        x = np.asarray(x, dtype=float)
+        x = _require_nonneg_x("x", x)
         return self.A * 8.0 * x**4 / np.sqrt(1.0 + x * x)
 
     def number_density(self, x):
-        return self.n0 * np.asarray(x, dtype=float) ** 3
+        x = _require_nonneg_x("x", x)
+        return self.n0 * x ** 3
 
     def rest_mass_density(self, x):
         return self.mass_per_particle * self.number_density(x)
@@ -1245,7 +1278,7 @@ class FermiGasEOS:
         3x as x -> 0), with the same series-based remedy below
         _FERMI_SMALL_X: eps/A = 8x^3 + (12/5)x^5 - (3/7)x^7 + ...
         """
-        x = np.asarray(x, dtype=float)
+        x = _require_nonneg_x("x", x)
         small = x < _FERMI_SMALL_X
         if np.any(small):
             xs = x[small] if x.shape else x
@@ -1280,7 +1313,7 @@ class FermiGasEOS:
         which rises monotonically to 1/sqrt(3): an ideal Fermi gas is
         always causal.
         """
-        x = np.asarray(x, dtype=float)
+        x = _require_nonneg_x("x", x)
         return np.sqrt(x * x / (3.0 * (1.0 + x * x)))
 
     def x_from_density(self, rho):
@@ -1620,12 +1653,34 @@ def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
         hi *= 10.0
         m_hi, _ = mass_of(hi)
         n += 1
-    if m_lo > target or m_hi < target:
+    if m_lo > target:
+        # Even the lowest central density tried already overshoots the
+        # target: the requested mass sits below the low-density end of
+        # the reachable bracket, so "move away from the Chandrasekhar
+        # limit" is backwards advice here -- the fix is a larger mass (or
+        # a smaller starting rho_lo / larger max_bracket_expansions), not
+        # a smaller one (Audit3 Codex A3-P3-2).
         raise RuntimeError(
-            "Bisection could not bracket the requested white-dwarf mass "
-            f"even after widening the search to rho_c in "
-            f"[{lo:.3e}, {hi:.3e}] kg/m^3; try a mass further from the "
-            "Chandrasekhar limit."
+            "Bisection could not bracket the requested white-dwarf mass: "
+            f"even the lowest central density tried, rho_c={lo:.3e} "
+            f"kg/m^3, already gives {m_lo / M_sun:.6f} Msun, above the "
+            f"requested {m_target_msun:g} Msun.  The requested mass is "
+            "too small for this search to reach; try a larger mass, a "
+            "smaller rho_lo, or a larger max_bracket_expansions."
+        )
+    if m_hi < target:
+        # The opposite case: even the highest central density tried still
+        # falls short, so the requested mass really is too close to the
+        # Chandrasekhar limit for this search -- here "move away from the
+        # limit" (to a smaller mass) is the correct direction.
+        raise RuntimeError(
+            "Bisection could not bracket the requested white-dwarf mass: "
+            f"even the highest central density tried, rho_c={hi:.3e} "
+            f"kg/m^3, still only gives {m_hi / M_sun:.6f} Msun, below the "
+            f"requested {m_target_msun:g} Msun.  The requested mass is "
+            f"too close to the Chandrasekhar limit ({m_ch:.3f} Msun for "
+            f"mu_e={mu_e:g}) for this search to reach; try a smaller "
+            "mass, or a larger max_bracket_expansions."
         )
 
     # Keep mid, M and R computed together at every step so the value

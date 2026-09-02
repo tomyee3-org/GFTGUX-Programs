@@ -11,7 +11,10 @@ One routine per mode:
     plot_ns_mass_radius neutron-star mass-radius relation, three panels
 
 Each routine displays the figure.  When an output directory is supplied,
-it also writes a timestamped PNG into that directory before displaying it.
+it also writes a timestamped PNG into that directory before displaying
+it, together with a same-stem `.provenance.txt` sidecar recording the
+rendering settings (and, when the caller is driver_sev.run(), the
+scientific run parameters too) -- see _finish() for the exact contract.
 """
 
 import os
@@ -44,19 +47,36 @@ def _timestamp_name(prefix):
     return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
 
-def _unique_path(outdir, name):
-    """Avoid silently overwriting a PNG from a run in the same second."""
-    path = os.path.join(outdir, name)
-    if not os.path.exists(path):
-        return path
+def _unique_stem(outdir, name):
+    """
+    Choose a PNG name such that neither it nor its provenance sidecar
+    already exists.
+
+    Checking the PNG path alone (the Audit1/Audit2 behaviour) is not
+    enough: a same-stem `.provenance.txt` can exist without its PNG --
+    left behind by an interrupted run, a manual copy, or simply an
+    earlier call that saved a PNG without one -- and picking that stem
+    again would silently destroy the orphaned sidecar the moment the new
+    PNG's provenance was written next to it (Audit3 Codex A3-P2-3).
+    Requiring both paths to be free keeps the PNG/sidecar pair atomic
+    with respect to any pre-existing file at that stem.
+    """
     stem, ext = os.path.splitext(name)
+
+    def _taken(candidate_stem):
+        png = os.path.join(outdir, candidate_stem + ext)
+        sidecar = os.path.join(outdir, candidate_stem + ".provenance.txt")
+        return os.path.exists(png) or os.path.exists(sidecar)
+
+    if not _taken(stem):
+        return os.path.join(outdir, stem + ext)
     n = 2
-    while os.path.exists(candidate := os.path.join(outdir, f"{stem}_{n}{ext}")):
+    while _taken(f"{stem}_{n}"):
         n += 1
-    return candidate
+    return os.path.join(outdir, f"{stem}_{n}{ext}")
 
 
-def _finish(fig, outdir, prefix, dpi, provenance=None):
+def _finish(fig, outdir, prefix, dpi, lw=None, provenance=None):
     """
     Optionally save a timestamped PNG (with a provenance sidecar), then
     display the figure.
@@ -65,11 +85,20 @@ def _finish(fig, outdir, prefix, dpi, provenance=None):
     and cannot answer "which run?", since it has no room for the dozen or
     so mode-relevant parameters (n_ms, t_max, qc, mu_e, rho_lo, ... --
     whichever the mode actually used) that would be needed to reproduce
-    the figure exactly.  provenance, when given, is the same parameter
-    list driver_sev.py already writes into a CSV's header comments; it is
-    written here as a plain-text sidecar next to the PNG unconditionally
-    -- whether or not --csvdir was also requested -- so a saved PNG never
-    has to depend on the user having separately asked for the CSV.
+    the figure exactly.  Whenever outdir is given, a same-stem
+    `.provenance.txt` sidecar is now written unconditionally, whether or
+    not --csvdir was also requested and whether or not a caller supplied
+    a `provenance` list at all (Audit3 Codex A3-P2-1: a bare
+    `plot_track(result, outdir=...)` call used to save a PNG with no
+    sidecar whatsoever).  The sidecar always records the rendering
+    settings that can change the saved image (dpi, line width) even when
+    no scientific-parameter list is supplied; `provenance`, when given,
+    is the mode-specific parameter list driver_sev.py already writes into
+    a CSV's header comments, and is recorded in a separate section.  A
+    caller who invokes plot_sev.py's functions directly, bypassing
+    driver_sev.run(), therefore still gets a sidecar, but its scientific
+    run parameters are recorded as "not supplied" rather than guessed --
+    only dpi and lw are ever known for certain at this layer.
     """
     fig.text(0.995, 0.005,
              f"StellarEvolutionTracks {phys.MODEL_VERSION} "
@@ -77,18 +106,35 @@ def _finish(fig, outdir, prefix, dpi, provenance=None):
              ha="right", va="bottom", fontsize=6, color="0.55")
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        path = _unique_path(outdir, _timestamp_name(prefix))
+        path = _unique_stem(outdir, _timestamp_name(prefix))
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
         print(f"[plot_sev] PNG saved -> {path}")
-        if provenance:
-            stem, _ = os.path.splitext(path)
-            sidecar = stem + ".provenance.txt"
-            with open(sidecar, "w") as f:
-                f.write(f"Provenance for {os.path.basename(path)}\n")
-                f.write("(every parameter this mode actually used, so this "
-                        "figure can be reproduced without the CSV)\n\n")
+        stem, _ = os.path.splitext(path)
+        sidecar = stem + ".provenance.txt"
+        with open(sidecar, "w") as f:
+            f.write(f"Provenance for {os.path.basename(path)}\n")
+            f.write("(rendering parameters are always recorded below; "
+                    "scientific run parameters are recorded whenever the "
+                    "caller supplied them, so a CLI-driven figure can be "
+                    "reproduced without the CSV)\n\n")
+            f.write("rendering parameters (always recorded, since these "
+                    "change the saved image and are set independently of "
+                    "the scientific run):\n")
+            f.write(f"    dpi = {dpi}\n")
+            f.write(f"    lw = {lw}\n\n")
+            if provenance:
+                f.write("scientific run parameters:\n")
                 f.write("\n".join(provenance) + "\n")
-            print(f"[plot_sev] Provenance saved -> {sidecar}")
+            else:
+                f.write(
+                    "scientific run parameters: not supplied to this call.  "
+                    "This normally means plot_sev.py was called directly "
+                    "as a Python API rather than through the documented "
+                    "CLI (driver_sev.run() always supplies this list), so "
+                    "the mode-specific inputs used to compute the plotted "
+                    "data are not recorded here.\n"
+                )
+        print(f"[plot_sev] Provenance saved -> {sidecar}")
     print("[plot_sev] Displaying figure on screen ...")
     plt.show()
     plt.close(fig)
@@ -241,7 +287,7 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0),
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                        ec="gray", alpha=0.9))
 
-    _finish(fig, outdir, f"sev_track_{s['m_msun']:.2f}Msun", dpi,
+    _finish(fig, outdir, f"sev_track_{s['m_msun']:.2f}Msun", dpi, lw=lw,
            provenance=provenance)
 
 
@@ -306,7 +352,7 @@ def plot_hr_diagram(result, outdir=None, dpi=150, lw=1.5, figsize=(10.0, 8.5),
     ax.set_title(subtitle, fontsize=9.5)
     ax.legend(fontsize=8.5, loc="lower left", framealpha=0.85)
 
-    _finish(fig, outdir, "sev_hr", dpi, provenance=provenance)
+    _finish(fig, outdir, "sev_hr", dpi, lw=lw, provenance=provenance)
 
 
 # ----------------------------------------------------------------------
@@ -411,7 +457,7 @@ def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0),
              fontsize=8, bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                                    ec="gray", alpha=0.9))
 
-    _finish(fig, outdir, f"sev_wdcool_{s['m_msun']:.2f}Msun", dpi,
+    _finish(fig, outdir, f"sev_wdcool_{s['m_msun']:.2f}Msun", dpi, lw=lw,
            provenance=provenance)
 
 
@@ -554,4 +600,4 @@ def plot_ns_mass_radius(result, outdir=None, dpi=150, lw=1.7,
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                        ec="gray", alpha=0.9))
 
-    _finish(fig, outdir, f"sev_nsmr_{s['eos']}", dpi, provenance=provenance)
+    _finish(fig, outdir, f"sev_nsmr_{s['eos']}", dpi, lw=lw, provenance=provenance)
