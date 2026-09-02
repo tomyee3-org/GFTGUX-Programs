@@ -76,7 +76,7 @@ def _unique_stem(outdir, name):
     return os.path.join(outdir, f"{stem}_{n}{ext}")
 
 
-def _finish(fig, outdir, prefix, dpi, lw=None, provenance=None):
+def _finish(fig, outdir, prefix, dpi, lw=None, figsize=None, provenance=None):
     """
     Optionally save a timestamped PNG (with a provenance sidecar), then
     display the figure.
@@ -91,14 +91,25 @@ def _finish(fig, outdir, prefix, dpi, lw=None, provenance=None):
     a `provenance` list at all (Audit3 Codex A3-P2-1: a bare
     `plot_track(result, outdir=...)` call used to save a PNG with no
     sidecar whatsoever).  The sidecar always records the rendering
-    settings that can change the saved image (dpi, line width) even when
-    no scientific-parameter list is supplied; `provenance`, when given,
-    is the mode-specific parameter list driver_sev.py already writes into
-    a CSV's header comments, and is recorded in a separate section.  A
-    caller who invokes plot_sev.py's functions directly, bypassing
-    driver_sev.run(), therefore still gets a sidecar, but its scientific
-    run parameters are recorded as "not supplied" rather than guessed --
-    only dpi and lw are ever known for certain at this layer.
+    settings that can change the saved image (dpi, line width, figsize)
+    even when no scientific-parameter list is supplied; `provenance`,
+    when given, is the mode-specific parameter list driver_sev.py already
+    writes into a CSV's header comments, and is recorded in a separate
+    section.  A caller who invokes plot_sev.py's functions directly,
+    bypassing driver_sev.run(), therefore still gets a sidecar, but its
+    scientific run parameters are recorded as "not supplied" rather than
+    guessed -- only dpi, lw and figsize are ever known for certain at
+    this layer.
+
+    figsize is recorded as well as dpi/lw (Audit4 Codex A4-P2-1): every
+    public plot_* function accepts a caller-selectable `figsize` and
+    passes it straight to plt.subplots(), so a direct Python caller can
+    change the saved image's aspect and pixel dimensions without going
+    through the documented CLI (which does not expose --figsize at all).
+    Recording only dpi/lw let two direct calls that differ solely in
+    figsize produce different PNGs with indistinguishable sidecars; that
+    gap is closed by writing figsize_inches unconditionally, exactly like
+    dpi and lw.
     """
     fig.text(0.995, 0.005,
              f"StellarEvolutionTracks {phys.MODEL_VERSION} "
@@ -121,7 +132,11 @@ def _finish(fig, outdir, prefix, dpi, lw=None, provenance=None):
                     "change the saved image and are set independently of "
                     "the scientific run):\n")
             f.write(f"    dpi = {dpi}\n")
-            f.write(f"    lw = {lw}\n\n")
+            f.write(f"    lw = {lw}\n")
+            if figsize is not None:
+                f.write(f"    figsize_inches = {figsize[0]:g}, {figsize[1]:g}\n\n")
+            else:
+                f.write("    figsize_inches = unknown\n\n")
             if provenance:
                 f.write("scientific run parameters:\n")
                 f.write("\n".join(provenance) + "\n")
@@ -288,7 +303,7 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0),
                        ec="gray", alpha=0.9))
 
     _finish(fig, outdir, f"sev_track_{s['m_msun']:.2f}Msun", dpi, lw=lw,
-           provenance=provenance)
+           figsize=figsize, provenance=provenance)
 
 
 # ----------------------------------------------------------------------
@@ -352,7 +367,8 @@ def plot_hr_diagram(result, outdir=None, dpi=150, lw=1.5, figsize=(10.0, 8.5),
     ax.set_title(subtitle, fontsize=9.5)
     ax.legend(fontsize=8.5, loc="lower left", framealpha=0.85)
 
-    _finish(fig, outdir, "sev_hr", dpi, lw=lw, provenance=provenance)
+    _finish(fig, outdir, "sev_hr", dpi, lw=lw, figsize=figsize,
+           provenance=provenance)
 
 
 # ----------------------------------------------------------------------
@@ -458,7 +474,7 @@ def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0),
                                    ec="gray", alpha=0.9))
 
     _finish(fig, outdir, f"sev_wdcool_{s['m_msun']:.2f}Msun", dpi, lw=lw,
-           provenance=provenance)
+           figsize=figsize, provenance=provenance)
 
 
 # ----------------------------------------------------------------------
@@ -600,4 +616,5 @@ def plot_ns_mass_radius(result, outdir=None, dpi=150, lw=1.7,
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                        ec="gray", alpha=0.9))
 
-    _finish(fig, outdir, f"sev_nsmr_{s['eos']}", dpi, lw=lw, provenance=provenance)
+    _finish(fig, outdir, f"sev_nsmr_{s['eos']}", dpi, lw=lw, figsize=figsize,
+           provenance=provenance)

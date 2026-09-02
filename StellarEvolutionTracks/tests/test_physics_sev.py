@@ -402,6 +402,69 @@ plot_sev.py docstrings or output):
         plotting test that now also checks the sidecar half of each pair,
         and one Help-documentation test for the provenance sidecar's
         three Help locations.
+
+  2026-09-02  Claude (principal developer).  Response to Audit4 (Gemini,
+    Codex, Copilot reviewing the Response-to-Audit3 round).  Version
+    1.4.0 -> 1.5.0, BUILD_ID 16faf4c1e9f5 -> 4ab0d0a5d73c.  No P1 or P2
+    defect was reported by Copilot or Gemini this round; both explicitly
+    recommended release with only the three previously-disclosed P3
+    observations outstanding.  Codex reported one P2 and three P3
+    findings and recommended one more small correction round before
+    release; all four are fixed here rather than deferred, since each had
+    a concrete reproducer and a narrow, low-risk fix, and doing so lets
+    this round close with zero open findings from all three reviewers
+    simultaneously.  Full disposition is in StellarEvolutionTracks-
+    Claude-Response-to-Audit4-20260902.txt; this entry lists only what
+    changed in the source tree.
+      * Fixed the P2 finding (Codex A4-P2-1): every public plot_sev.py
+        function (plot_track, plot_hr_diagram, plot_wd_cooling,
+        plot_ns_mass_radius) accepts a caller-selectable `figsize`, which
+        changes the saved PNG's aspect and pixel dimensions, but
+        _finish()'s "rendering parameters" sidecar section recorded only
+        dpi and lw -- two direct-API calls differing solely in figsize
+        could therefore save different images with indistinguishable
+        recorded rendering settings.  _finish() now takes a `figsize`
+        argument and records it unconditionally as `figsize_inches`,
+        exactly like dpi and lw; all four public functions now pass their
+        effective figsize through.  The CLI itself still does not expose
+        --figsize (only --dpi and --lw), so no CLI behavior changed.
+      * Fixed all three P3 findings. (a) A4-P3-1: the Audit3 .py.txt
+        transport-encoding scheme (text.replace("__", "dunder").replace
+        (" ", "§")) was reversible for the delivered files but not
+        collision-free in general -- a pre-existing natural occurrence of
+        the word "dunder" decoded back to "__", corrupting it.  The
+        packaging-only encoder (package/transport_codec.py, not part of
+        the shipped program) now escapes every literal "§" first
+        (doubling it) before introducing the delimited, still-legible
+        tokens "§dunder§" and "§sp§"; this is a provably injective,
+        self-escaping scheme, verified byte-for-byte against an
+        adversarial corpus (literal "dunder", literal "__", literal "§"
+        alone and adjacent to a real token, non-ASCII text, CRLF, and a
+        file with no final newline) before every package is assembled.
+        (b) A4-P3-2: _require_nonneg_x's np.asarray(x, dtype=float)
+        silently coerced Python bool (True/False, and boolean arrays) to
+        1.0/0.0, and let a complex x escape as a raw TypeError instead of
+        this validator's normal ValueError contract; bool is now rejected
+        explicitly (scalar or array), and a conversion failure (complex
+        or any other non-real input) is now caught and re-raised as a
+        ValueError, so every FermiGasEOS public-evaluator rejection looks
+        the same to a caller. (c) A4-P3-3: the all-mode sidecar test
+        (test_driver_writes_matched_png_and_sidecar_for_every_mode) used
+        `self.assertIn(param, content)`, an arbitrary substring search
+        that would still pass if a short key like "X", "Z", "qc", "eos"
+        or "mass" only happened to appear in prose, a heading, or another
+        key's name -- it never actually proved the sidecar held one exact
+        `name = value` entry per parameter.  A new `_parse_sidecar()`
+        helper parses the sidecar's documented indentation and
+        `name = value` grammar into a dict; the test now compares exact
+        key sets (scientific keys against driver.PARAMS_BY_MODE[mode],
+        rendering keys against {dpi, lw, figsize_inches}) and exact
+        dpi/lw/figsize_inches values.
+      * The full regression suite grew from 207 to 210 tests: two
+        FermiGasEOS type-rejection tests (bool, complex), one new
+        direct-call nondefault-figsize sidecar test, and the
+        all-four-modes sidecar test rewritten to assert exact parsed
+        key/value entries instead of substrings.
 """
 
 import ast
@@ -471,6 +534,39 @@ def recompute_build_id(directory):
         digest.update(len(content).to_bytes(8, "big"))
         digest.update(content)
     return digest.hexdigest()[:12]
+
+
+def _parse_sidecar(content):
+    """
+    Parse a `.provenance.txt` sidecar's `    name = value` lines into a
+    dict, split only at the first "=".
+
+    Regression test for Audit4 Codex A4-P3-3: the previous all-mode
+    sidecar test used `self.assertIn(param, content)`, an arbitrary
+    substring search that would pass even if a short key like "X", "Z",
+    "qc", "eos" or "mass" only appeared inside prose, a heading, another
+    key's name, or a value.  Parsing the documented indentation and
+    `name = value` grammar into an actual key/value map lets a test
+    assert an exact set of keys (and, where useful, exact values)
+    instead, which is what the sidecar contract and the test's own
+    comments always claimed to check.
+    """
+    entries = {}
+    for line in content.splitlines():
+        if not line.startswith("    "):
+            continue
+        stripped = line.strip()
+        if "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key or " " in key:
+            # Guards against accidentally parsing wrapped prose lines
+            # that happen to be indented and contain a "=" character.
+            continue
+        entries[key] = value
+    return entries
 
 
 def run_cli(args, cwd=MODULE_DIR, timeout=60):
@@ -1430,6 +1526,35 @@ class TestFermiGasEos(unittest.TestCase):
         self.assertEqual(float(self.eos.number_density(0.0)), 0.0)
         self.assertEqual(float(self.eos.dP_dx(0.0)), 0.0)
         self.assertEqual(float(self.eos.sound_speed_ratio(0.0)), 0.0)
+
+    def test_public_evaluators_reject_bool(self):
+        # Regression test for Audit4 Codex A4-P3-2: _require_nonneg_x's
+        # np.asarray(x, dtype=float) silently coerced True/False to
+        # 1.0/0.0.  True and False are not physically meaningful values
+        # of x = p_F/(m c), so a bare bool (scalar or array) must now be
+        # rejected explicitly, the same way _require_bool() rejects a
+        # non-bool value elsewhere in this module, just inverted.
+        methods = (self.eos.pressure, self.eos.energy_density,
+                  self.eos.number_density, self.eos.rest_mass_density,
+                  self.eos.dP_dx, self.eos.sound_speed_ratio)
+        for method in methods:
+            for bad in (True, False, np.array([True, False])):
+                with self.subTest(method=method.__name__, x=bad):
+                    with self.assertRaisesRegex(ValueError, "bool"):
+                        method(bad)
+
+    def test_public_evaluators_wrap_complex_x_as_valueerror(self):
+        # Regression test for Audit4 Codex A4-P3-2: a complex x used to
+        # escape _require_nonneg_x as a raw TypeError from the
+        # np.asarray(x, dtype=float) conversion, instead of this
+        # validator's normal ValueError-style domain-rejection contract.
+        methods = (self.eos.pressure, self.eos.energy_density,
+                  self.eos.number_density, self.eos.rest_mass_density,
+                  self.eos.dP_dx, self.eos.sound_speed_ratio)
+        for method in methods:
+            with self.subTest(method=method.__name__):
+                with self.assertRaises(ValueError):
+                    method(1 + 2j)
 
 
 # ======================================================================
@@ -2392,6 +2517,33 @@ class TestPlotting(unittest.TestCase):
             self.assertIn("dpi = 88", content)
             self.assertIn("lw = 2.5", content)
             self.assertIn("not supplied", content)
+            entries = _parse_sidecar(content)
+            self.assertIn("figsize_inches", entries)
+
+    def test_direct_plot_sidecar_records_nondefault_figsize(self):
+        # Regression test for Audit4 Codex A4-P2-1: every public plot_*
+        # function accepts a caller-selectable figsize and passes it
+        # straight to plt.subplots(), so a direct Python caller (bypassing
+        # the CLI, which does not expose --figsize at all) can change the
+        # saved PNG's aspect and pixel dimensions.  The sidecar used to
+        # record only dpi/lw, so two direct calls differing solely in
+        # figsize could produce different images with indistinguishable
+        # recorded rendering settings.  This calls plot_track() with a
+        # deliberately nondefault figsize and asserts the sidecar records
+        # that exact value, not merely the substring "figsize".
+        import matplotlib.pyplot as plt
+        result = phys.integrate_track(m_msun=1.0, n_ms=50, n_post=50)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(plt, "show"):
+                plotting.plot_track(result, outdir=tmp, dpi=100, lw=1.9,
+                                    figsize=(4.0, 3.0))
+            sidecars = [f for f in os.listdir(tmp)
+                       if f.endswith(".provenance.txt")]
+            self.assertEqual(len(sidecars), 1)
+            with open(os.path.join(tmp, sidecars[0])) as f:
+                content = f.read()
+            entries = _parse_sidecar(content)
+            self.assertEqual(entries["figsize_inches"], "4, 3")
 
     def test_orphan_sidecar_is_not_overwritten(self):
         # Regression test for Audit3 Codex A3-P2-3: _unique_path() used
@@ -2435,6 +2587,16 @@ class TestPlotting(unittest.TestCase):
         # grids and checks the produced sidecar's keys against driver's
         # own authoritative per-mode parameter list, plus the
         # rendering settings that are always recorded regardless of mode.
+        #
+        # Strengthened for Audit4 Codex A4-P3-3: the previous version of
+        # this test used `self.assertIn(param, content)`, an arbitrary
+        # substring search that would still pass if a short key like "X",
+        # "Z", "qc", "eos" or "mass" only happened to appear inside prose,
+        # a heading, another key's name, or a value -- it never actually
+        # proved the sidecar held one exact `name = value` entry per
+        # parameter.  This now parses the sidecar with _parse_sidecar()
+        # and compares exact key sets (and, for the rendering settings,
+        # exact values) instead.
         import matplotlib.pyplot as plt
         calls = dict(
             tracks=dict(mode="tracks", mass=1.0, n_ms=50, n_post=50),
@@ -2443,6 +2605,7 @@ class TestPlotting(unittest.TestCase):
             nsmr=dict(mode="nsmr", eos="neutron", n_mr=8,
                       rho_lo=1.0e17, rho_hi=5.0e19),
         )
+        rendering_keys = {"dpi", "lw", "figsize_inches"}
         for mode, kwargs in calls.items():
             with self.subTest(mode=mode):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -2457,10 +2620,19 @@ class TestPlotting(unittest.TestCase):
                                      sidecars[0][:-len(".provenance.txt")])
                     with open(os.path.join(tmp, sidecars[0])) as f:
                         content = f.read()
-                    self.assertIn("dpi = 77", content)
-                    self.assertIn("lw = 2.25", content)
-                    for param in driver.PARAMS_BY_MODE[mode]:
-                        self.assertIn(param, content)
+                    entries = _parse_sidecar(content)
+                    # Exact set comparison catches both a missing key and
+                    # an unexpected/irrelevant one, not just presence.
+                    expected_scientific = set(driver.PARAMS_BY_MODE[mode])
+                    got_keys = set(entries)
+                    self.assertEqual(got_keys & expected_scientific,
+                                     expected_scientific)
+                    self.assertEqual(got_keys - expected_scientific,
+                                     rendering_keys)
+                    self.assertEqual(entries["dpi"], "77")
+                    self.assertEqual(entries["lw"], "2.25")
+                    self.assertRegex(entries["figsize_inches"],
+                                     r"^-?\d+(\.\d+)?, -?\d+(\.\d+)?$")
                     self.assertIn(phys.MODEL_VERSION, content)
                     self.assertIn(phys.BUILD_ID, content)
 

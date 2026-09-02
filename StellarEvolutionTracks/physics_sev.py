@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.4.0"
+MODEL_VERSION = "1.5.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -1191,8 +1191,38 @@ def _require_nonneg_x(name, x):
     through to the arithmetic and returned negative pressures, energy
     densities and number densities with no warning (Audit3 Codex A3-P3-1 /
     Copilot A3-P3-2).
+
+    Two further type gaps, both a public-API cleanliness issue rather
+    than anything reachable from inside this module, were closed in
+    response to Audit4 Codex A4-P3-2.  First, `np.asarray(x, dtype=float)`
+    on its own silently coerces Python bool (and boolean arrays) to
+    1.0/0.0; True and False are not physically meaningful values of
+    x = p_F/(m c), so a bare bool (scalar or array) is now rejected
+    explicitly, the same way _require_bool() rejects a non-bool value
+    elsewhere in this module, just inverted. Second, a complex x used to
+    escape as a raw TypeError from the float conversion instead of this
+    function's normal ValueError contract; that conversion failure is now
+    caught and re-raised as a ValueError so every rejection from this
+    validator looks the same to a caller.
     """
-    arr = np.asarray(x, dtype=float)
+    if isinstance(x, bool) or (isinstance(x, np.generic) and x.dtype == np.bool_):
+        raise ValueError(
+            f"{name} must be a real number (or array of real numbers), not "
+            f"a bool; got {x!r}."
+        )
+    bare = np.asarray(x)
+    if bare.dtype == np.bool_:
+        raise ValueError(
+            f"{name} must be a real number (or array of real numbers), not "
+            f"a bool array; got {x!r}."
+        )
+    try:
+        arr = np.asarray(x, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a real finite number or array of real finite "
+            f"numbers; got {x!r}."
+        ) from exc
     if not np.all(np.isfinite(arr)):
         raise ValueError(f"{name} must be finite; got {x!r}.")
     if np.any(arr < 0.0):
