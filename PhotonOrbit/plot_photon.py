@@ -72,13 +72,17 @@ def _format_provenance(b, info, dpi, lw, GM_over_c2, r0, lambda_max, d_lambda):
     value below is written with Python's repr() (the shortest string that
     round-trips back to the exact same float), not the console's
     human-readable .6g/.4g formatting, so copying a value out of this
-    file and back into the command line reproduces the exact run,
-    including numerically sensitive near-separatrix cases where a
+    file and back into the command line reproduces the exact physics
+    inputs, including numerically sensitive near-separatrix cases where a
     six-significant-digit rounding of b changes the outcome. The
-    "Reproduce with:" command line includes both the physics parameters
-    and the rendering settings (dpi, lw) that together determine the
-    saved image; it omits --outdir, since where to save a new copy is a
-    per-invocation choice rather than part of what produced this run.
+    "Reproduce with:" command line includes the physics parameters and
+    PhotonOrbit's own two rendering options (dpi, lw); it omits --outdir,
+    since where to save a new copy is a per-invocation choice rather than
+    part of what produced this run. This reproduces the same trajectory
+    at the same resolution and line width, but NOT necessarily a byte-
+    identical PNG: Matplotlib's own defaults (fonts, colors, backend,
+    version) are not fixed or recorded here, and can vary between
+    environments.
     """
     def line(name, value):
         if value is None:
@@ -125,7 +129,17 @@ def _format_provenance(b, info, dpi, lw, GM_over_c2, r0, lambda_max, d_lambda):
 
 def _finish(fig, outdir, prefix, dpi, provenance=None):
     """Optionally save a timestamped PNG (and its provenance sidecar),
-    then display the figure."""
+    then display the figure.
+
+    If the process is interrupted between _reserve_unique_stem()
+    reserving the empty placeholder PNG and fig.savefig() completing (or
+    between that and the sidecar write), the placeholder can be left
+    behind as a zero-byte file, or a completed PNG can be left without
+    its sidecar. This is a narrow, low-risk residue of an abnormal
+    termination, not a collision or data-corruption issue -- a later run
+    simply reserves a different stem -- and is not cleaned up
+    automatically.
+    """
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
         _, png_path, sidecar_path = _reserve_unique_stem(outdir, prefix)

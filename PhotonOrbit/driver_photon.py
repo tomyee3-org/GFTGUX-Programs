@@ -49,8 +49,11 @@ def _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, dpi, lw, info):
     # sensitive near-separatrix b (e.g. the exact circular orbit at
     # b=3*sqrt(3)) back into the program unchanged. repr() below is the
     # shortest string that reconstructs the exact float, so this command
-    # line reproduces this run's physics and rendering exactly, not an
-    # approximation of it; add --outdir yourself to also save a new copy.
+    # line reproduces this run's exact physics inputs and PhotonOrbit's
+    # own two rendering options (dpi, lw), not an approximation of them;
+    # it does not fix or record Matplotlib's own defaults (fonts, colors,
+    # version), so a regenerated PNG is not guaranteed byte-identical.
+    # Add --outdir yourself to also save a new copy.
     print("  Reproduce this exact run with:")
     print(
         f"    python main.py --GM_over_c2 {GM_over_c2!r} --r0 {r0!r} "

@@ -7,7 +7,7 @@ geodesics in the equatorial plane of Schwarzschild spacetime.
 
 import math
 
-MODEL_VERSION = "1.3.0"
+MODEL_VERSION = "1.4.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -259,19 +259,37 @@ def integrate_photon_orbit(GM_over_c2, r0, b, lambda_max, d_lambda):
     escape_radius = 2.0 * r0
     _require_finite_derived("the escape radius (2*r0)", escape_radius)
 
+    # The local kinematic bound: the largest b for which an initially
+    # ingoing (or exactly tangential) null geodesic exists at r0. Compared
+    # directly against b -- with a small, fixed number-of-ulps tolerance,
+    # not the size of the initial-radicand residual computed below -- so
+    # that whether b is in range is decided by this one explicit
+    # comparison rather than by how wide a margin the (separately
+    # rounded) radicand expression happens to need. r0*sqrt(r0/(r0-r_s))
+    # is used rather than the algebraically equivalent r0/sqrt(1-r_s/r0)
+    # because it reaches the bit-identical representable value as
+    # 3*sqrt(3)*GM_over_c2 at EXP-7's r0=3*GM_over_c2, rather than one
+    # ulp below it. A few ulps of tolerance is kept anyway, since EXP-10
+    # documents the algebraically-equivalent-but-not-bit-identical
+    # r0/sqrt(1-r_s/r0) form for its own tangential-launch values, which
+    # can land one ulp to either side of this formula's result.
+    b_max = r0 * math.sqrt(r0 / (r0 - r_s))
+    if b > b_max + 4.0 * math.ulp(b_max):
+        raise ValueError(
+            "The requested b is incompatible with an initially ingoing null geodesic "
+            f"at r0={r0:g}. For these parameters, b must be <= {b_max:.8g}."
+        )
+
     # Ratio-first, matching radial_acceleration()/dphi_dlambda(): forming
     # L*L and r0*r0 separately can underflow both to 0.0 well before the
     # final radicand -- an ordinary, dimensionless-scale-invariant case --
     # becomes representable again once divided out.
     q0 = L / r0
     initial_radicand = E * E - q0 * q0 * (1.0 - r_s / r0)
-    tolerance = 1e-14 * max(1.0, E*E)
-    if initial_radicand < -tolerance:
-        b_max = r0 / math.sqrt(1.0 - r_s / r0)
-        raise ValueError(
-            "The requested b is incompatible with an initially ingoing null geodesic "
-            f"at r0={r0:g}. For these parameters, b must be <= {b_max:.8g}."
-        )
+    # b is now known to be within a few ulps of b_max (checked above);
+    # any negative value reaching here is a floating-point rounding
+    # residual from this expression's different order of operations, not
+    # evidence of an out-of-range b, so it is clamped unconditionally.
     initial_radicand = max(0.0, initial_radicand)
 
     r = r0

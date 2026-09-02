@@ -460,6 +460,118 @@ plot_photon.py docstrings or output):
         math.isfinite(value) check instead. Either way the caller still
         sees only the documented ValueError, never a raw exception, which
         is what both tests actually assert.
+
+  2026-09-02  Claude (principal developer).  Response to Audit3 (three
+    independent reviews of the Response-to-Audit2 package: Codex,
+    Copilot, Gemini). As with the two entries above, this is APPENDED,
+    not a replacement; full claim-by-claim dispositions are in the
+    accompanying Response-to-Audit3 report. This entry records only what
+    changed in the source tree and in this test file. No new P1 finding
+    was reported; Codex's Audit2 dispositions were independently
+    reverified and confirmed. This round addresses Codex's two P2 and two
+    P3 findings; Copilot's one informational finding required no code
+    change (already documented in the Response-to-Audit2 report; a
+    docstring note was added anyway for completeness).
+      * Codex A3-P2-2: TestProvenanceSidecar.test_exp7_circular_orbit_round_trip
+        asserted self.assertIn("lambda_max", result.stdout) against an
+        independent CLI rerun's output -- a false-positive oracle, since
+        every successful run's own printed "Reproduce this exact run
+        with:" command line contains the literal substring "--lambda_max"
+        regardless of the run's actual Status line, so the assertion
+        passed unconditionally rather than checking anything. The nearby
+        test_sidecar_status_matches_an_independent_rerun had the same
+        latent defect (a next(s for s in (...) if s in stdout) substring
+        scan), though its own "escaped" case did not happen to collide
+        with a CLI option name. Added parse_cli_status(), which parses
+        only the console summary's own "Status : <value>" line via a
+        multiline regular expression, and parse_cli_closest_approach()
+        for the companion numeric field; rewrote both tests to use exact
+        parsing and equality assertions instead of substring checks.
+        Added TestCoreSourceFreeOfAuditVocabulary's sibling for this
+        concern, TestCliStatusParsing, a mutation-style regression that
+        feeds parse_cli_status() stdout containing BOTH a real Status
+        line and a "--lambda_max" option string and confirms it returns
+        the Status line's value, not the option name -- proving the
+        specific failure mode this finding described cannot recur
+        silently.
+      * Codex A3-P2-1: softened the "exact rendering"/"exact ...
+        rendering reproduced" language in plot_photon.py's
+        _format_provenance() docstring, driver_photon.py's
+        _print_summary() commentary, and PhotonOrbit.html's Console-
+        summary and Provenance-sidecar table rows. The "Reproduce this
+        exact run with:" command does reproduce the exact physics inputs
+        and PhotonOrbit's own two explicit rendering options (dpi, lw),
+        which is what the addition of --lw/--dpi in the Audit2 round
+        actually accomplished; it does not fix or record Matplotlib's own
+        defaults (fonts, colors, backend, version), so a regenerated PNG
+        is not guaranteed byte-identical to the original. Verified this
+        distinction is real, not merely definitional, using Codex's own
+        method: plotted one trajectory twice under two different
+        matplotlib.rc_context() style overrides with identical physics
+        inputs, dpi, and lw; the two PNGs differed (confirming Matplotlib
+        style state does affect the saved image) while nothing PhotonOrbit
+        itself controls did. No code behavior changed -- this is a
+        documentation-accuracy correction, matching Codex's own
+        recommended resolution (soften the language) rather than
+        attempting to fix or record the full rendering environment.
+      * Codex A3-P3-1: integrate_photon_orbit()'s local-kinematic-bound
+        check previously gated acceptance on the size of the initial
+        radicand's own rounding residual (an absolute 1e-14 tolerance),
+        rather than on how far b actually is from the true bound -- a
+        window Codex showed, by repeated math.nextafter() probing, was
+        wide enough to accept a b value 30 representable floats above the
+        true bound at r0=3*GM_over_c2, silently clamp its (genuinely,
+        not just numerically, negative) radicand to zero, and report a
+        circular status=lambda_max trajectory that should have been
+        rejected -- undermining EXP-7's categorical statement that b
+        above the limit is rejected. Replaced the check with a direct
+        comparison of b against a local bound b_max = r0*sqrt(r0/(r0-r_s))
+        (rather than the algebraically equivalent r0/sqrt(1-r_s/r0)),
+        chosen because it reaches the bit-identical representable value
+        as 3*sqrt(3)*GM_over_c2 at EXP-7's r0=3*GM_over_c2, with a
+        tolerance of a few ulps (4) rather than a fixed absolute radicand
+        window -- tight enough to still reject Codex's 30-ulp-away probe,
+        loose enough to accept the up-to-1-ulp spread between this
+        formula and the algebraically equivalent r0/sqrt(1-r_s/r0) form
+        EXP-10 documents for its own tangential-launch b values. Verified
+        in a sandbox, before editing production code, that the new
+        formula reproduces 3*sqrt(3) bit-for-bit at r0=3 (the old formula
+        landed one ulp below it) and that both EXP-10 documented b values
+        (r0=6, r0=2.5) differ from the new internal b_max by exactly one
+        ulp each, safely inside the new tolerance. Added
+        test_b_a_few_representable_steps_above_the_bound_is_still_rejected,
+        which reproduces Codex's own probe distance via math.nextafter()
+        and asserts a b one representable step above the bound is
+        accepted while one 30 steps above is rejected.
+      * Codex A3-P3-2: added a clarifying sentence to PhotonOrbit.html's
+        Description section, at Delta phi's first definition, stating
+        explicitly that Delta phi is the accumulated Schwarzschild-
+        coordinate azimuth over the run's finite integration interval,
+        not the conventional asymptotic light-deflection angle (which is
+        not even defined for a captured trajectory), and that it should
+        be used to compare winding/whirling among matched runs rather
+        than read as a deflection-angle measurement.
+      * Copilot A3-1 (Informational; placeholder PNG persistence after
+        abnormal termination): required no code change -- this exact
+        residual risk (a crash between the atomic PNG placeholder
+        reservation and either fig.savefig() completing or the sidecar
+        write) was already stated in the Response-to-Audit2 report as a
+        deliberate, accepted trade-off (see that report's Codex P3-2
+        disposition). Added a short docstring note to plot_photon.py's
+        _finish() anyway, so the same statement is visible in the source
+        itself rather than only in a response report.
+      * MODEL_VERSION 1.3.0 -> 1.4.0 (a functional fix: the tightened
+        local-kinematic-bound check in integrate_photon_orbit() changes
+        which b values are accepted at the ulp scale near a local bound,
+        which is an observable behavior change, not merely new tests or
+        documentation); BUILD_ID recomputed automatically and the Help
+        file's #version_build element updated to match.
+      * Added regression coverage for every item above; no previously-
+        passing test was deleted or weakened. No existing test's
+        assertion was loosened; test_exp7_circular_orbit_round_trip and
+        test_sidecar_status_matches_an_independent_rerun had their
+        oracles tightened (substring match -> exact field parsing), which
+        is strictly stronger than what they checked before.
 """
 
 import ast
@@ -564,6 +676,33 @@ def run_cli(args, cwd=MODULE_DIR, timeout=60):
         timeout=timeout,
         check=False,
     )
+
+
+def parse_cli_status(stdout):
+    """Parse the value of the console summary's own "Status : <value>"
+    line, rather than checking whether a status name occurs ANYWHERE in
+    stdout.
+
+    Audit3 Codex A3-P2-2: every successful run's own "Reproduce this
+    exact run with:" command line contains the literal substring
+    "--lambda_max", so a plain assertIn("lambda_max", stdout) or a
+    substring-membership scan over the whole output passes regardless of
+    what the run's actual Status line says -- it was matching the CLI
+    OPTION name, not the outcome. This parses only the one line the
+    console summary uses for the outcome field.
+    """
+    match = re.search(r"^\s*Status\s*:\s*(captured|escaped|lambda_max)\s*$",
+                       stdout, re.M)
+    return match.group(1) if match else None
+
+
+def parse_cli_closest_approach(stdout):
+    """Parse the console summary's "Closest approach : <value>" line as a
+    float (rounded to 6 significant digits, matching the console's own
+    display precision)."""
+    match = re.search(r"^\s*Closest approach\s*:\s*([-+0-9.eE]+)\s*$",
+                       stdout, re.M)
+    return float(match.group(1)) if match else None
 
 
 class FrozenDatetime(datetime):
@@ -1265,6 +1404,43 @@ class TestCircularPhotonOrbit(unittest.TestCase):
                 lambda_max=10.0, d_lambda=0.01,
             )
 
+    def test_b_a_few_representable_steps_above_the_bound_is_still_rejected(self):
+        """Audit3 Codex A3-P3-1: the old check gated acceptance on the size
+        of the initial-radicand residual, using a fixed absolute tolerance
+        (1e-14) that was far wider than the one-or-two-ulp rounding noise
+        it was meant to cover -- repeated math.nextafter() probing found
+        the first value the old code actually rejected was 30 representable
+        floats above the true bound, so a physically-forbidden b in that
+        gap was silently accepted, clamped to a zero radicand, and
+        returned status=lambda_max as if it were the exact circular orbit.
+        b now must be within a handful of ulps of the directly-computed
+        local bound (see integrate_photon_orbit's b_max), which accepts
+        the ~1-ulp spread between algebraically equivalent formulas (see
+        test_exact_circular_orbit_stays_on_photon_sphere and EXP-10's own
+        r0/sqrt(1-r_s/r0) form) while rejecting a value dozens of ulps
+        away, exactly the gap this reproduces.
+        """
+        b_crit = 3.0 * math.sqrt(3.0)  # bit-identical to the internal b_max at r0=3
+        just_above = math.nextafter(b_crit, math.inf)
+        far_enough_above = b_crit
+        for _ in range(30):  # 30 representable steps, matching Codex's own probe
+            far_enough_above = math.nextafter(far_enough_above, math.inf)
+
+        # A single representable step above the bound is accepted (well
+        # within the handful-of-ulps tolerance).
+        _, _, info = phys.integrate_photon_orbit(
+            GM_over_c2=1.0, r0=3.0, b=just_above, lambda_max=10.0, d_lambda=0.01,
+        )
+        self.assertEqual(info["status"], "lambda_max")
+
+        # Genuinely out of range -- physically forbidden, not rounding
+        # noise -- must still be rejected with the documented ValueError.
+        with self.assertRaisesRegex(ValueError, r"b must be <= 5\.196"):
+            phys.integrate_photon_orbit(
+                GM_over_c2=1.0, r0=3.0, b=far_enough_above,
+                lambda_max=10.0, d_lambda=0.01,
+            )
+
     def test_slightly_reduced_b_at_photon_sphere_is_captured(self):
         _, _, info = phys.integrate_photon_orbit(
             GM_over_c2=1.0, r0=3.0, b=5.196152, lambda_max=200.0, d_lambda=0.01,
@@ -1799,7 +1975,19 @@ class TestProvenanceSidecar(unittest.TestCase):
         """The sidecar's recorded status must equal the status an
         independent CLI rerun of the exact same inputs actually produces,
         not merely contain a string that happens to occur somewhere in
-        the rerun's stdout (Audit2 Codex P2-1)."""
+        the rerun's stdout (Audit2 Codex P2-1).
+
+        Audit3 Codex A3-P2-2: the original version of this test parsed
+        the rerun's status with
+        next(s for s in (...) if s in result.stdout) -- a substring
+        membership check that happens not to misfire for THIS test's
+        "escaped" case, but would silently match "lambda_max" against the
+        --lambda_max CLI option printed in every run's own reproduce
+        command, exactly the false-positive pattern that broke
+        test_exp7_circular_orbit_round_trip below. Uses the shared
+        parse_cli_status() helper, which reads only the Status line
+        itself, for both tests now.
+        """
         GM_over_c2, r0, b, lambda_max, d_lambda = 1.0, 20.0, 6.0, 200.0, 0.01
         text, info = self._run_and_read_sidecar(GM_over_c2, r0, b, lambda_max, d_lambda)
         recorded_status = self._parse_sidecar_field(text, "status")
@@ -1809,9 +1997,8 @@ class TestProvenanceSidecar(unittest.TestCase):
                            "--b", repr(b), "--lambda_max", repr(lambda_max),
                            "--d_lambda", repr(d_lambda)])
         self.assertEqual(result.returncode, 0, result.stderr)
-        rerun_status = next(
-            s for s in ("captured", "escaped", "lambda_max") if s in result.stdout
-        )
+        rerun_status = parse_cli_status(result.stdout)
+        self.assertIsNotNone(rerun_status, result.stdout)
         self.assertEqual(recorded_status, rerun_status)
 
     def test_sidecar_contains_a_working_reproduce_with_command(self):
@@ -1840,7 +2027,17 @@ class TestProvenanceSidecar(unittest.TestCase):
         EXP-7 circular orbit (r0=3, b=3*sqrt(3), lambda_max=200) must
         round-trip to status=lambda_max and closest_approach=3, not the
         r0=20 near-critical scattering case exercised elsewhere in this
-        class."""
+        class.
+
+        Audit3 Codex A3-P2-2: the original version of this test asserted
+        self.assertIn("lambda_max", result.stdout), which is a false-
+        positive oracle -- EVERY successful run's console summary prints
+        a "--lambda_max <value>" CLI option in its own reproduce command,
+        so this assertion passed regardless of what the rerun's actual
+        Status line said. Now parses the Status line itself (via the
+        shared parse_cli_status() helper) and the Closest approach line,
+        and compares both against the in-process result.
+        """
         GM_over_c2 = 1.0
         r0 = 3.0
         b = 3.0 * math.sqrt(3.0)
@@ -1856,7 +2053,8 @@ class TestProvenanceSidecar(unittest.TestCase):
         args = match.group(0).strip().split()[2:]
         result = run_cli(args)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("lambda_max", result.stdout)
+        self.assertEqual(parse_cli_status(result.stdout), "lambda_max")
+        self.assertAlmostEqual(parse_cli_closest_approach(result.stdout), 3.0, places=5)
 
     def test_sidecar_omits_reproduce_command_when_physics_params_not_supplied(self):
         x, y, info = phys.integrate_photon_orbit(
@@ -1902,6 +2100,40 @@ class TestProvenanceSidecar(unittest.TestCase):
         command = match.group(0).strip()
         self.assertIn("--dpi 222", command)
         self.assertIn("--lw 3.25", command)
+
+
+# ======================================================================
+class TestCliStatusParsing(unittest.TestCase):
+    """Audit3 Codex A3-P2-2: a mutation-style regression proving
+    parse_cli_status() reads the actual "Status : <value>" line rather
+    than matching a status name as a substring anywhere in stdout. The
+    defect this replaces (self.assertIn("lambda_max", result.stdout) in
+    test_exp7_circular_orbit_round_trip) passed unconditionally, because
+    every successful run's own "Reproduce this exact run with:" command
+    line contains the literal substring "--lambda_max" regardless of the
+    run's actual outcome. This directly feeds the parser stdout
+    containing BOTH a real Status line and that option name, and confirms
+    it returns the Status line's value, not "lambda_max".
+    """
+
+    def test_status_line_is_parsed_even_when_stdout_also_contains_the_lambda_max_option(self):
+        stdout = (
+            "  Status               : captured\n"
+            "  Reproduce this exact run with:\n"
+            "    python main.py --GM_over_c2 1.0 --r0 20.0 --b 5.0 "
+            "--lambda_max 200.0 --d_lambda 0.01 --lw 1.5 --dpi 150\n"
+        )
+        self.assertIn("lambda_max", stdout)  # the CLI option name is present ...
+        self.assertEqual(parse_cli_status(stdout), "captured")  # ... but is not what is returned
+
+    def test_status_line_parses_each_documented_value(self):
+        for status in ("captured", "escaped", "lambda_max"):
+            with self.subTest(status=status):
+                stdout = f"  Status               : {status}\n"
+                self.assertEqual(parse_cli_status(stdout), status)
+
+    def test_returns_none_when_no_status_line_present(self):
+        self.assertIsNone(parse_cli_status("PhotonOrbit: some error message\n"))
 
 
 # ======================================================================
