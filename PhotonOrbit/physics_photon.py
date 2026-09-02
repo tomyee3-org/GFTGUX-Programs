@@ -7,7 +7,7 @@ geodesics in the equatorial plane of Schwarzschild spacetime.
 
 import math
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.1.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only

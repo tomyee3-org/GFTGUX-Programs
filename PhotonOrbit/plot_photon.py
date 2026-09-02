@@ -20,11 +20,36 @@ def _timestamp_name(prefix):
     return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
 
 
+def _unique_path(outdir, prefix):
+    """
+    Return a PNG path in `outdir` for `prefix` that does not already exist.
+
+    Two runs with the same impact parameter and outcome status (for example
+    the repeated d_lambda convergence runs of EXP-9) that both land in the
+    same wall-clock second would otherwise collide on
+    `_timestamp_name(prefix)` and the second run would silently overwrite
+    the first, discarding it with no warning. If the plain timestamped name
+    is already taken, this appends "_2", "_3", ... until an unused name is
+    found, so every saved run is kept.
+    """
+    base = _timestamp_name(prefix)
+    path = os.path.join(outdir, base)
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(base)
+    n = 2
+    while True:
+        candidate = os.path.join(outdir, f"{stem}_{n}{ext}")
+        if not os.path.exists(candidate):
+            return candidate
+        n += 1
+
+
 def _finish(fig, outdir, prefix, dpi):
     """Optionally save a timestamped PNG, then display the figure."""
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        path = os.path.join(outdir, _timestamp_name(prefix))
+        path = _unique_path(outdir, prefix)
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
         print(f"[plot_photon] PNG saved -> {path}")
     print("[plot_photon] Displaying figure on screen ...")

@@ -22,7 +22,7 @@ def _validate_plot_inputs(dpi, lw):
     return int(dpi), lw
 
 
-def _print_summary(GM_over_c2, r0, b, lambda_max, info):
+def _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, info):
     W = 62
     sep = "-" * W
     print(sep)
@@ -41,6 +41,7 @@ def _print_summary(GM_over_c2, r0, b, lambda_max, info):
     print(f"  Closest approach     : {info['closest_approach']:.6g}")
     print(f"  Delta phi            : {info['delta_phi']:.6g} rad")
     print(f"  Affine parameter     : {info['lambda_final']:.6g}  (of {lambda_max:.6g} requested)")
+    print(f"  RK4 step size d_lambda: {d_lambda:.6g}")
     print(f"  RK4 steps taken      : {info['steps']:,}")
     print(sep)
 
@@ -69,6 +70,6 @@ def driver_photon_orbit(
         lambda_max=lambda_max,
         d_lambda=d_lambda,
     )
-    _print_summary(GM_over_c2, r0, b, lambda_max, info)
+    _print_summary(GM_over_c2, r0, b, lambda_max, d_lambda, info)
     plot_photon_orbit(x_vals, y_vals, b, info, outdir=outdir, dpi=dpi, lw=lw)
     return info
