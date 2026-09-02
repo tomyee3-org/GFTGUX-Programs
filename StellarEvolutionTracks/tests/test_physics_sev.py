@@ -184,11 +184,147 @@ plot_sev.py docstrings or output):
         "more compact than a black hole"; a note on how to hit an exact
         central density outside the CLI's geometric grid; and the explicit
         Eobs = Eemit/(1+z) relation).
+
+  2026-09-01  Claude (principal developer).  Response to Audit2 (Gemini,
+    Codex, Copilot reviewing the Response-to-Audit1 round).  Version
+    1.2.0 -> 1.3.0, BUILD_ID e6b4674d23c6 -> 7703fa47bf20.  Full
+    disposition of every finding is in StellarEvolutionTracks-Claude-
+    Response-to-Audit2-20260901.txt; this entry lists only what changed
+    in the source tree.
+      * Fixed two release-blocking (P1) defects Codex confirmed with
+        reproducers against the 1.2.0 build: (1) the Audit1 fix that made
+        integrate_track()'s own remnant_kind/phase_end/helium_ignition
+        fields internally consistent for a low-mass non-igniting track did
+        not reach any of the fields' CONSUMERS -- driver_sev.py's terminal
+        text, its CSV comment, plot_sev.py's plot annotation, main.py's
+        module docstring, and the Help's global description all still
+        unconditionally stated the old, now-sometimes-false "classification
+        from the initial mass, not an integrated result" sentence.  Added
+        a remnant_basis summary field ("this track's own post-main-sequence
+        integration" vs. "mass-only schematic classification") and made
+        every one of those five consumers branch on it; also reworded the
+        low-mass-cap remnant_note and phase_end text (previously "the
+        integration found the hydrogen envelope exhausted", which overstates
+        what a mass-bookkeeping cap with no modeled envelope-ejection
+        physics actually computed) to describe it as reaching this
+        schematic model's core-mass cap, not as a found physical outcome.
+        (2) wd_structure()'s bisection loop returned the last evaluated
+        (rho_c, M, R) tuple after max_iter iterations regardless of whether
+        tol was met -- max_iter=1 against the default bracket for a
+        0.6-Msun target returned a mass 58% off target with no error.  It
+        now raises RuntimeError, reporting max_iter, tol, the achieved
+        residual, and the final bracket, whenever the loop exhausts
+        max_iter without converging.
+      * Fixed six P2 correctness/reproducibility/test defects: (a)
+        FermiGasEOS.pressure()/energy_density() subtracted two nearly-equal
+        terms and lost essentially all significant digits below x ~ 1e-4
+        (by x=1e-5 pressure() returned a negative, unphysical value) --
+        both now switch to the exact small-x Taylor series (independently
+        derived and confirmed against a symbolic expansion of the closed
+        form) below a new _FERMI_SMALL_X=0.05 threshold, agreeing with the
+        closed form to better than 1e-10 relative accuracy there. (b)
+        ns_mass_radius_curve()'s per-density failure reasons
+        (warnings_detail, added in the Audit1 round) were never actually
+        printed or written to CSV, and the CSV's branch column labelled
+        every raw index <= i_max "stable" and every index > i_max
+        "unstable" without checking whether that row's model had converged
+        at all, mislabelling nan-mass/nan-radius rows as unstable stellar
+        models -- driver_sev.py now prints a "PER-MODEL FAILURE DETAIL"
+        section and writes each reason into the CSV, and a non-converged
+        row is now labelled "failed", never "stable"/"unstable". (c) a
+        saved PNG still could not reproduce its own run: the on-figure
+        footer answers "which code", not "which run" -- plot_sev.py now
+        writes a plain-text provenance sidecar (every mode-relevant
+        parameter, the same list already written into a CSV's header)
+        next to every saved PNG unconditionally, whether or not --csvdir
+        was also requested. (d) wd_structure()'s new
+        max_bracket_expansions parameter (Audit1) was itself unvalidated
+        (negative/fractional/non-finite values silently accepted on the
+        no-expansion-needed path) and wd_structure() did not require
+        rho_hi > rho_lo the way its sibling curve functions already did --
+        both are now validated. (e) the same-second collision regression
+        tests performed two real writes without freezing the clock, so
+        they could pass even against the old broken implementation if the
+        two writes happened to land in different wall-clock seconds --
+        both tests now mock datetime.now() to force the collision and
+        assert the exact expected "_2" disambiguated filename. (f)
+        ns_mass_radius_curve()'s turning-point check required only that
+        SOME converged point exist on each side of the sampled maximum,
+        which is satisfied even when the maximum's own immediate neighbor
+        failed to converge -- a larger true mass could be hiding in that
+        adjacent gap.  turning_point now additionally requires both of
+        i_max's immediate neighbors to have converged, with a new,
+        distinct warning ("largest converged sampled mass ... unresolved
+        across that convergence gap") when the interior-maximum condition
+        holds but a neighbor did not converge.
+      * Fixed the remaining P3 items: R_EARTH was still the old rounded
+        6.371e6 m literal despite being labelled "IUGG mean Earth radius"
+        (an 8.77 m/1.4 ppm mismatch against the actual IUGG/GRS80 value,
+        Moritz 2000) -- now the cited value itself, 6,371,008.7714 m; the
+        Help's post-main-sequence regime description said "Below 2 solar
+        masses" / "Above 2 solar masses", leaving the actual m=2 Msun
+        implementation boundary (m_msun <= 2.0) unstated in prose -- now
+        "at or below 2 solar masses", with the boundary made explicit; the
+        --Tc_end parameter row did not mention the 100 K floor stated only
+        in the general safeguards paragraph -- now stated in the row
+        itself; and several public-API validation gaps were closed
+        together: build_hr_grid()'s isochrone_gyr is now normalized to a
+        validated plain list up front (fixing a TypeError on a generator,
+        an ambiguous-truth-value ValueError on a NumPy array, and silently
+        accepted duplicate ages, which are now rejected the same way
+        duplicate masses already were); turnoff_mass() validates age_gyr
+        before taking its log; zams_curve() validates m_lo/m_hi/n;
+        default_burning()/default_core_fraction() validate their mass
+        argument; and a new _require_bool() helper is now applied to
+        integrate_track()'s include_postms/homology_zams,
+        integrate_structure()'s relativistic/keep_profile, and
+        ns_mass_radius_curve()'s relativistic, so a non-bool "truthy"
+        value (e.g. the string "False") is rejected explicitly rather than
+        silently reinterpreted by Python's ordinary truthiness rules.
+      * Strengthened one conditional test Codex re-flagged as still
+        vacuous under the right regression:
+        test_stiff_polytrope_can_be_made_acausal_and_is_flagged guarded
+        its only assertions behind "if cs_over_c_max_branch > 1.0"; the
+        chosen (gamma, p_nuc) case is independently verified to be
+        reliably acausal (peak c_s/c = 1.7359), so that outcome and the
+        flag/warning it must produce are now asserted unconditionally.
+        Added end-to-end tests that inspect actual printed terminal text,
+        actual CSV comment lines, and actual plot-annotation text for the
+        low-mass remnant case (Codex's specific point that the previous
+        round's regression test checked only physics-summary fields,
+        leaving every user-visible output layer free to contradict them);
+        a deterministic mocked-failure test for the new gap-adjacent-to-
+        the-peak turning-point rule; postcondition tests for
+        wd_structure()'s convergence enforcement and its now-validated
+        max_bracket_expansions/rho bracket ordering; small-x positivity,
+        Taylor-series-agreement, cross-boundary-continuity, and array-
+        safety tests for the Fermi-gas EOS fix; and a failed-row-labelling
+        plus warnings_detail-surfaced test for the neutron-star CSV fix.
+      * Declined, with rationale recorded in the Response-to-Audit2
+        report: Codex's H5/H4-style requests for a fuller slope-sign-
+        change/local-refinement turning-point criterion beyond the
+        interior-neighbor check now added (the interior-neighbor
+        requirement already closes every concrete reproducer given; a
+        fuller refinement scheme is a numerical-methods design project of
+        its own); a cross-process atomic-exclusive-create guarantee for
+        the same-second collision fix (the fix closes the sequential,
+        same-process race the regression tests exercise; a true
+        multi-process TOCTOU guarantee is a distinct, larger concern);
+        Copilot's boolean-type-checking request beyond the specific
+        parameters listed above (applied to the module's most-used direct
+        entry points rather than exhaustively to every remaining flag);
+        and build_hr_grid() pre-validating each mass against the 0.08-120
+        Msun range before starting expensive work (integrate_track()
+        already validates immediately and fails fast within that same
+        call; the deferred item is purely about failing even earlier, not
+        about correctness).
 """
 
 import ast
 from collections import Counter
+import contextlib
 import csv as csv_module
+from datetime import datetime
 import hashlib
 from html.parser import HTMLParser
 import inspect
@@ -479,7 +615,11 @@ class TestPhysicalConstants(unittest.TestCase):
                                 delta=1.0e10)
 
     def test_earth_radius_constant_matches_km_conventions(self):
-        self.assertAlmostEqual(phys.R_EARTH, 6.371e6, delta=1.0)
+        # Audit2 P3-1 (Codex): the previous version of this test asserted
+        # the OLD rounded 6.371e6 m literal to within 1 m, which enshrined
+        # an 8.77 m mismatch against the actual IUGG/GRS80 mean radius
+        # while calling it IUGG.  R_EARTH is now the cited value itself.
+        self.assertAlmostEqual(phys.R_EARTH, 6_371_008.7714, delta=0.001)
 
     def test_year_and_gigayear(self):
         # The source comment labels YEAR as "the Julian year (365.25 d)",
@@ -761,12 +901,22 @@ class TestTrackIntegration(unittest.TestCase):
                 self.assertEqual(s["remnant_kind"], "helium white dwarf")
                 self.assertFalse(s["helium_ignition"])
                 self.assertAlmostEqual(s["remnant_msun"], s["mc_ign"], delta=1e-9)
+                # Audit2 P1-1 (Codex): remnant_basis must say this came
+                # from the track's own integration, not the mass-only
+                # classifier -- every consumer of the summary branches on
+                # this field to avoid repeating (or contradicting) a fixed
+                # "classification from the initial mass" sentence that is
+                # simply false for this case.
+                self.assertEqual(s["remnant_basis"],
+                                 "this track's own post-main-sequence integration")
         # Just above the 0.47/0.70 boundary (~0.6714 Msun) the star DOES
         # flash, and the ordinary mass-based classification is restored.
         s_flash = phys.integrate_track(m_msun=0.68, t_max_gyr=1000.0)["summary"]
         self.assertIn("helium flash", s_flash["phase_end"])
         self.assertEqual(s_flash["remnant_kind"], "carbon-oxygen white dwarf")
         self.assertTrue(s_flash["helium_ignition"])
+        self.assertEqual(s_flash["remnant_basis"],
+                         "mass-only schematic classification")
 
     def test_central_hydrogen_is_monotonically_non_increasing_on_ms(self):
         result = phys.integrate_track(m_msun=1.0, include_postms=False)
@@ -1041,6 +1191,81 @@ class TestFermiGasEos(unittest.TestCase):
         slope = math.log(p2 / p1) / math.log(x2 / x1)
         self.assertAlmostEqual(slope, 4.0, places=2)
 
+    def test_pressure_and_energy_density_stay_positive_at_small_x(self):
+        # Regression test for Audit2 P2-1 (Codex reproducer): the closed-
+        # form pressure()/energy_density() expressions subtract two
+        # nearly-equal terms, and lose essentially all significant digits
+        # well before x reaches 1e-4 -- direct evaluation there used to
+        # underflow to exactly 0.0, and by x=1e-5 it went slightly
+        # NEGATIVE, which is unphysical for a degenerate-gas pressure.
+        # This spans several decades below the y_floor=1e-8 default used
+        # by integrate_structure(), which is where these values actually
+        # get evaluated during a structure integration's outer steps.
+        for xe in range(1, 12):
+            x = 10.0 ** (-xe)
+            with self.subTest(x=x):
+                self.assertGreater(self.eos.pressure(x), 0.0)
+                self.assertGreater(self.eos.energy_density(x), 0.0)
+
+    def test_small_x_pressure_and_energy_density_agree_with_taylor_series(self):
+        # Independent oracle: the exact Taylor series of the closed-form
+        # expression (obtained symbolically, not by re-deriving the
+        # module's own formula), evaluated in Python floats.  P/A and
+        # eps/A both approach 3x as x -> 0 from two nearly-cancelling
+        # terms; the leading-order series terms below are what survives
+        # after that cancellation and is what the closed form would give
+        # at infinite precision.
+        A = self.eos.A
+        for xe in (2, 3, 4, 5, 6, 8, 10):
+            x = 10.0 ** (-xe)
+            with self.subTest(x=x):
+                p_series = A * (1.6 * x**5 - (4.0 / 7.0) * x**7)
+                e_series = A * (8.0 * x**3 + 2.4 * x**5)
+                p = float(self.eos.pressure(x))
+                e = float(self.eos.energy_density(x))
+                self.assertAlmostEqual(p / p_series, 1.0, delta=1.0e-6)
+                self.assertAlmostEqual(e / e_series, 1.0, delta=1.0e-6)
+
+    def test_pressure_and_energy_density_are_continuous_across_the_small_x_switch(self):
+        # The switch from the closed form to the small-x series happens
+        # at _FERMI_SMALL_X.  P and E are smooth power laws there (P ~
+        # x^5, E ~ x^3 to leading order), so a tiny step across the
+        # boundary is NOT expected to leave the ratio near exactly 1 --
+        # it should match the ordinary power-law ratio to high precision,
+        # with no additional artificial kink from the formula switch
+        # itself.
+        eps = 1.0e-6
+        x_lo = phys._FERMI_SMALL_X * (1.0 - eps)
+        x_hi = phys._FERMI_SMALL_X * (1.0 + eps)
+        p_lo, p_hi = self.eos.pressure(x_lo), self.eos.pressure(x_hi)
+        e_lo, e_hi = self.eos.energy_density(x_lo), self.eos.energy_density(x_hi)
+        expected_p_ratio = (x_lo / x_hi) ** 5.0
+        expected_e_ratio = (x_lo / x_hi) ** 3.0
+        self.assertAlmostEqual(float(p_lo / p_hi) / expected_p_ratio, 1.0,
+                               delta=1.0e-6)
+        self.assertAlmostEqual(float(e_lo / e_hi) / expected_e_ratio, 1.0,
+                               delta=1.0e-6)
+
+    def test_pressure_and_energy_density_small_x_path_is_array_safe(self):
+        # The small-x branch must handle a mixed array (some elements
+        # below the threshold, some above) exactly the same as evaluating
+        # each element individually -- this is the code path actually
+        # used by wd_mass_radius_curve()/ns_mass_radius_curve(), which
+        # call these methods with scalars, but dP_dx and other internals
+        # historically assumed array input, so this is checked directly.
+        xs = np.array([1.0e-6, 1.0e-3, 0.02, 0.05, 0.2, 1.0, 5.0])
+        p_array = self.eos.pressure(xs)
+        e_array = self.eos.energy_density(xs)
+        for i, x in enumerate(xs):
+            self.assertAlmostEqual(float(p_array[i]),
+                                   float(self.eos.pressure(float(x))),
+                                   delta=abs(float(p_array[i])) * 1e-9 + 1e-300)
+            self.assertAlmostEqual(float(e_array[i]),
+                                   float(self.eos.energy_density(float(x))),
+                                   delta=abs(float(e_array[i])) * 1e-9 + 1e-300)
+        self.assertTrue(np.all(p_array > 0.0))
+        self.assertTrue(np.all(e_array > 0.0))
+
     def test_sound_speed_matches_numerical_dP_deps(self):
         # Independent numerical derivative dP/d(energy density), NOT a
         # call into the analytic sound_speed_ratio formula's own algebra.
@@ -1277,6 +1502,51 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Chandrasekhar"):
             phys.wd_structure(0.999 * mch, mu_e=2.0)
 
+    def test_wd_structure_raises_when_max_iter_is_exhausted_unconverged(self):
+        # Regression test for Audit2 P1-2 (Codex reproducer): wd_structure
+        # used to return the last evaluated (rho_c, M, R) tuple after
+        # max_iter iterations even when nowhere near tol, indistinguishable
+        # from an ordinary successful result.  max_iter=1 against the
+        # default bracket for a 0.6-Msun target leaves a 58% relative
+        # error; this must now raise instead of returning that value.
+        with self.assertRaisesRegex(RuntimeError, "did not converge"):
+            phys.wd_structure(0.6, tol=1.0e-5, max_iter=1)
+
+    def test_wd_structure_converged_result_satisfies_tol(self):
+        # Postcondition companion to the test above: an ordinary call that
+        # DOES have enough iterations to converge must return a mass that
+        # actually satisfies the requested tolerance, not merely "some
+        # value close enough that nobody checked".
+        tol = 1.0e-6
+        rho_c, M_kg, R_m = phys.wd_structure(0.6, mu_e=2.0, tol=tol)
+        target = 0.6 * phys.M_sun
+        self.assertLess(abs(M_kg - target) / target, tol)
+
+    def test_wd_structure_validates_max_bracket_expansions(self):
+        # Regression test for Audit2 P2-4 (Codex): max_bracket_expansions
+        # was accepted completely unvalidated -- negative, fractional, and
+        # non-finite values were all silently accepted whenever the
+        # initial bracket already happened to contain the target.
+        for bad in (-1, 1.5, float("nan")):
+            with self.assertRaises(ValueError):
+                phys.wd_structure(0.6, mu_e=2.0, max_bracket_expansions=bad)
+        # A numeric string is unambiguous and is accepted, same as every
+        # other numeric-looking parameter in this module.
+        rho_c, M_kg, R_m = phys.wd_structure(0.6, mu_e=2.0,
+                                             max_bracket_expansions="3")
+        self.assertAlmostEqual(M_kg / phys.M_sun, 0.6, delta=1e-4)
+
+    def test_wd_structure_rejects_reversed_or_equal_density_bracket(self):
+        # Regression test for Audit2 P2-4 (Copilot/Codex): wd_structure did
+        # not require rho_hi > rho_lo the way wd_mass_radius_curve() and
+        # ns_mass_radius_curve() already did, so a reversed starting
+        # bracket was silently handed to the bisection search instead of
+        # being refused up front.
+        with self.assertRaises(ValueError):
+            phys.wd_structure(0.6, mu_e=2.0, rho_lo=1.0e13, rho_hi=1.0e7)
+        with self.assertRaises(ValueError):
+            phys.wd_structure(0.6, mu_e=2.0, rho_lo=1.0e10, rho_hi=1.0e10)
+
     def test_mestel_constant_k1_matches_the_exact_nonrelativistic_eos(self):
         # Independent check of the non-relativistic degenerate-pressure
         # constant K1 used inside mestel_constant: at small x the exact
@@ -1491,6 +1761,39 @@ class TestNeutronStarSequence(unittest.TestCase):
         self.assertTrue(any("lower" in w.lower() and "rho_lo" in w
                              for w in s["warnings"]))
 
+    def test_turning_point_unresolved_across_a_convergence_gap_next_to_the_peak(self):
+        # Regression test for Audit2 P2-6 (Codex): requiring SOME
+        # converged point on each side of the sampled maximum (the
+        # Audit1 P1-1 fix) is not enough -- if the maximum's own
+        # immediate neighbor failed to converge, the true maximum could
+        # be hiding inside that unresolved gap and must not be reported
+        # as a resolved turning point.  Under these exact parameters
+        # (verified with no forced failures) the sampled maximum falls
+        # naturally at raw index 9 of 16; forcing the very next density
+        # (index 10) to fail reproduces a convergence gap immediately
+        # adjacent to the peak.
+        real_integrate_structure = phys.integrate_structure
+        call_count = [0]
+
+        def fake_integrate_structure(*args, **kwargs):
+            i = call_count[0]
+            call_count[0] += 1
+            if i == 10:
+                raise RuntimeError("forced convergence gap for this test")
+            return real_integrate_structure(*args, **kwargs)
+
+        with mock.patch.object(phys, "integrate_structure",
+                               side_effect=fake_integrate_structure):
+            result = phys.ns_mass_radius_curve(eos_name="neutron", n=16,
+                                               rho_lo=1.0e17, rho_hi=5.0e19)
+        s = result["summary"]
+        self.assertEqual(result["i_max"], 9)
+        self.assertFalse(math.isfinite(result["M"][10]))
+        self.assertFalse(s["turning_point"])
+        self.assertFalse(s["stable_branch"])
+        self.assertTrue(any("unresolved across" in w and "gap" in w
+                             for w in s["warnings"]))
+
     def test_gm_over_rc2_is_always_reported_relativistic_or_not(self):
         rel = phys.ns_mass_radius_curve(eos_name="neutron", n=16,
                                         rho_lo=1.0e17, rho_hi=5.0e19,
@@ -1519,13 +1822,20 @@ class TestNeutronStarSequence(unittest.TestCase):
         self.assertAlmostEqual(result["z"][i], expected_z, delta=1e-6)
 
     def test_stiff_polytrope_can_be_made_acausal_and_is_flagged(self):
+        # Regression test for Audit2 P3-4 (Codex): this test used to guard
+        # its only assertions behind "if cs_over_c_max_branch > 1.0",
+        # which means a regression that accidentally made the chosen case
+        # causal would make the test vacuously pass instead of failing.
+        # This exact (gamma, p_nuc) combination is independently verified
+        # to be acausal (peak c_s/c = 1.7359), so that outcome, and the
+        # flag/warning it must produce, are now asserted unconditionally.
         result = phys.ns_mass_radius_curve(eos_name="polytrope", n=16,
                                            rho_lo=1.0e17, rho_hi=5.0e19,
                                            gamma=5.0, p_nuc=0.9)
         s = result["summary"]
-        if s["cs_over_c_max_branch"] > 1.0:
-            self.assertFalse(s["causal"])
-            self.assertTrue(any("acausal" in w for w in s["warnings"]))
+        self.assertAlmostEqual(s["cs_over_c_max_branch"], 1.7359, delta=0.01)
+        self.assertFalse(s["causal"])
+        self.assertTrue(any("acausal" in w for w in s["warnings"]))
 
     def test_rho_hi_must_exceed_rho_lo(self):
         with self.assertRaises(ValueError):
@@ -1658,14 +1968,76 @@ class TestCsvOutput(unittest.TestCase):
         self.assertIn("NumPy", joined)
         self.assertIn("Matplotlib", joined)
 
-    def test_two_runs_in_the_same_second_do_not_overwrite_each_other(self):
-        # Regression test for Audit1 P2-5: two CSVs written with the same
-        # prefix inside the same wall-clock second used to collide on
-        # filename and silently overwrite one another.
-        driver.run(mode="tracks", mass=1.0, no_plot=True, csvdir=self.tmp)
-        driver.run(mode="tracks", mass=1.0, no_plot=True, csvdir=self.tmp)
+    def test_low_mass_remnant_wording_agrees_across_terminal_and_csv(self):
+        # Regression test for Audit2 P1-1 (Codex reproducer, mass=0.60,
+        # t_max=1000): the Audit1 fix made physics_sev.py's own summary
+        # fields self-consistent (remnant_kind/phase_end/helium_ignition
+        # all agree), but driver_sev.py's TERMINAL text and CSV comment
+        # still unconditionally printed the old, now-false "classification
+        # from the initial mass, not an integrated result" sentence for
+        # every run, contradicting the summary sitting right above it in
+        # the very same output.  This test inspects the actual printed
+        # text and the actual CSV comment line -- not just summary dict
+        # fields -- which is exactly what the previous round's regression
+        # test failed to do.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = driver.run(mode="tracks", mass=0.60, t_max=1000.0,
+                                n_ms=200, n_post=200, no_plot=True,
+                                csvdir=self.tmp)
+        s = result["summary"]
+        self.assertEqual(s["remnant_kind"], "helium white dwarf")
+        self.assertEqual(s["remnant_basis"],
+                         "this track's own post-main-sequence integration")
+        terminal = buf.getvalue()
+        self.assertIn("This remnant comes from the track's OWN "
+                      "post-main-sequence", terminal)
+        # The old blanket "classification from the initial mass, not an
+        # integrated result" sentence must NOT appear for this run: it is
+        # simply false here, and printing it alongside the corrected
+        # sentence above would just relocate the contradiction rather
+        # than fix it.
+        self.assertNotIn("classification from the initial mass, not an\n"
+                         "  integrated result", terminal)
         files = [f for f in os.listdir(self.tmp) if f.startswith("sev_track_")]
+        comments, _ = self._read_csv(os.path.join(self.tmp, files[0]))
+        joined = "".join(comments)
+        self.assertIn("helium white dwarf", joined)
+        self.assertIn("this track's own post-main-sequence integration, "
+                      "not a mass-only classification", joined)
+        self.assertNotIn("(not an integrated result)", joined)
+
+    def test_two_runs_in_the_same_second_do_not_overwrite_each_other(self):
+        # Regression test for Audit1 P2-5, strengthened for Audit2 P2-5:
+        # two CSVs written with the same prefix inside the same
+        # wall-clock second used to collide on filename and silently
+        # overwrite one another.  Codex's Audit2 review correctly found
+        # that the original version of this test performed two real
+        # writes without freezing time, so on a slow machine (or a write
+        # that happens to straddle a second boundary) it could pass even
+        # against the OLD, broken timestamp-only implementation -- two
+        # files with different timestamps also satisfies "len(files)==2"
+        # without ever exercising the collision-avoidance code path at
+        # all.  The clock is now frozen so both writes are FORCED into
+        # the same second, and the exact expected "_2" disambiguated
+        # filename is asserted explicitly.
+        fixed = datetime(2026, 1, 1, 12, 0, 0)
+        with mock.patch.object(driver, "datetime") as mock_dt:
+            mock_dt.now.return_value = fixed
+            driver.run(mode="tracks", mass=1.0, no_plot=True, csvdir=self.tmp)
+            driver.run(mode="tracks", mass=1.0, no_plot=True, csvdir=self.tmp)
+        files = sorted(f for f in os.listdir(self.tmp)
+                       if f.startswith("sev_track_"))
         self.assertEqual(len(files), 2)
+        stamp = fixed.strftime("%Y%m%d_%H%M%S")
+        first = f"sev_track_1.00Msun_{stamp}.csv"
+        second = f"sev_track_1.00Msun_{stamp}_2.csv"
+        self.assertEqual(files, sorted([first, second]))
+        # Both files are independently readable and neither one is a
+        # truncated/empty stub left behind by an overwrite race.
+        for f in files:
+            with open(os.path.join(self.tmp, f)) as fh:
+                self.assertGreater(len(fh.readlines()), 100)
 
     def test_wdcool_csv_two_files_and_relative_difference_is_tiny(self):
         driver.run(mode="wdcool", wd_mass=0.6, no_plot=True, csvdir=self.tmp)
@@ -1693,6 +2065,52 @@ class TestCsvOutput(unittest.TestCase):
         self.assertTrue(all(r[branch_col] == "not classified" for r in data if r))
         redshift_col = header.index("surface_redshift_z")
         self.assertTrue(all(r[redshift_col] == "" for r in data if r))
+
+    def test_nsmr_failed_rows_labelled_failed_not_stable_or_unstable(self):
+        # Regression test for Audit2 P2-2 (Codex's exact reproducer:
+        # eos=polytrope, gamma=5.0, p_nuc=0.9, n_mr=16, rho_lo=1e17,
+        # rho_hi=5e19).  Every raw index <= i_max used to be labelled
+        # "stable" and every index > i_max "unstable" purely by position,
+        # even for a row whose model never converged (nan mass/radius) --
+        # a failed row is not an unstable stellar model, it is no model.
+        # This also checks that warnings_detail (the per-density failure
+        # reasons the physics layer already collects) actually reaches
+        # the student: printed on the terminal and written into the CSV,
+        # not merely present in the Python-level summary dict nobody
+        # running main.py would ever see.
+        self.tmp2 = tempfile.mkdtemp()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = driver.run(mode="nsmr", eos="polytrope", gamma=5.0,
+                                p_nuc=0.9, n_mr=16, rho_lo=1.0e17,
+                                rho_hi=5.0e19, no_plot=True, csvdir=self.tmp2)
+        s = result["summary"]
+        self.assertGreater(len(s["warnings_detail"]), 0)
+        terminal = buf.getvalue()
+        self.assertIn("PER-MODEL FAILURE DETAIL", terminal)
+        for detail in s["warnings_detail"]:
+            # Each recorded failure reason must actually reach the screen,
+            # not just exist in the returned summary dict.
+            self.assertIn(detail.split(":")[0], terminal)  # "rho_c=..." prefix
+
+        files = [f for f in os.listdir(self.tmp2) if f.startswith("sev_nsmr_")]
+        self.assertEqual(len(files), 1)
+        comments, rows = self._read_csv(os.path.join(self.tmp2, files[0]))
+        header, data = rows[0], rows[1:]
+        branch_col = header.index("branch")
+        mass_col = header.index("M_Msun")
+        n_failed_rows = 0
+        for r in data:
+            if not r:
+                continue
+            if r[mass_col] == "nan":
+                self.assertEqual(r[branch_col], "failed")
+                n_failed_rows += 1
+            else:
+                self.assertIn(r[branch_col], ("stable", "unstable"))
+        self.assertEqual(n_failed_rows, len(s["warnings_detail"]))
+        joined_comments = "".join(comments)
+        self.assertIn("failure detail:", joined_comments)
 
     def test_hr_isochrone_csv_records_turnoff_and_phase(self):
         driver.run(mode="hr", isochrones="1,5", no_plot=True, csvdir=self.tmp)
@@ -1791,17 +2209,84 @@ class TestPlotting(unittest.TestCase):
             pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
             self.assertEqual(len(pngs), 1)
 
-    def test_two_saves_in_the_same_second_do_not_overwrite_each_other(self):
-        # Regression test for Audit1 P2-5: two PNGs from the same mode in
-        # the same wall-clock second used to collide on filename.
+    def test_low_mass_remnant_plot_annotation_matches_its_basis(self):
+        # Regression test for Audit2 P1-1 (Codex reproducer, mass=0.60,
+        # t_max=1000): the plot annotation unconditionally said "(not
+        # integrated)" next to the remnant mass, contradicting the case
+        # where the remnant IS this track's own computed endpoint.
+        import matplotlib.pyplot as plt
+        result = phys.integrate_track(m_msun=0.60, t_max_gyr=1000.0,
+                                      n_ms=200, n_post=200)
+        self.assertEqual(result["summary"]["remnant_basis"],
+                         "this track's own post-main-sequence integration")
+        with mock.patch.object(plt, "show"), mock.patch.object(plt, "close"):
+            plotting.plot_track(result)
+            note_texts = [t.get_text() for t in plt.gcf().axes[0].texts]
+        joined = "\n".join(note_texts)
+        self.assertIn("this track's own endpoint", joined)
+        self.assertNotIn("not integrated", joined)
+
+    def test_png_provenance_sidecar_records_every_mode_parameter(self):
+        # Regression test for Audit2 P2-3 (Codex/Copilot): the on-figure
+        # footer only answers "which code produced this", not "which run"
+        # -- a saved PNG with --outdir and no --csvdir could not be
+        # reproduced independently, because none of n_ms/n_post/t_max/
+        # x_end/qc/core_weight/expansion/core_efficiency/homology/postms
+        # appeared anywhere near it.  A provenance sidecar must now be
+        # written next to the PNG unconditionally, whether or not
+        # --csvdir was also requested.
         import matplotlib.pyplot as plt
         result = phys.integrate_track(m_msun=1.0, n_ms=200, n_post=200)
+        provenance = driver._provenance("tracks", dict(
+            mass=1.0, X=0.7, Z=0.02, qc=None, burning=None, opacity="thomson",
+            core_weight=0.36, expansion=1.7, core_efficiency=0.75,
+            homology=False, postms=True, n_ms=200, n_post=200,
+            t_max=15.0, x_end=1.0e-3))
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(plt, "show"):
-                plotting.plot_track(result, outdir=tmp, dpi=60)
-                plotting.plot_track(result, outdir=tmp, dpi=60)
+                plotting.plot_track(result, outdir=tmp, dpi=60,
+                                    provenance=provenance)
             pngs = [f for f in os.listdir(tmp) if f.endswith(".png")]
-            self.assertEqual(len(pngs), 2)
+            sidecars = [f for f in os.listdir(tmp)
+                       if f.endswith(".provenance.txt")]
+            self.assertEqual(len(pngs), 1)
+            self.assertEqual(len(sidecars), 1)
+            # The PNG and its sidecar must share the same stem, so a
+            # student can tell which sidecar belongs to which figure.
+            self.assertEqual(os.path.splitext(pngs[0])[0],
+                             sidecars[0][:-len(".provenance.txt")])
+            with open(os.path.join(tmp, sidecars[0])) as f:
+                content = f.read()
+            for param in ("n_ms", "n_post", "t_max", "x_end", "qc",
+                          "core_weight", "expansion", "core_efficiency",
+                          "homology", "postms"):
+                self.assertIn(param, content)
+            self.assertIn(phys.MODEL_VERSION, content)
+            self.assertIn(phys.BUILD_ID, content)
+
+    def test_two_saves_in_the_same_second_do_not_overwrite_each_other(self):
+        # Regression test for Audit1 P2-5, strengthened for Audit2 P2-5
+        # (see the CSV counterpart's comment above for why freezing time
+        # is required rather than relying on two real saves happening to
+        # land in the same wall-clock second): the clock is frozen so
+        # both saves are forced into the same second, and the exact
+        # expected "_2" disambiguated filename is asserted explicitly.
+        import matplotlib.pyplot as plt
+        result = phys.integrate_track(m_msun=1.0, n_ms=200, n_post=200)
+        fixed = datetime(2026, 1, 1, 12, 0, 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(plt, "show"), \
+                 mock.patch.object(plotting, "datetime") as mock_dt:
+                mock_dt.now.return_value = fixed
+                plotting.plot_track(result, outdir=tmp, dpi=60)
+                plotting.plot_track(result, outdir=tmp, dpi=60)
+            pngs = sorted(f for f in os.listdir(tmp) if f.endswith(".png"))
+            stamp = fixed.strftime("%Y%m%d_%H%M%S")
+            first = f"sev_track_1.00Msun_{stamp}.png"
+            second = f"sev_track_1.00Msun_{stamp}_2.png"
+            self.assertEqual(pngs, sorted([first, second]))
+            for f in pngs:
+                self.assertGreater(os.path.getsize(os.path.join(tmp, f)), 0)
 
     def test_figure_carries_a_version_build_footer(self):
         # Regression test for Audit1 P2-6: every saved figure must carry a

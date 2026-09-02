@@ -211,23 +211,41 @@ def _head(title):
     print(SEP)
 
 
+def _print_wrapped(text, indent="        "):
+    line = indent
+    for word in text.strip().split():
+        if len(line) + len(word) + 1 > W:
+            print(line)
+            line = indent + word
+        else:
+            line = f"{line} {word}" if line.strip() else line + word
+    if line.strip():
+        print(line)
+
+
 def _print_warnings(s):
     """Print any model-validity warnings raised by the physics layer."""
     notes = s.get("warnings") or []
-    if not notes:
+    details = s.get("warnings_detail") or []
+    if not notes and not details:
         return
-    print("  NOTES ON THIS RUN")
-    for note in notes:
-        text = note.strip()
-        line = "        "
-        for word in text.split():
-            if len(line) + len(word) + 1 > W:
-                print(line)
-                line = "        " + word
-            else:
-                line = f"{line} {word}" if line.strip() else line + word
-        if line.strip():
-            print(line)
+    if notes:
+        print("  NOTES ON THIS RUN")
+        for note in notes:
+            _print_wrapped(note)
+    if details:
+        # warnings_detail records WHY each individual failed model was
+        # dropped (a bisection bracket failure, an interior RK4 failure,
+        # or an unexpected exception), one entry per non-converged
+        # central density.  Collecting the reasons in the physics layer
+        # is not useful to a student running main.py unless the driver
+        # actually prints them -- the aggregate warning above only
+        # summarizes how many failed and, in the neutron-star case,
+        # roughly why.
+        print("  PER-MODEL FAILURE DETAIL"
+              f" ({len(details)} of the requested points did not converge)")
+        for entry in details:
+            _print_wrapped(entry)
     print(SEP)
 
 
@@ -275,7 +293,11 @@ def _print_track_summary(s):
     print(f"  Schematic remnant   : {s['remnant_kind']}"
           f",  about {s['remnant_msun']:.3f} Msun")
     print(f"                        ({s['remnant_note']})")
-    if s["helium_ignition"]:
+    if s["remnant_basis"] == "this track's own post-main-sequence integration":
+        print("  This remnant comes from the track's OWN post-main-sequence")
+        print("  integration reaching this schematic model's core-mass cap, not")
+        print("  from the generic initial-mass-only classification below.")
+    elif s["helium_ignition"]:
         print("  The track above stops at helium ignition.  The remnant is a")
         print("  classification from the initial mass, not an integrated result.")
     else:
@@ -424,10 +446,17 @@ def _run_tracks(kw, outdir, csvdir, dpi, lw):
                    + [f"resolved qc = {s['qc']:.4f}, burning = {s['burning']}",
                       life,
                       f"schematic remnant: {s['remnant_kind']}, "
-                      f"{s['remnant_msun']:.4f} Msun (not an integrated result)"]
+                      f"{s['remnant_msun']:.4f} Msun "
+                      + ("(this track's own post-main-sequence integration, "
+                         "not a mass-only classification)"
+                         if s["remnant_basis"]
+                         == "this track's own post-main-sequence integration"
+                         else "(mass-only classification, not an integrated "
+                              "result)")]
                    + [f"warning: {w}" for w in s["warnings"]])
     if not kw["no_plot"]:
-        viz.plot_track(result, outdir=outdir, dpi=dpi, lw=lw)
+        viz.plot_track(result, outdir=outdir, dpi=dpi, lw=lw,
+                       provenance=_provenance("tracks", kw))
     return result
 
 
@@ -499,7 +528,8 @@ def _run_hr(kw, outdir, csvdir, dpi, lw):
                                  "necessarily outside the mass grid itself)"]
                        + _provenance("hr", kw))
     if not kw["no_plot"]:
-        viz.plot_hr_diagram(result, outdir=outdir, dpi=dpi, lw=lw)
+        viz.plot_hr_diagram(result, outdir=outdir, dpi=dpi, lw=lw,
+                            provenance=_provenance("hr", kw))
     return result
 
 
@@ -541,7 +571,8 @@ def _run_wdcool(kw, outdir, csvdir, dpi, lw):
                    comments=["cold white-dwarf mass-radius relation"]
                    + _provenance("wdcool", kw))
     if not kw["no_plot"]:
-        viz.plot_wd_cooling(result, outdir=outdir, dpi=dpi, lw=lw)
+        viz.plot_wd_cooling(result, outdir=outdir, dpi=dpi, lw=lw,
+                           provenance=_provenance("wdcool", kw))
     return result
 
 
@@ -559,7 +590,15 @@ def _run_nsmr(kw, outdir, csvdir, dpi, lw):
         classify = s["turning_point"] and s["relativistic"]
         rows = []
         for i in range(result["rho"].size):
-            if classify:
+            # A row whose model did not converge (nan mass/radius) is not
+            # an unstable stellar model -- it is no model at all, and
+            # must never be classified as though it were one just because
+            # its raw index happens to fall above i_max.
+            converged = (math.isfinite(result["M"][i])
+                        and math.isfinite(result["R"][i]))
+            if not converged:
+                branch = "failed"
+            elif classify:
                 branch = "stable" if i <= result["i_max"] else "unstable"
             else:
                 branch = "not classified"
@@ -588,10 +627,12 @@ def _run_nsmr(kw, outdir, csvdir, dpi, lw):
                    comments=notes + _provenance("nsmr", kw)
                    + [headline,
                       f"peak c_s/c on the branch = {s['cs_over_c_max_branch']:.4f}"]
-                   + [f"warning: {w}" for w in s["warnings"]])
+                   + [f"warning: {w}" for w in s["warnings"]]
+                   + [f"failure detail: {d}" for d in s["warnings_detail"]])
     if not kw["no_plot"]:
         viz.plot_ns_mass_radius(result, outdir=outdir, dpi=dpi, lw=lw,
-                                m_observed=kw["m_observed"])
+                                m_observed=kw["m_observed"],
+                                provenance=_provenance("nsmr", kw))
     return result
 
 

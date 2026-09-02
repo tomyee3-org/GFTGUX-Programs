@@ -56,8 +56,21 @@ def _unique_path(outdir, name):
     return candidate
 
 
-def _finish(fig, outdir, prefix, dpi):
-    """Optionally save a timestamped PNG, then display the figure."""
+def _finish(fig, outdir, prefix, dpi, provenance=None):
+    """
+    Optionally save a timestamped PNG (with a provenance sidecar), then
+    display the figure.
+
+    The on-figure footer answers "which code produced this?"; it does not
+    and cannot answer "which run?", since it has no room for the dozen or
+    so mode-relevant parameters (n_ms, t_max, qc, mu_e, rho_lo, ... --
+    whichever the mode actually used) that would be needed to reproduce
+    the figure exactly.  provenance, when given, is the same parameter
+    list driver_sev.py already writes into a CSV's header comments; it is
+    written here as a plain-text sidecar next to the PNG unconditionally
+    -- whether or not --csvdir was also requested -- so a saved PNG never
+    has to depend on the user having separately asked for the CSV.
+    """
     fig.text(0.995, 0.005,
              f"StellarEvolutionTracks {phys.MODEL_VERSION} "
              f"(build {phys.BUILD_ID})",
@@ -67,6 +80,15 @@ def _finish(fig, outdir, prefix, dpi):
         path = _unique_path(outdir, _timestamp_name(prefix))
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
         print(f"[plot_sev] PNG saved -> {path}")
+        if provenance:
+            stem, _ = os.path.splitext(path)
+            sidecar = stem + ".provenance.txt"
+            with open(sidecar, "w") as f:
+                f.write(f"Provenance for {os.path.basename(path)}\n")
+                f.write("(every parameter this mode actually used, so this "
+                        "figure can be reproduced without the CSV)\n\n")
+                f.write("\n".join(provenance) + "\n")
+            print(f"[plot_sev] Provenance saved -> {sidecar}")
     print("[plot_sev] Displaying figure on screen ...")
     plt.show()
     plt.close(fig)
@@ -103,7 +125,8 @@ def _draw_sun(ax):
 # ----------------------------------------------------------------------
 # Mode: tracks
 # ----------------------------------------------------------------------
-def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
+def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0),
+               provenance=None):
     """Four-panel view of a single evolutionary track."""
     s = result["summary"]
     t_gyr = result["t"] / phys.GYR
@@ -207,20 +230,26 @@ def plot_track(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
         else:
             note.append("track ends without He ignition (see phase_end)")
     note.append(f"schematic remnant: {s['remnant_kind']}")
-    note.append(fr"$M_{{\rm rem}}\approx{s['remnant_msun']:.2f}\,M_\odot$"
-                " (not integrated)")
+    if s["remnant_basis"] == "this track's own post-main-sequence integration":
+        note.append(fr"$M_{{\rm rem}}\approx{s['remnant_msun']:.2f}\,M_\odot$"
+                    " (this track's own endpoint)")
+    else:
+        note.append(fr"$M_{{\rm rem}}\approx{s['remnant_msun']:.2f}\,M_\odot$"
+                    " (not integrated)")
     ax1.text(0.02, 0.98, "\n".join(note), transform=ax1.transAxes,
              ha="left", va="top", fontsize=8,
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                        ec="gray", alpha=0.9))
 
-    _finish(fig, outdir, f"sev_track_{s['m_msun']:.2f}Msun", dpi)
+    _finish(fig, outdir, f"sev_track_{s['m_msun']:.2f}Msun", dpi,
+           provenance=provenance)
 
 
 # ----------------------------------------------------------------------
 # Mode: hr
 # ----------------------------------------------------------------------
-def plot_hr_diagram(result, outdir=None, dpi=150, lw=1.5, figsize=(10.0, 8.5)):
+def plot_hr_diagram(result, outdir=None, dpi=150, lw=1.5, figsize=(10.0, 8.5),
+                    provenance=None):
     """HR diagram with one track per mass and optional isochrones."""
     s = result["summary"]
     tracks = result["tracks"]
@@ -277,13 +306,14 @@ def plot_hr_diagram(result, outdir=None, dpi=150, lw=1.5, figsize=(10.0, 8.5)):
     ax.set_title(subtitle, fontsize=9.5)
     ax.legend(fontsize=8.5, loc="lower left", framealpha=0.85)
 
-    _finish(fig, outdir, "sev_hr", dpi)
+    _finish(fig, outdir, "sev_hr", dpi, provenance=provenance)
 
 
 # ----------------------------------------------------------------------
 # Mode: wdcool
 # ----------------------------------------------------------------------
-def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
+def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0),
+                    provenance=None):
     """White-dwarf mass-radius relation and Mestel cooling history."""
     s = result["summary"]
     t_gyr = result["t"] / phys.GYR
@@ -381,14 +411,16 @@ def plot_wd_cooling(result, outdir=None, dpi=150, lw=1.6, figsize=(12.5, 9.0)):
              fontsize=8, bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                                    ec="gray", alpha=0.9))
 
-    _finish(fig, outdir, f"sev_wdcool_{s['m_msun']:.2f}Msun", dpi)
+    _finish(fig, outdir, f"sev_wdcool_{s['m_msun']:.2f}Msun", dpi,
+           provenance=provenance)
 
 
 # ----------------------------------------------------------------------
 # Mode: nsmr
 # ----------------------------------------------------------------------
 def plot_ns_mass_radius(result, outdir=None, dpi=150, lw=1.7,
-                        figsize=(13.0, 4.8), m_observed=2.01):
+                        figsize=(13.0, 4.8), m_observed=2.01,
+                        provenance=None):
     """
     Neutron-star mass-radius relation.
 
@@ -522,4 +554,4 @@ def plot_ns_mass_radius(result, outdir=None, dpi=150, lw=1.7,
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                        ec="gray", alpha=0.9))
 
-    _finish(fig, outdir, f"sev_nsmr_{s['eos']}", dpi)
+    _finish(fig, outdir, f"sev_nsmr_{s['eos']}", dpi, provenance=provenance)

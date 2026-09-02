@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -113,7 +113,8 @@ M_sun   = GM_SUN_NOMINAL / G     # kg     (derived, consistent with G above)
 R_sun   = 6.957e8               # m      (IAU nominal solar radius)
 L_sun   = 3.828e26              # W      (IAU nominal solar luminosity)
 TEFF_SUN = 5772.0               # K      (IAU nominal solar effective temp.)
-R_EARTH = 6.371e6               # m      (IUGG mean Earth radius)
+R_EARTH = 6_371_008.7714        # m      (IUGG/GRS80 mean Earth radius;
+                                 #         Moritz, J. Geodesy 74, 128 (2000))
 
 YEAR    = 365.25 * 86400.0      # s      (Julian year, exactly 365.25 d;
                                  #         IAU-recommended definition of a
@@ -156,6 +157,22 @@ def _require_positive(name, value):
     value = _require_finite(name, value)
     if value <= 0.0:
         raise ValueError(f"{name} must be greater than zero; got {value:g}.")
+    return value
+
+
+def _require_bool(name, value):
+    """
+    Reject anything that is not literally True/False before it is used in
+    a truthiness test.  Without this, a caller who passes a non-bool
+    "truthy" value to a boolean-like direct-API parameter (a non-empty
+    string such as "False", or 0/1) is silently reinterpreted by Python's
+    ordinary truthiness rules instead of getting a clear error -- the
+    CLI itself never produces anything but a real bool here, but the
+    physics layer is a reusable API and a caller bypassing the CLI can
+    pass anything.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be True or False; got {value!r}.")
     return value
 
 
@@ -275,6 +292,7 @@ BURNING_NU = {
 
 def default_burning(m_msun):
     """pp chain below 1.2 solar masses, CNO cycle above."""
+    m_msun = _require_positive("mass", m_msun)
     return "pp" if m_msun < 1.2 else "cno"
 
 
@@ -293,6 +311,7 @@ def default_core_fraction(m_msun):
     far larger fraction of their hydrogen.  Tracks below TRUSTED_MASS_LO
     carry a warning for that reason.
     """
+    m_msun = _require_positive("mass", m_msun)
     if m_msun <= 1.2:
         return 0.15
     return min(0.15 * (m_msun / 1.2) ** 0.22, 0.32)
@@ -339,6 +358,11 @@ def effective_temperature(L_lsun, R_rsun):
 
 def zams_curve(m_lo=0.15, m_hi=60.0, n=200):
     """Return (M, logTeff, logL) arrays tracing the ZAMS."""
+    m_lo = _require_positive("m_lo", m_lo)
+    m_hi = _require_positive("m_hi", m_hi)
+    if m_hi <= m_lo:
+        raise ValueError(f"m_hi ({m_hi:g}) must exceed m_lo ({m_lo:g}).")
+    n = _require_int("n", n, lo=2, hi=MAX_GRID_POINTS)
     m = np.geomspace(m_lo, m_hi, n)
     L = np.array([zams_luminosity(v) for v in m])
     R = np.array([zams_radius(v) for v in m])
@@ -546,6 +570,8 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
     X, Y, Z = check_composition(X, Z)
     if X <= 0.0:
         raise ValueError("A hydrogen-burning track needs X > 0.")
+    include_postms = _require_bool("include_postms", include_postms)
+    homology_zams = _require_bool("homology_zams", homology_zams)
 
     core_weight = _require_finite("core_weight", core_weight)
     if not (0.0 <= core_weight <= 1.0):
@@ -860,8 +886,9 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
             L_tip = L_list[-1]
             phase_end = ("helium flash at the tip of the red-giant branch"
                          if flashes else
-                         "hydrogen envelope exhausted before the helium core "
-                         "reached the flash mass (helium white dwarf)")
+                         "core-mass cap of this schematic model reached "
+                         "before the helium core reached the flash mass "
+                         "(helium white dwarf)")
             helium_ignition = bool(flashes)
 
     elif post_ok:
@@ -926,13 +953,30 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
     # actually integrated far enough to settle the question, that computed
     # outcome must take precedence over the generic a-priori classification
     # for this run's own remnant fields.
+    # remnant_basis tells every consumer (driver, plot, CSV) which of the
+    # two possible origins this run's remnant fields actually came from,
+    # so none of them has to repeat (or contradict) the other's wording:
+    # a fixed, always-true sentence describing predicted_remnant() cannot
+    # be correct for both origins, because only one of them is "a
+    # classification from the initial mass, not an integrated result".
+    remnant_basis = "mass-only schematic classification"
     if post_ok and regime == "degenerate red-giant branch" and not flashes:
         kind = "helium white dwarf"
         mrem = mc_ign
-        note = ("this track's own post-main-sequence integration found the "
-                "hydrogen envelope exhausted before the degenerate helium "
-                "core reached the helium-flash mass, superseding the "
-                "generic mass-only classification for this run")
+        remnant_basis = "this track's own post-main-sequence integration"
+        # The 0.70*m_msun cap is bookkeeping in this schematic model's
+        # core-mass variable, not an integrated envelope-ejection
+        # calculation -- no envelope-mass-loss physics is modeled here,
+        # so the wording below deliberately says "reached the cap built
+        # into this model" rather than "found the envelope exhausted",
+        # to avoid overstating what was actually computed.
+        note = ("this track's own post-main-sequence integration reached "
+                "the hydrogen-envelope core-mass cap built into this "
+                "schematic model (at most 0.70 of the initial mass can "
+                "join the core) before the core reached the helium-flash "
+                "mass; this supersedes the generic mass-only "
+                "classification for this run, but is itself a bookkeeping "
+                "endpoint, not an integrated envelope-ejection result")
 
     summary = dict(
         m_msun=m_msun, X=X, Y=Y, Z=Z, qc=qc, expansion=expansion,
@@ -966,6 +1010,7 @@ def integrate_track(m_msun=1.0, X=0.70, Z=0.02,
         phase_end=phase_end,
         helium_ignition=helium_ignition,
         remnant_kind=kind, remnant_msun=mrem, remnant_note=note,
+        remnant_basis=remnant_basis,
         n_points=t_arr.size,
         warnings=warnings,
         model_version=MODEL_VERSION,
@@ -992,6 +1037,7 @@ def turnoff_mass(masses, t_ms_gyr, age_gyr):
     outside the range spanned by the mass grid, which is the honest answer
     for a sparse grid.
     """
+    age_gyr = _require_positive("age_gyr", age_gyr)
     pairs = [(m, t) for m, t in zip(masses, t_ms_gyr)
              if t is not None and math.isfinite(t) and t > 0.0 and m > 0.0]
     if len(pairs) < 2:
@@ -1026,11 +1072,26 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
     if len(set(masses)) != len(masses):
         raise ValueError("The mass list contains duplicates.")
 
-    if isochrone_gyr is not None and len(isochrone_gyr) > MAX_ISOCHRONES:
-        raise ValueError(
-            f"At most {MAX_ISOCHRONES} isochrone ages may be requested; "
-            f"got {len(isochrone_gyr)}."
-        )
+    # Normalize isochrone_gyr to a plain Python list of validated floats
+    # up front, before any expensive track integration starts, rather
+    # than accepting whatever iterable was passed and discovering a
+    # problem only partway through the isochrone loop below.  This also
+    # fixes three direct-API correctness gaps together: len(isochrone_gyr)
+    # raised TypeError for a generator; the later "if isochrone_gyr:"
+    # truthiness check raised the ambiguous-truth-value ValueError for a
+    # NumPy array; and duplicate ages were silently accepted, producing
+    # redundant identical isochrones (unlike duplicate masses, which are
+    # explicitly refused above).
+    if isochrone_gyr is not None:
+        isochrone_gyr = [_require_positive("isochrone age", a)
+                         for a in isochrone_gyr]
+        if len(isochrone_gyr) > MAX_ISOCHRONES:
+            raise ValueError(
+                f"At most {MAX_ISOCHRONES} isochrone ages may be requested; "
+                f"got {len(isochrone_gyr)}."
+            )
+        if len(set(isochrone_gyr)) != len(isochrone_gyr):
+            raise ValueError("The isochrone age list contains duplicates.")
 
     tracks = []
     for m in sorted(masses):
@@ -1042,7 +1103,6 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
         lifetimes = [tr["summary"]["t_ms_gyr"] for tr in tracks]
         grid_masses = [tr["summary"]["m_msun"] for tr in tracks]
         for age in isochrone_gyr:
-            age = _require_positive("isochrone age", age)
             pts = []
             for tr in tracks:
                 t_gyr = tr["t"] / GYR
@@ -1103,6 +1163,15 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
 # ======================================================================
 # Degenerate equations of state
 # ======================================================================
+# Below this relativity parameter x = p_F/(m c), FermiGasEOS.pressure()
+# and .energy_density() switch from their closed forms (which cancel two
+# nearly-equal terms and lose essentially all significant digits well
+# before x reaches 1e-4) to the exact small-x Taylor series, which agrees
+# with the closed form to better than 1e-10 relative accuracy at this
+# threshold and only improves below it (see the two methods' docstrings).
+_FERMI_SMALL_X = 0.05
+
+
 class FermiGasEOS:
     """
     Ideal completely degenerate Fermi gas, exact special-relativistic form.
@@ -1127,7 +1196,35 @@ class FermiGasEOS:
         self.n0 = (8.0 * np.pi / 3.0) * (particle_mass * c / h_pl) ** 3
 
     def pressure(self, x):
+        """
+        P/A = x(2x^2-3)*sqrt(1+x^2) + 3*asinh(x), analytically exact but
+        formed as a difference of two terms that are nearly equal for
+        x well below 1 (both approach 3x as x -> 0).  IEEE double
+        arithmetic cancels essentially all significant digits there --
+        by x=1e-4 the direct evaluation underflows to exactly 0, and by
+        x=1e-5 it goes slightly negative, which is unphysical for a
+        pressure.  Below _FERMI_SMALL_X the exact Taylor series in x
+        (whose leading terms are (8/5)x^5 - (4/7)x^7 + (1/3)x^9 - ...,
+        confirmed against a symbolic expansion of the closed form) is
+        used instead; it agrees with the closed form to better than
+        1e-10 relative accuracy everywhere it is used, and is what the
+        closed form itself would give at infinite precision.
+        """
         x = np.asarray(x, dtype=float)
+        small = x < _FERMI_SMALL_X
+        if np.any(small):
+            xs = x[small] if x.shape else x
+            x2 = xs * xs
+            series = xs**5 * (1.6 + x2 * (-4.0 / 7.0 + x2 * (1.0 / 3.0
+                              + x2 * (-5.0 / 22.0 + x2 * 35.0 / 208.0))))
+            if x.shape:
+                out = np.empty_like(x)
+                s = np.sqrt(1.0 + x * x)
+                out[~small] = (x[~small] * (2.0 * x[~small]**2 - 3.0) * s[~small]
+                              + 3.0 * np.arcsinh(x[~small]))
+                out[small] = series
+                return self.A * out
+            return self.A * series
         s = np.sqrt(1.0 + x * x)
         return self.A * (x * (2.0 * x * x - 3.0) * s + 3.0 * np.arcsinh(x))
 
@@ -1142,8 +1239,28 @@ class FermiGasEOS:
         return self.mass_per_particle * self.number_density(x)
 
     def energy_density(self, x):
-        """Total energy density including rest mass, in J/m^3."""
+        """
+        Total energy density including rest mass, in J/m^3.  Same
+        small-x cancellation problem as pressure() (both terms approach
+        3x as x -> 0), with the same series-based remedy below
+        _FERMI_SMALL_X: eps/A = 8x^3 + (12/5)x^5 - (3/7)x^7 + ...
+        """
         x = np.asarray(x, dtype=float)
+        small = x < _FERMI_SMALL_X
+        if np.any(small):
+            xs = x[small] if x.shape else x
+            x2 = xs * xs
+            series = xs**3 * (8.0 + x2 * (2.4 + x2 * (-3.0 / 7.0
+                              + x2 * (1.0 / 6.0 + x2 * (-15.0 / 176.0
+                              + x2 * 21.0 / 416.0)))))
+            if x.shape:
+                out = np.empty_like(x)
+                s = np.sqrt(1.0 + x * x)
+                out[~small] = (3.0 * x[~small] * (2.0 * x[~small]**2 + 1.0) * s[~small]
+                              - 3.0 * np.arcsinh(x[~small]))
+                out[small] = series
+                return self.A * out
+            return self.A * series
         s = np.sqrt(1.0 + x * x)
         return self.A * (3.0 * x * (2.0 * x * x + 1.0) * s - 3.0 * np.arcsinh(x))
 
@@ -1296,6 +1413,8 @@ def integrate_structure(eos, y_c, relativistic=False,
     # Python, so the old check let a NaN y_c silently through to a tiny,
     # physically meaningless central seed instead of raising.
     y = _require_positive("y_c", y_c)
+    relativistic = _require_bool("relativistic", relativistic)
+    keep_profile = _require_bool("keep_profile", keep_profile)
     r_scale = _require_positive("r_scale", r_scale)
     y_floor = _require_finite("y_floor", y_floor)
     if not (0.0 < y_floor < 1.0):
@@ -1463,6 +1582,8 @@ def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
     if tol >= 1.0:
         raise ValueError(f"tol must lie in (0, 1); got {tol:g}.")
     max_iter = _require_int("max_iter", max_iter, lo=1)
+    max_bracket_expansions = _require_int("max_bracket_expansions",
+                                          max_bracket_expansions, lo=0, hi=60)
     m_ch = chandrasekhar_mass(mu_e)
     if m_target_msun >= 0.999 * m_ch:
         raise ValueError(
@@ -1482,6 +1603,11 @@ def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
         return M, R
 
     lo, hi = _require_positive("rho_lo", rho_lo), _require_positive("rho_hi", rho_hi)
+    if hi <= lo:
+        raise ValueError(
+            f"rho_hi ({hi:.3e}) must exceed rho_lo ({lo:.3e}); a bisection "
+            "search cannot start from a reversed or degenerate bracket."
+        )
     m_lo, _ = mass_of(lo)
     m_hi, _ = mass_of(hi)
     n = 0
@@ -1517,7 +1643,25 @@ def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
             hi = mid
         mid = math.sqrt(lo * hi)
         M, R = mass_of(mid)
-    return mid, M, R
+    # The loop ran max_iter times without the residual falling below tol.
+    # Returning (mid, M, R) here anyway would silently hand back a model
+    # that can be far from the requested mass (a single-iteration probe at
+    # the default bracket returns a mass 58% off target) while looking
+    # exactly like an ordinary successful result -- the caller has no way
+    # to tell the two apart without independently recomputing the
+    # residual itself.  Failing to converge is therefore reported the
+    # same way every other public solver in this module reports failure:
+    # a RuntimeError that states what was requested, what was achieved,
+    # and where the search ended.
+    residual = abs(M - target) / target
+    raise RuntimeError(
+        f"wd_structure() did not converge within max_iter={max_iter} "
+        f"iterations: requested tol={tol:.3e}, achieved relative residual "
+        f"{residual:.3e} at rho_c={mid:.3e} kg/m^3 (final bracket "
+        f"[{lo:.3e}, {hi:.3e}] kg/m^3, M={M / M_sun:.6f} Msun against a "
+        f"target of {m_target_msun:.6f} Msun).  Increase max_iter or "
+        "relax tol."
+    )
 
 
 def wd_mass_radius_curve(mu_e=2.0, n=40, rho_lo=1.0e8, rho_hi=1.0e14,
@@ -1778,6 +1922,7 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     within the sampled range, and only for the TOV equations.
     """
     n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
+    relativistic = _require_bool("relativistic", relativistic)
     rho_lo = _require_positive("rho_lo", rho_lo)
     rho_hi = _require_positive("rho_hi", rho_hi)
     if rho_hi <= rho_lo:
@@ -1864,8 +2009,16 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     # maximum.  i_max == gi[0] (mass already falling at the lowest sampled
     # density) is just as inconclusive as i_max == gi[-1] (mass still
     # rising at the highest sampled density): in both cases the true
-    # extremum lies outside the sampled range.
-    turning_point = bool(gi[0] < i_max < gi[-1])
+    # extremum lies outside the sampled range.  It is not enough that
+    # SOME converged point exists somewhere below and somewhere above
+    # i_max, though: if either of i_max's own immediate neighbors failed
+    # to converge, the sampled maximum sits at the edge of an unsolved
+    # gap, and an even larger true mass could be hiding inside that gap.
+    # Both conditions are required before a sampled peak may be reported
+    # as a resolved turning point.
+    interior = bool(gi[0] < i_max < gi[-1])
+    neighbors_converged = (interior and good[i_max - 1] and good[i_max + 1])
+    turning_point = bool(interior and neighbors_converged)
     if not turning_point:
         if i_max >= gi[-1]:
             warnings.append(
@@ -1876,7 +2029,7 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
                 "unstable.  Raise --rho_hi to look for the true turning "
                 "point."
             )
-        else:
+        elif i_max <= gi[0]:
             warnings.append(
                 "the mass is already falling at the lowest central density "
                 "sampled, so the maximum lies below the sampled range and "
@@ -1884,6 +2037,17 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
                 "is the largest sampled mass, not a maximum mass, and no "
                 "model in this sequence has been shown to be unstable.  "
                 "Lower --rho_lo to look for the true turning point."
+            )
+        else:
+            warnings.append(
+                "the largest converged sampled mass sits next to a central "
+                "density that did NOT converge, so the true maximum is "
+                "unresolved across that convergence gap: a larger mass "
+                "could exist inside the gap and would not have been seen.  "
+                "The value reported is the largest converged sampled mass, "
+                "not a maximum mass, and no model in this sequence has been "
+                "shown to be unstable.  Increase --n_mr, or narrow the "
+                "density range around the gap, to resolve it."
             )
 
     # Sound speed over the whole stable (or, without a turning point, the

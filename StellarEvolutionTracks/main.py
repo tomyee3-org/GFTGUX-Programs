@@ -11,9 +11,15 @@ Four calculations share one program, chosen with --mode:
     nsmr     neutron-star mass-radius relation from the TOV equations
 
 The four calculations are linked models of successive stages, not one
-continuous integration: a track stops at helium ignition, and the remnant
-it reports is a classification from the initial mass that you can then
-hand to wdcool or nsmr yourself.
+continuous integration: a track normally stops at helium ignition, and
+most of the time the remnant it reports is a schematic classification
+from the initial mass alone, which you can then hand to wdcool or nsmr
+yourself. The one exception is a low-mass track (below about 0.67 solar
+masses) whose post-main-sequence integration itself reaches this
+schematic model's core-mass cap before helium ignition: for that case the
+track's own computed endpoint, not the generic mass-only classification,
+determines the reported remnant (see remnant_basis in the track summary,
+and the Help file's "Model Handoffs" discussion).
 
 Examples
 --------
