@@ -124,6 +124,170 @@ plot_photon.py docstrings or output):
         the three prior critique documents already examined and declined
         adding one, a judgment this round agrees with -- see the Kickoff
         report).
+
+  2026-09-02  Claude (principal developer).  Response to Audit1 (three
+    independent reviews of the Kickoff package: Codex, Copilot, Gemini).
+    This entry is APPENDED to, not a replacement for, the entry above --
+    per the project's standing instruction (reaffirmed when a reviewer
+    this round suggested condensing the history), this audit trail is for
+    developers only and is kept complete rather than summarized, because a
+    shortened version would erase exactly the kind of fix-by-fix
+    provenance a later audit round needs to check "was this really fixed,
+    and why."  Full claim-by-claim dispositions are in the accompanying
+    Response-to-Audit1 report; this entry records only what changed in
+    the source tree and in this test file.
+      * Fixed two real production defects in physics_photon.py, each
+        reproduced (with a documented exact repro) before the fix and
+        each now covered by a permanent regression test:
+          (1) Codex P1-1: a photon launched exactly tangentially (b at
+              the local kinematic bound for r0, so the initial radial
+              velocity is exactly 0.0) was never detected as "turned
+              outward" by the old "previous_v < 0.0 <= v_r" test,
+              because Python's -math.sqrt(0.0) is negative zero and
+              -0.0 < 0.0 is False. Fixed by testing "new_v > 0.0"
+              directly, with no dependence on the sign of the sample
+              before it. See TestTangentialLaunches below.
+          (2) Codex P1-2: an escaping trajectory accepted and appended
+              a whole RK4 step before checking r>=escape_radius (unlike
+              the symmetric, already-interpolated horizon-crossing
+              case), so delta_phi/lambda_final carried a step-phase
+              error that did not shrink smoothly with d_lambda --
+              contaminating exactly the EXP-9 convergence comparison.
+              Fixed by adding an interpolation block symmetric to the
+              horizon-crossing one. TestConvergence below was reworked
+              to check delta_phi convergence (now clean) rather than
+              closest_approach convergence (a sampled minimum, still
+              subject to run-to-run jitter by design -- see EXP-9's
+              updated wording and the caveat comment in that test).
+      * Fixed two real robustness gaps, both reproduced and now
+        regression-tested:
+          (3) Codex P2-2 / Copilot F-1/F-2: radial_acceleration(),
+              dphi_dlambda(), and the lambda_max/d_lambda step-count
+              check could raise a raw, uncaught OverflowError (or, in
+              math.ceil()'s case, be handed float('inf')) for extreme-
+              but-finite inputs, instead of the documented ValueError.
+              Fixed by pre-checking the step ratio against the step cap
+              before calling math.ceil(), and by wrapping the two
+              physics functions' arithmetic in try/except with a
+              trailing math.isfinite() check. While reproducing these
+              two findings with a fresh set of extreme-value probes (not
+              themselves given by either audit), found and fixed a
+              related, previously-undetected defect of the same kind:
+              an r small enough that r**3 (or r*r) underflows to a
+              literal 0.0 float raises ZeroDivisionError, not
+              OverflowError, and the original except clause did not
+              catch it. Both functions now also catch ZeroDivisionError.
+              See TestExtremeInputRegressions below.
+          (4) Codex P3-1 / Copilot F-3: plot_photon.py's saved-PNG
+              filename collision avoidance was check-then-write, a
+              race between concurrent PhotonOrbit processes. Fixed with
+              an atomic os.open(..., O_CREAT|O_EXCL) reservation.
+              TestOutputFileCollisionAvoidance below gained a
+              multi-thread concurrency stress test formalizing the
+              12-thread manual verification done for this round.
+      * Added a per-saved-run provenance sidecar (plot_photon.py's
+        _format_provenance()/_reserve_unique_stem()), requested
+        independently by both Codex (P1-3) and Copilot (Section 7) and
+        weighed against Gemini's endorsement of the Kickoff round's
+        decision to omit one; implemented because Codex/Copilot's
+        concrete near-separatrix reproducer (a six-significant-digit
+        console value of b changing the reported outcome when retyped)
+        was a more compelling, specific failure mode than Gemini's
+        shorter endorsement of the status quo. See the new
+        TestProvenanceSidecar class below.
+      * Console run summaries and CLI --outdir runs now also print/save
+        a losslessly-precise "Reproduce this exact run with:" command
+        line (driver_photon.py _print_summary(), Codex P1-3).
+      * MODEL_VERSION 1.1.0 -> 1.2.0 (functional physics/robustness
+        fixes, not merely new tests or documentation); BUILD_ID
+        recomputed automatically and the Help file's #version_build
+        element updated to match after every source change in this
+        round, including the ZeroDivisionError fix found during testing.
+      * Corrected an explanatory error in the Kickoff-round report,
+        caught independently by Codex (P2-6) and Copilot (D-2): the
+        report's Section 2 stated that inward motion "moves toward
+        strictly larger f(r)"; since f(r)=(1-2M/r)/r^2 is increasing in
+        r on (2M,3M), inward motion (decreasing r) moves toward SMALLER
+        f(r), which is what makes (dr/dlambda)^2=E^2-L^2 f(r) INCREASE.
+        This test file's own comment on
+        test_photon_effective_potential_is_monotonic_between_horizon_and_photon_sphere
+        already had the direction right; only the prose report was
+        wrong, and only the sign/direction, not the capture conclusion
+        itself. Corrected in the Response-to-Audit1 report.
+      * Fixed three real defects in this test file's own quality, none
+        of which had produced a wrong pass/fail verdict on the source
+        under test, but each of which weakened what the test actually
+        proved:
+          (5) Codex P2-1: test_flattened_layout_smoke_test_only wrote a
+              standalone _flat_smoke.py that imported physics_photon via
+              a manual sys.path.insert(0, '.'), so it verified the four
+              modules import cleanly from a flat directory but never
+              actually called find_module_dir() from one -- a regression
+              in the discovery helper itself (the thing the class is
+              named for) could have passed unnoticed. Rewritten to copy
+              this very test file into the flattened directory and
+              invoke one of its own trivial discovery tests
+              (TestModuleDiscovery.test_finds_flattened_layout) by fully
+              qualified unittest name, so MODULE_DIR is genuinely
+              computed, at import time, from the flattened layout.
+          (6) Codex P2-3: test_build_id_independent_of_line_endings fed
+              the SAME "normalized = text_lf" variable into both the
+              "digest_lf" and "digest_crlf" accumulators -- text_crlf was
+              computed and then discarded, so the test could not fail
+              even if line-ending normalization were completely broken.
+              Rewritten to materialize real LF-only and CRLF-only source
+              trees on disk and run the production-mirroring
+              recompute_build_id() helper (itself exercising
+              newline=None) against each.
+          (7) Codex P2-4: test_mathjax_config_is_syntactically_valid_javascript
+              unconditionally shelled out to "node --check"; on a machine
+              without Node.js installed this failed for an environmental
+              reason unrelated to the Help file's actual correctness.
+              Guarded with shutil.which("node") and a graceful skipTest.
+      * Strengthened, per Codex P2-5, three Help-file structural tests
+        that previously checked only weak, position-independent
+        signals: test_module_signatures_match_actual_code now compares
+        all four modules' documented signatures against
+        inspect.signature() of the real functions (previously: three
+        physics functions only, via substring match);
+        test_algorithm_step_order_matches_actual_validation_order now
+        walks the algorithm <ol>'s <li> elements in document order and
+        checks each step's expected content at its own index
+        (previously: only that certain keywords co-occurred somewhere on
+        the page); test_parameter_table_defaults_match_main_py now
+        parses the parameter table row by row and compares each row
+        against the live argparse.Namespace from main.parse_args()
+        (previously: five bare numeral substrings checked against the
+        whole page, which could not detect a default attached to the
+        wrong row and did not cover --lw/--dpi/--outdir at all).
+      * Copilot T-2 (bisection-oracle independence): the bisection
+        search in test_bisection_threshold_converges_to_3_sqrt_3 calls
+        integrate_photon_orbit() itself to classify each trial b, so it
+        is not a fully independent oracle for the *classification*
+        outcome the way TestAnalyticVerification's finite-difference and
+        potential-maximization tests are for the underlying physics; it
+        is retained specifically because it independently exercises a
+        different code path (repeated bisection across many b values
+        near the separatrix, rather than one direct call) and pins the
+        converged threshold to 3*sqrt(3) via a method (bisection) wholly
+        distinct from how the source computes critical_b_infinity
+        (closed-form 3*sqrt(3)*GM_over_c2). A clarifying comment was
+        added directly above the test explaining this scope, rather than
+        removing or replacing the test, since it still catches a real
+        class of regression (the capture/escape dichotomy itself
+        drifting away from the analytically-known threshold) that the
+        closed-form tests cannot.
+      * Added regression coverage for every fix above (tangential
+        launches at both sides of the photon sphere, extreme-input
+        ValueError reproducers via both the direct API and the CLI,
+        provenance sidecar content and round-trip precision, a formalized
+        atomic-write concurrency stress test, and delta_phi-based
+        convergence) plus the strengthened/corrected tests already
+        itemized. No previously-passing test was deleted or weakened
+        without a stated reason above; test_escaped_run_ends_at_or_beyond_escape_radius
+        was tightened from assertGreaterEqual to an exact
+        assertAlmostEqual now that escape is event-located rather than
+        loosened.
 """
 
 import ast
@@ -131,6 +295,8 @@ import contextlib
 from datetime import datetime
 import hashlib
 from html.parser import HTMLParser
+import importlib
+import inspect
 import io
 import math
 import os
@@ -140,6 +306,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -295,38 +462,50 @@ class TestModuleDiscovery(unittest.TestCase):
             find_module_dir(Path(MODULE_DIR.anchor))
 
     def test_flattened_layout_smoke_test_only(self):
-        """Prove discovery + import works from a flattened directory.
+        """Prove find_module_dir() itself works from a flattened directory.
 
         This is deliberately NOT a second full run of the suite (see the
-        module docstring): it imports physics_photon from a flattened copy
-        and performs one trivial calculation, then returns.  The full suite
-        below runs exactly once, from the canonical tests/ layout.
+        module docstring): it invokes exactly one trivial test, by fully
+        qualified unittest name, from a flattened copy of this very file,
+        then returns.  The full suite below runs exactly once, from the
+        canonical tests/ layout.
+
+        Audit1 Codex P2-1: the previous version of this test wrote a
+        standalone "_flat_smoke.py" script that did
+        "sys.path.insert(0, '.')" and imported physics_photon directly --
+        that proved the four core modules import cleanly from a flat
+        directory, but never actually called find_module_dir() from one,
+        so a regression in the discovery helper itself (the thing this
+        test CLASS is named for) could have passed unnoticed. Copying
+        this test file into the flat directory and running
+        TestModuleDiscovery.test_finds_flattened_layout from the copy
+        makes MODULE_DIR get computed for real, at import time, by
+        find_module_dir(Path(__file__)) on the copy's own __file__, which
+        now lives directly beside the four core modules with no tests/
+        parent directory at all.
         """
         if os.environ.get("PHOTONORBIT_FLATTENED_SMOKE_CHILD") == "1":
             return
+        this_file = Path(__file__).resolve()
         with tempfile.TemporaryDirectory() as temporary:
             flat_dir = Path(temporary)
             for name in (*CORE_MODULE_FILES, HELP_FILE):
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
-            smoke = flat_dir / "_flat_smoke.py"
-            smoke.write_text(
-                "import sys\n"
-                "sys.path.insert(0, '.')\n"
-                "import physics_photon as p\n"
-                "assert p.radial_acceleration(3.0, 1.0, 1.0) == 0.0\n"
-                "assert abs(p.dphi_dlambda(2.0, 4.0) - 1.0) < 1e-15\n"
-                "print('FLAT_SMOKE_OK')\n",
-                encoding="utf-8",
-            )
+            shutil.copy2(this_file, flat_dir / this_file.name)
+
             environment = os.environ.copy()
             environment["PHOTONORBIT_FLATTENED_SMOKE_CHILD"] = "1"
+            module_name = this_file.stem
             result = subprocess.run(
-                [sys.executable, str(smoke)],
+                [sys.executable, "-m", "unittest", "-v",
+                 f"{module_name}.TestModuleDiscovery.test_finds_flattened_layout"],
                 cwd=flat_dir, env=environment,
                 capture_output=True, text=True, timeout=30, check=False,
             )
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn("FLAT_SMOKE_OK", result.stdout)
+            combined = result.stdout + result.stderr
+            self.assertEqual(result.returncode, 0, combined)
+            self.assertIn("Ran 1 test", combined)
+            self.assertIn("OK", combined)
 
 
 # ======================================================================
@@ -341,20 +520,33 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         self.assertEqual(phys.BUILD_ID, recompute_build_id(MODULE_DIR))
 
     def test_build_id_independent_of_line_endings(self):
-        """BUILD_ID must be stable under LF/CRLF normalization (newline=None)."""
-        digest_lf = hashlib.sha256()
-        digest_crlf = hashlib.sha256()
-        for name in phys.BUILD_ID_COVERS:
-            raw = (MODULE_DIR / name).read_bytes()
-            text_lf = raw.replace(b"\r\n", b"\n")
-            text_crlf = text_lf.replace(b"\n", b"\r\n")
-            normalized = text_lf
-            for digest in (digest_lf, digest_crlf):
-                digest.update(name.encode("utf-8"))
-                digest.update(len(normalized).to_bytes(8, "big"))
-                digest.update(normalized)
-        self.assertEqual(digest_lf.hexdigest()[:12], digest_crlf.hexdigest()[:12])
-        self.assertEqual(digest_lf.hexdigest()[:12], phys.BUILD_ID)
+        """BUILD_ID must be stable under LF/CRLF normalization (newline=None).
+
+        Audit1 Codex P2-3: the previous version of this test fed the SAME
+        "normalized = text_lf" variable into both the "digest_lf" and
+        "digest_crlf" accumulators; "text_crlf" was computed and then
+        never used, so the test could not have failed even if line-ending
+        normalization were completely broken. This version materializes
+        two real on-disk source trees -- one with LF-only, one with
+        CRLF-only line endings -- and runs recompute_build_id() (a
+        byte-for-byte mirror of physics_photon._compute_build_id(), which
+        opens each file with newline=None, Python's universal-newlines
+        mode) against each, so the test genuinely exercises the same file
+        I/O and normalization path production code uses.
+        """
+        with tempfile.TemporaryDirectory() as lf_temp, \
+             tempfile.TemporaryDirectory() as crlf_temp:
+            lf_dir, crlf_dir = Path(lf_temp), Path(crlf_temp)
+            for name in phys.BUILD_ID_COVERS:
+                raw = (MODULE_DIR / name).read_bytes()
+                text_lf = raw.replace(b"\r\n", b"\n")
+                text_crlf = text_lf.replace(b"\n", b"\r\n")
+                (lf_dir / name).write_bytes(text_lf)
+                (crlf_dir / name).write_bytes(text_crlf)
+            build_id_lf = recompute_build_id(lf_dir)
+            build_id_crlf = recompute_build_id(crlf_dir)
+        self.assertEqual(build_id_lf, build_id_crlf)
+        self.assertEqual(build_id_lf, phys.BUILD_ID)
 
     def test_build_id_changes_when_covered_source_changes(self):
         """BUILD_ID must react to a real content change in a covered file."""
@@ -500,6 +692,19 @@ class TestCaptureEscapeDichotomy(unittest.TestCase):
             )
             return info["status"]
 
+        # Copilot T-2: this bisection search calls integrate_photon_orbit()
+        # itself to classify each trial b, so -- unlike
+        # TestAnalyticVerification's finite-difference and potential-
+        # maximization tests -- it is not a fully independent oracle for
+        # the underlying PHYSICS. It is kept anyway because it exercises
+        # a materially different code path (many repeated integrations
+        # bracketing a threshold, via a distinct numerical method --
+        # bisection -- rather than one direct call) and pins the
+        # converged threshold to 3*sqrt(3) independently of the source's
+        # own closed-form critical_b_infinity=3*sqrt(3)*GM_over_c2, so it
+        # still catches a real regression class (the capture/escape
+        # dichotomy drifting away from the analytically-known threshold)
+        # that the closed-form tests do not.
         self.assertEqual(outcome(lo), "captured")
         self.assertEqual(outcome(hi), "escaped")
         for _ in range(30):
@@ -561,6 +766,133 @@ class TestCaptureInsidePhotonSphere(unittest.TestCase):
             GM_over_c2=1.0, r0=3.0, b=5.0, lambda_max=200.0, d_lambda=0.01,
         )
         self.assertEqual(info["status"], "captured")
+
+
+# ======================================================================
+class TestTangentialLaunches(unittest.TestCase):
+    """Regression coverage for Audit1 Codex P1-1 (the negative-zero bug)
+    and the new Help-file EXP-10 exercise built directly on top of it.
+
+    A photon launched exactly tangentially -- b at the local kinematic
+    bound for its r0, so the initial radial velocity is exactly 0.0 --
+    is a legal initial condition, not merely a boundary case, and the
+    fixed code must classify it correctly on both sides of the photon
+    sphere without relying on the sign of any earlier sample.
+    """
+
+    def test_tangential_launch_outside_photon_sphere_escapes_exactly_at_escape_radius(self):
+        GM, r0 = 1.0, 6.0
+        b = r0 / math.sqrt(1.0 - 2.0 * GM / r0)  # exact local kinematic bound
+        x, y, info = phys.integrate_photon_orbit(
+            GM_over_c2=GM, r0=r0, b=b, lambda_max=200.0, d_lambda=0.01,
+        )
+        self.assertEqual(info["status"], "escaped")
+        last_r = math.hypot(x[-1], y[-1])
+        self.assertAlmostEqual(last_r, info["escape_radius"], places=9)
+        self.assertAlmostEqual(info["escape_radius"], 2.0 * r0, places=9)
+
+    def test_tangential_launch_inside_photon_sphere_is_captured(self):
+        GM, r0 = 1.0, 2.5
+        b = r0 / math.sqrt(1.0 - 2.0 * GM / r0)  # exact local kinematic bound
+        x, y, info = phys.integrate_photon_orbit(
+            GM_over_c2=GM, r0=r0, b=b, lambda_max=50.0, d_lambda=0.001,
+        )
+        self.assertEqual(info["status"], "captured")
+        last_r = math.hypot(x[-1], y[-1])
+        self.assertAlmostEqual(last_r, info["r_s"], places=9)
+
+    def test_tangential_launch_exactly_at_photon_sphere_stays_circular(self):
+        # The one case a tangential launch does neither: at r0=3*GM_over_c2
+        # with the exact circular-orbit b, both v_r and the radial
+        # acceleration are identically 0.0 forever, so new_v > 0.0 never
+        # fires and the photon correctly stays status="lambda_max" for
+        # the whole requested run (already covered by
+        # TestCircularPhotonOrbit.test_exact_circular_orbit_stays_on_photon_sphere;
+        # repeated here as part of the EXP-10 trio for a single
+        # self-contained regression class).
+        GM = 1.0
+        b_crit = 3.0 * math.sqrt(3.0) * GM
+        _, _, info = phys.integrate_photon_orbit(
+            GM_over_c2=GM, r0=3.0 * GM, b=b_crit, lambda_max=200.0, d_lambda=0.01,
+        )
+        self.assertEqual(info["status"], "lambda_max")
+
+
+# ======================================================================
+class TestExtremeInputRegressions(unittest.TestCase):
+    """Regression coverage for Audit1 Codex P2-2 / Copilot F-1 / F-2, plus
+    a related defect (ZeroDivisionError on underflow) found while
+    reproducing them with a fresh set of extreme-value probes.
+
+    Every case here previously either raised a raw, undocumented
+    exception (OverflowError or ZeroDivisionError) or, for the step-count
+    case, was handed float('inf') by math.ceil(). All must now raise the
+    program's documented ValueError.
+    """
+
+    def test_radial_acceleration_overflow_from_extreme_radius(self):
+        # r**3 for r=1e200 overflows a Python float.
+        with self.assertRaises(ValueError):
+            phys.radial_acceleration(1e200, 1.0, 1.0)
+
+    def test_radial_acceleration_nonfinite_from_extreme_angular_momentum(self):
+        # L*L for L=1e308 overflows to inf, which is finite-checked and
+        # rejected rather than silently propagated.
+        with self.assertRaises(ValueError):
+            phys.radial_acceleration(5.0, 1e308, 1.0)
+
+    def test_radial_acceleration_zero_division_from_underflowing_radius(self):
+        # r=1e-200 makes r**3=1e-600, far below the smallest positive
+        # float (~5e-324); r**3 underflows to a literal 0.0, and
+        # L*L / 0.0 is a ZeroDivisionError, not an OverflowError. This
+        # was not itself one of Codex's or Copilot's reported
+        # reproducers; it was found by extending their overflow-probe
+        # methodology to underflow while reproducing P2-2/F-2.
+        with self.assertRaises(ValueError):
+            phys.radial_acceleration(1e-200, 1e308, 1.0)
+
+    def test_dphi_dlambda_zero_division_from_underflowing_radius(self):
+        with self.assertRaises(ValueError):
+            phys.dphi_dlambda(1e-200, 1e308)
+
+    def test_step_count_overflow_from_infinite_ratio_rejected_with_documented_message(self):
+        # lambda_max/d_lambda = 1e308/1e-308 evaluates to float('inf');
+        # math.ceil(inf) raises OverflowError if reached. The pre-check
+        # against _MAX_STEPS (a plain float comparison, well-defined
+        # against inf) must reject this with the same documented message
+        # used for an ordinary excessive-but-finite step count.
+        with self.assertRaisesRegex(ValueError, r"5,000,000"):
+            phys.integrate_photon_orbit(
+                GM_over_c2=1.0, r0=20.0, b=5.0,
+                lambda_max=1e308, d_lambda=1e-308,
+            )
+
+    def test_step_count_overflow_reported_cleanly_via_cli(self):
+        result = run_cli(["--lambda_max", "1e308", "--d_lambda", "1e-308"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PhotonOrbit:", result.stderr)
+        self.assertIn("5,000,000", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+    def test_extreme_starting_radius_reported_cleanly_not_as_raw_overflow(self):
+        # Copilot F-1 reproducer 2: integrate_photon_orbit(GM_over_c2=1.0,
+        # r0=1e308, b=0.0, lambda_max=1.0, d_lambda=0.1) previously raised
+        # a raw OverflowError("(34, 'Numerical result out of range')")
+        # from an intermediate power computed during RK4 stepping. This
+        # now surfaces as the documented RuntimeError (mid-integration
+        # failures are RuntimeError, not ValueError, matching every other
+        # "integration stepped to a nonphysical/non-finite state" case).
+        with self.assertRaisesRegex(RuntimeError, "nonphysical"):
+            phys.integrate_photon_orbit(
+                GM_over_c2=1.0, r0=1e308, b=0.0, lambda_max=1.0, d_lambda=0.1,
+            )
+
+    def test_extreme_starting_radius_reported_cleanly_via_cli(self):
+        result = run_cli(["--r0", "1e308", "--b", "0.0",
+                           "--lambda_max", "1.0", "--d_lambda", "0.1"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("PhotonOrbit:", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
 
 
 # ======================================================================
@@ -644,23 +976,82 @@ class TestCircularPhotonOrbit(unittest.TestCase):
 # ======================================================================
 class TestConvergence(unittest.TestCase):
     def test_near_critical_case_converges_as_step_size_shrinks(self):
+        """delta_phi convergence, reworked per Audit1 Codex P1-2/T-6.
+
+        Before the escape-interpolation fix, delta_phi/lambda_final
+        carried a whole-step overshoot error that did not shrink
+        smoothly with d_lambda; this test previously used
+        closest_approach as its convergence oracle instead specifically
+        to route around that. Now that escape is event-located (linearly
+        interpolated to the exact escape_radius crossing), delta_phi
+        itself converges cleanly and is the more direct oracle for "is
+        the integration accurate", so it is used here.
+
+        closest_approach remains intentionally excluded from this
+        oracle: it is simply the smallest SAMPLED radius along the path,
+        not an interpolated turning point, so it can still show a little
+        run-to-run jitter even as delta_phi converges smoothly -- the
+        same caveat now given to students in the Help file's EXP-9. It is
+        only checked below for being finite, not for convergence.
+        """
         b = 5.205
         results = []
         for d_lambda in (0.04, 0.02, 0.01, 0.005):
             _, _, info = phys.integrate_photon_orbit(
                 GM_over_c2=1.0, r0=20.0, b=b, lambda_max=400.0, d_lambda=d_lambda,
             )
+            self.assertEqual(info["status"], "escaped")
             results.append(info)
 
         finest = results[-1]
-        errors = [abs(r["closest_approach"] - finest["closest_approach"])
-                  for r in results[:-1]]
-        # Coarser step sizes must show larger (or comparable, for the two
-        # finest) deviation from the finest-resolution answer -- true
-        # convergence, not merely "doesn't crash".
-        self.assertGreater(errors[0], errors[-1])
+        diffs = [abs(r["delta_phi"] - finest["delta_phi"]) for r in results[:-1]]
+        # Each coarser step size must show a strictly larger deviation
+        # from the finest-resolution delta_phi than the next-finer step
+        # size -- true, monotonically shrinking convergence, not merely
+        # "doesn't crash".
+        self.assertEqual(diffs, sorted(diffs, reverse=True))
+        self.assertLess(diffs[-1], diffs[0])
         for value in (r["closest_approach"] for r in results):
             self.assertTrue(math.isfinite(value))
+
+    def test_observed_convergence_order_is_fourth_for_an_event_free_run(self):
+        """Audit1 Copilot T-6: estimate RK4's OBSERVED convergence order
+        from successive step-halvings (h, h/2, h/4), rather than only
+        checking "finer is at least as good as coarser".
+
+        This is deliberately run on a status="lambda_max" trajectory
+        (integration proceeds for the full requested affine parameter
+        with no horizon/escape event at all), isolating the RK4 stepping
+        error from the SEPARATE linear-interpolation error introduced at
+        an event crossing (Copilot T-7): the two have different orders in
+        h (RK4 stepping is O(h^4); the horizon/escape crossing location
+        is only linearly interpolated, O(h^1)), and mixing them would
+        make an order estimate near a captured/escaped run's diagnostics
+        muddy at best. See the Response-to-Audit1 report for the
+        numerical demonstration of this distinction, and for the
+        rationale for not extending event-location itself to a
+        higher-order scheme this round.
+        """
+        GM_over_c2, r0, b, lambda_max = 1.0, 20.0, 5.1961, 30.0
+        delta_phis = []
+        for d_lambda in (0.02, 0.01, 0.005):
+            _, _, info = phys.integrate_photon_orbit(
+                GM_over_c2=GM_over_c2, r0=r0, b=b,
+                lambda_max=lambda_max, d_lambda=d_lambda,
+            )
+            self.assertEqual(info["status"], "lambda_max")
+            delta_phis.append(info["delta_phi"])
+
+        diff_coarse = abs(delta_phis[0] - delta_phis[1])
+        diff_fine = abs(delta_phis[1] - delta_phis[2])
+        self.assertGreater(diff_fine, 0.0)
+        observed_order = math.log2(diff_coarse / diff_fine)
+        # RK4 predicts an error reduction factor of 2^4=16 (order 4) per
+        # halving; allow a generous +/-0.5 band around that so the test
+        # is not sensitive to which two step sizes are compared, while
+        # still failing if the order collapsed toward 1 (linear) or 2.
+        self.assertGreater(observed_order, 3.5)
+        self.assertLess(observed_order, 4.5)
 
 
 # ======================================================================
@@ -698,13 +1089,18 @@ class TestArrayAndDiagnosticsConsistency(unittest.TestCase):
         self.assertAlmostEqual(last_r, info["r_s"], places=9)
         self.assertAlmostEqual(info["closest_approach"], info["r_s"], places=9)
 
-    def test_escaped_run_ends_at_or_beyond_escape_radius(self):
+    def test_escaped_run_ends_exactly_at_escape_radius(self):
+        # Tightened from assertGreaterEqual to an exact assertAlmostEqual
+        # (Audit1 Codex P1-2): escape is now linearly interpolated to the
+        # exact escape_radius crossing within the final RK4 step, mirroring
+        # test_captured_run_ends_exactly_at_the_event_horizon above, so a
+        # whole-step overshoot past escape_radius is itself a regression.
         x, y, info = phys.integrate_photon_orbit(
             GM_over_c2=1.0, r0=20.0, b=6.0, lambda_max=200.0, d_lambda=0.01,
         )
         self.assertEqual(info["status"], "escaped")
         last_r = math.hypot(x[-1], y[-1])
-        self.assertGreaterEqual(last_r, info["escape_radius"])
+        self.assertAlmostEqual(last_r, info["escape_radius"], places=9)
 
     def test_lambda_max_run_reaches_the_requested_affine_parameter(self):
         _, _, info = phys.integrate_photon_orbit(
@@ -884,10 +1280,18 @@ class TestPlotGuardrails(unittest.TestCase):
                 plotting.plot_photon_orbit([1.0, 2.0], [0.0, 1.0], 5.0,
                                             self.VALID_INFO, outdir=outdir, dpi=60)
             files = os.listdir(outdir)
-            self.assertEqual(len(files), 1)
-            self.assertTrue(files[0].startswith("photon_b5_captured_"))
-            self.assertTrue(files[0].endswith(".png"))
-            self.assertGreater(os.path.getsize(os.path.join(outdir, files[0])), 0)
+            # Audit1 Codex P1-3/Copilot Section 7: a call with outdir now
+            # also writes a ".provenance.txt" sidecar next to the PNG (see
+            # TestProvenanceSidecar below), so a saved run is two files,
+            # not one.
+            self.assertEqual(len(files), 2)
+            pngs = [f for f in files if f.endswith(".png")]
+            sidecars = [f for f in files if f.endswith(".provenance.txt")]
+            self.assertEqual(len(pngs), 1)
+            self.assertEqual(len(sidecars), 1)
+            self.assertTrue(pngs[0].startswith("photon_b5_captured_"))
+            self.assertEqual(sidecars[0], pngs[0][: -len(".png")] + ".provenance.txt")
+            self.assertGreater(os.path.getsize(os.path.join(outdir, pngs[0])), 0)
 
     def test_axis_labels_and_title_state_correct_physics(self):
         captured = {}
@@ -913,7 +1317,9 @@ class TestPlotGuardrails(unittest.TestCase):
 
 # ======================================================================
 class TestOutputFileCollisionAvoidance(unittest.TestCase):
-    """Regression tests for the same-wall-clock-second PNG collision fix."""
+    """Regression tests for the same-wall-clock-second PNG collision fix,
+    and (Audit1 Codex P3-1/Copilot F-3) for the atomic-reservation fix
+    that replaced it this round."""
 
     def test_two_saves_in_the_same_second_produce_two_distinct_files(self):
         info = dict(r_s=2.0, r_photon=3.0, status="captured",
@@ -924,10 +1330,16 @@ class TestOutputFileCollisionAvoidance(unittest.TestCase):
                 plotting.plot_photon_orbit([1, 2], [1, 2], 5.0, info, outdir=outdir)
                 plotting.plot_photon_orbit([1, 2], [1, 2], 5.0, info, outdir=outdir)
             files = sorted(os.listdir(outdir))
-            self.assertEqual(len(files), 2)
+            # Each save now writes a PNG plus a provenance sidecar, so two
+            # saves in the same frozen second produce four files, not two.
+            self.assertEqual(len(files), 4)
             for name in files:
                 self.assertGreater(os.path.getsize(os.path.join(outdir, name)), 0)
-            self.assertTrue(files[1].endswith("_2.png"))
+            pngs = sorted(f for f in files if f.endswith(".png"))
+            self.assertTrue(pngs[1].endswith("_2.png"))
+            for png in pngs:
+                sidecar = png[: -len(".png")] + ".provenance.txt"
+                self.assertIn(sidecar, files)
 
     def test_three_saves_in_the_same_second_all_kept(self):
         info = dict(r_s=2.0, r_photon=3.0, status="escaped",
@@ -937,7 +1349,147 @@ class TestOutputFileCollisionAvoidance(unittest.TestCase):
                  mock.patch("matplotlib.pyplot.show"):
                 for _ in range(3):
                     plotting.plot_photon_orbit([1, 2], [1, 2], 6.0, info, outdir=outdir)
-            self.assertEqual(len(os.listdir(outdir)), 3)
+            files = os.listdir(outdir)
+            self.assertEqual(len(files), 6)  # 3 PNGs + 3 sidecars
+            self.assertEqual(len([f for f in files if f.endswith(".png")]), 3)
+            self.assertEqual(
+                len([f for f in files if f.endswith(".provenance.txt")]), 3
+            )
+
+    def test_concurrent_saves_from_multiple_threads_never_collide(self):
+        """Formalizes the manual 12-thread verification done this round.
+
+        Audit1 Codex P3-1/Copilot F-3: the Kickoff round's _unique_path()
+        was check-then-write, a race between concurrent processes/threads
+        sharing a clock tick. _reserve_unique_stem() closes that race with
+        os.open(..., O_CREAT|O_EXCL). All threads share the SAME frozen
+        timestamp, so this only passes if the atomic reservation genuinely
+        serializes stem selection; a reintroduced check-then-write race
+        would intermittently drop a PNG or a sidecar, or produce a
+        duplicate stem, under this test.
+        """
+        info = dict(r_s=2.0, r_photon=3.0, status="captured",
+                     closest_approach=2.0, delta_phi=1.0)
+        n_threads = 12
+        errors = []
+
+        def worker():
+            try:
+                with mock.patch("matplotlib.pyplot.show"):
+                    plotting.plot_photon_orbit([1, 2], [1, 2], 5.0, info, outdir=outdir)
+            except Exception as exc:  # noqa: BLE001 - surfaced via `errors`
+                errors.append(exc)
+
+        with tempfile.TemporaryDirectory() as outdir, \
+             mock.patch.object(plotting, "datetime", FrozenDatetime):
+            threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=30)
+
+            self.assertEqual(errors, [])
+            files = os.listdir(outdir)
+            pngs = [f for f in files if f.endswith(".png")]
+            sidecars = [f for f in files if f.endswith(".provenance.txt")]
+            self.assertEqual(len(pngs), n_threads)
+            self.assertEqual(len(sidecars), n_threads)
+            self.assertEqual(len(set(pngs)), n_threads)  # every stem unique
+            for png in pngs:
+                self.assertIn(png[: -len(".png")] + ".provenance.txt", sidecars)
+                self.assertGreater(os.path.getsize(os.path.join(outdir, png)), 0)
+
+
+# ======================================================================
+class TestProvenanceSidecar(unittest.TestCase):
+    """Regression tests for the provenance sidecar added this round
+    (Audit1 Codex P1-3, Copilot Section 7; see the module docstring's
+    Audit1 entry for why this was implemented despite Gemini's Kickoff-
+    round endorsement of omitting it)."""
+
+    def _run_and_read_sidecar(self, **plot_kwargs):
+        info = dict(r_s=2.0, r_photon=3.0, status="escaped",
+                     closest_approach=3.0686559820284285, delta_phi=1.2345678901234567)
+        with tempfile.TemporaryDirectory() as outdir:
+            with mock.patch("matplotlib.pyplot.show"):
+                plotting.plot_photon_orbit(
+                    [1.0, 2.0], [0.0, 1.0], 5.196152422706632, info,
+                    outdir=outdir, **plot_kwargs,
+                )
+            files = os.listdir(outdir)
+            sidecars = [f for f in files if f.endswith(".provenance.txt")]
+            self.assertEqual(len(sidecars), 1)
+            return (Path(outdir) / sidecars[0]).read_text(encoding="utf-8")
+
+    def test_sidecar_records_physics_parameters_at_repr_precision(self):
+        # A near-separatrix b with a 6-significant-digit console rounding
+        # that changes the classification outcome (Codex's concrete
+        # motivating reproducer) must round-trip EXACTLY through the
+        # sidecar, not merely approximately.
+        b = 5.196152422706632
+        r0 = 20.0
+        GM_over_c2 = 1.0
+        lambda_max = 200.0
+        d_lambda = 0.01
+        text = self._run_and_read_sidecar(
+            GM_over_c2=GM_over_c2, r0=r0, lambda_max=lambda_max, d_lambda=d_lambda,
+        )
+        for name, value in (
+            ("GM_over_c2", GM_over_c2), ("r0", r0),
+            ("lambda_max", lambda_max), ("d_lambda", d_lambda),
+        ):
+            with self.subTest(name=name):
+                line = f"    {name} = {value!r}"
+                self.assertIn(line, text)
+
+        # b itself is passed as a positional argument, not a kwarg, but
+        # must also appear at repr precision inside the reproduce-with
+        # command line.
+        self.assertIn(repr(b), text)
+
+    def test_sidecar_contains_a_working_reproduce_with_command(self):
+        text = self._run_and_read_sidecar(
+            GM_over_c2=1.0, r0=20.0, lambda_max=200.0, d_lambda=0.01,
+        )
+        match = re.search(r"^\s*python main\.py .*$", text, re.M)
+        self.assertIsNotNone(match)
+        command = match.group(0).strip()
+        self.assertIn("--GM_over_c2 1.0", command)
+        self.assertIn("--r0 20.0", command)
+        self.assertIn("--b 5.196152422706632", command)
+        self.assertIn("--lambda_max 200.0", command)
+        self.assertIn("--d_lambda 0.01", command)
+
+        # The command must actually be runnable and reproduce the same
+        # outcome fields recorded in the sidecar (round-trip, not just
+        # textual presence).
+        args = command.split()[2:]  # drop "python", "main.py"
+        result = run_cli(args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # b=5.196152422706632 at r0=20 is fractionally below the exact
+        # critical impact parameter (3*sqrt(3), same repr to all 16
+        # digits) and is captured, not escaped -- this is itself the
+        # numerically sensitive behavior the sidecar exists to let a
+        # student reproduce exactly.
+        self.assertIn("captured", result.stdout)
+
+    def test_sidecar_omits_reproduce_command_when_physics_params_not_supplied(self):
+        text = self._run_and_read_sidecar()  # no GM_over_c2/r0/lambda_max/d_lambda
+        self.assertIn("(not provided to plot_photon_orbit)", text)
+        self.assertIn(
+            "Reproduce-with command omitted", text,
+        )
+        self.assertNotIn("Reproduce with:", text)
+
+    def test_sidecar_records_rendering_parameters_and_outcome_fields(self):
+        text = self._run_and_read_sidecar(
+            GM_over_c2=1.0, r0=20.0, lambda_max=200.0, d_lambda=0.01, dpi=222, lw=2.5,
+        )
+        self.assertIn("dpi = 222", text)
+        self.assertIn("lw  = 2.5", text)
+        self.assertIn("status = 'escaped'", text)
+        self.assertIn(repr(3.0686559820284285), text)
+        self.assertIn(repr(1.2345678901234567), text)
 
 
 # ======================================================================
@@ -1070,13 +1622,67 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIn(href, section_ids)
 
     def test_module_signatures_match_actual_code(self):
-        module_text = normalized_text(self.root)
-        self.assertIn("radial_acceleration(r, L, GM_over_c2)", module_text)
-        self.assertIn("dphi_dlambda(r, L)", module_text)
+        """Cross-check EVERY module-card's declared signature against the
+        real function signature via inspect.signature(), not just the
+        three physics functions (Audit1 Codex P2-5: the previous version
+        checked only physics_photon.py's three functions by substring, so
+        a drift in driver_photon.py's or plot_photon.py's documented
+        keyword-argument defaults -- exactly the kind of thing that
+        changed this round, with the new GM_over_c2/r0/lambda_max/
+        d_lambda kwargs on plot_photon_orbit() -- would not have been
+        caught here).
+        """
+        def flat(text):
+            return re.sub(r"\s+", "", text)
+
+        def param_pattern(name, default=inspect.Parameter.empty):
+            if default is inspect.Parameter.empty:
+                return rf"[(,]{re.escape(name)}[,)]"
+            return rf"[(,]{re.escape(name)}={re.escape(repr(default))}[,)]"
+
+        cards = descendants(self.root, lambda n: n.attrs.get("class") == "module-card")
+        self.assertEqual(len(cards), 4)
+
+        def sig_text(card):
+            blocks = descendants(card, lambda n: n.attrs.get("class") == "sig")
+            self.assertEqual(len(blocks), 1)
+            return flat(blocks[0].text())
+
+        physics_card = next(c for c in cards if "physics_photon.py" in normalized_text(c))
+        driver_card = next(c for c in cards if "driver_photon.py" in normalized_text(c))
+        plot_card = next(c for c in cards if "plot_photon.py" in normalized_text(c))
+        main_card = next(c for c in cards if "main.py" in normalized_text(c)
+                          and "Entry Point" in normalized_text(c))
+
+        physics_text = sig_text(physics_card)
+        self.assertIn(flat("def radial_acceleration(r, L, GM_over_c2)"), physics_text)
+        self.assertIn(flat("def dphi_dlambda(r, L)"), physics_text)
         self.assertIn(
-            "integrate_photon_orbit( GM_over_c2, r0, b, lambda_max, d_lambda )".replace(" ", ""),
-            module_text.replace(" ", ""),
+            flat("def integrate_photon_orbit(GM_over_c2, r0, b, lambda_max, d_lambda)"),
+            physics_text,
         )
+        self.assertEqual(
+            list(inspect.signature(phys.integrate_photon_orbit).parameters),
+            ["GM_over_c2", "r0", "b", "lambda_max", "d_lambda"],
+        )
+
+        driver_text = sig_text(driver_card)
+        self.assertIn(flat("def driver_photon_orbit("), driver_text)
+        for name, param in inspect.signature(driver.driver_photon_orbit).parameters.items():
+            with self.subTest(module="driver_photon.py", param=name):
+                self.assertRegex(driver_text, param_pattern(name, param.default))
+
+        plot_text = sig_text(plot_card)
+        self.assertIn(flat("def plot_photon_orbit("), plot_text)
+        for name, param in inspect.signature(plotting.plot_photon_orbit).parameters.items():
+            with self.subTest(module="plot_photon.py", param=name):
+                self.assertRegex(plot_text, param_pattern(name, param.default))
+
+        main_text = sig_text(main_card)
+        for flag in ("--GM_over_c2", "--r0", "--b", "--lambda_max",
+                     "--d_lambda", "--lw", "--dpi", "--outdir"):
+            with self.subTest(module="main.py", flag=flag):
+                self.assertIn(flag, main_text)
 
     def test_no_leftover_boilerplate_or_java_references(self):
         for pattern in (r"\.jar\b", r"\bapplet\b", r"\bJava\b",
@@ -1085,6 +1691,16 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIsNone(re.search(pattern, self.html))
 
     def test_mathjax_config_is_syntactically_valid_javascript(self):
+        """Audit1 Codex P2-4: this test previously shelled out to
+        "node --check" unconditionally, so on a machine without Node.js
+        installed it failed for an environmental reason unrelated to the
+        Help file's actual correctness. Guarded with shutil.which("node")
+        and a graceful skipTest; see
+        test_mathjax_check_is_skipped_when_node_is_unavailable below for
+        a regression test of the guard itself.
+        """
+        if shutil.which("node") is None:
+            self.skipTest("node executable not available in this environment")
         match = re.search(r"<script>\s*window\.MathJax.*?</script>", self.html, re.S)
         self.assertIsNotNone(match)
         js = match.group(0).replace("<script>", "").replace("</script>", "")
@@ -1097,6 +1713,16 @@ class TestHelpFile(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         finally:
             os.unlink(js_path)
+
+    def test_mathjax_check_is_skipped_when_node_is_unavailable(self):
+        """Regression test for the P2-4 skip guard itself: with
+        shutil.which patched to report node as absent, the syntax-check
+        test must raise unittest.SkipTest rather than attempting to run
+        node (which would otherwise raise FileNotFoundError and be
+        reported as an ERROR, not a clean SKIP)."""
+        with mock.patch("shutil.which", return_value=None):
+            with self.assertRaises(unittest.SkipTest):
+                self.test_mathjax_config_is_syntactically_valid_javascript()
 
     def test_mathjax_config_enables_dollar_delimited_inline_math(self):
         match = re.search(r"window\.MathJax\s*=\s*\{.*?\};", self.html, re.S)
@@ -1111,18 +1737,56 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("re-download", text.replace("Re-download", "re-download"))
 
     def test_console_summary_table_row_documents_d_lambda(self):
-        self.assertIn("d_lambda", self.html)
-        self.assertIn(
-            "RK4 step size",
-            self.html.replace("\n", " "),
-        )
+        """Audit1 Copilot T-4: the previous version checked "d_lambda" and
+        "RK4 step size" occur SOMEWHERE in the whole HTML document -- both
+        strings could remain true while the specific Console-summary row
+        regressed (e.g. if that row's wording were edited elsewhere and
+        the phrases just happened to survive in another section). This
+        scopes the check to the out-table row whose first cell reads
+        "Console summary".
+        """
+        rows = descendants(self.root, lambda n: n.tag == "tr")
+        console_rows = [
+            row for row in rows
+            if descendants(row, lambda n: n.attrs.get("class") == "oname")
+            and normalized_text(
+                descendants(row, lambda n: n.attrs.get("class") == "oname")[0]
+            ) == "Console summary"
+        ]
+        self.assertEqual(len(console_rows), 1)
+        row_text = normalized_text(console_rows[0])
+        self.assertIn("d_lambda", row_text)
+        self.assertIn("RK4 step size", row_text)
 
     def test_algorithm_step_order_matches_actual_validation_order(self):
-        steps = [normalized_text(li) for li in descendants(self.root, lambda n: n.tag == "li")]
-        algorithm_steps = [s for s in steps if "finite" in s or "event horizon" in s]
-        self.assertTrue(any("finite" in s and "GM_over_c2" in s for s in algorithm_steps))
-        self.assertTrue(any("event horizon" in s and "lambda_max" in s and "d_lambda" in s
-                             for s in algorithm_steps))
+        """Check the real ORDER of the Algorithm section's <ol> steps,
+        not merely that certain keywords co-occur somewhere on the page
+        (Audit1 Codex P2-5). Each expected fragment set below must be
+        found in the step at its OWN index, matching the order actually
+        implemented in integrate_photon_orbit()."""
+        algorithm_section = next(
+            s for s in descendants(self.root, lambda n: n.tag == "section")
+            if s.attrs.get("id") == "algorithm"
+        )
+        ol_nodes = descendants(algorithm_section, lambda n: n.tag == "ol")
+        self.assertEqual(len(ol_nodes), 1)
+        steps = [normalized_text(li) for li in descendants(ol_nodes[0], lambda n: n.tag == "li")]
+        self.assertEqual(len(steps), 8)
+
+        expected_fragments_by_step = [
+            ("finite", "GM_over_c2"),
+            ("event horizon", "nonnegative", "lambda_max", "d_lambda"),
+            ("radial first integral",),
+            ("E=1", "L=b"),
+            ("RK4",),
+            ("event horizon", "escape radius", "lambda_max"),
+            ("Cartesian", "status", "closest approach"),
+            ("console", "PNG"),
+        ]
+        for index, (step_text, fragments) in enumerate(zip(steps, expected_fragments_by_step)):
+            with self.subTest(step=index + 1):
+                for fragment in fragments:
+                    self.assertIn(fragment, step_text)
 
     def test_exp6_wording_matches_actual_program_output_capabilities(self):
         exp_cards = descendants(self.root, lambda n: n.attrs.get("class") == "exp-card")
@@ -1131,9 +1795,12 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("console summary", text)
         self.assertIn("physics_photon.integrate_photon_orbit", text)
 
-    def test_all_nine_exercises_present_and_difficulty_labeled(self):
+    def test_all_ten_exercises_present_and_difficulty_labeled(self):
+        # Was 9 exercises at the Kickoff round; EXP-10 (Tangential
+        # Launches and the Local Kinematic Bound) was added this round to
+        # directly exercise the Audit1 Codex P1-1 fix.
         exp_cards = descendants(self.root, lambda n: n.attrs.get("class") == "exp-card")
-        self.assertEqual(len(exp_cards), 9)
+        self.assertEqual(len(exp_cards), 10)
         labels = [normalized_text(descendants(c, lambda n: n.attrs.get("class") == "ec-num")[0])
                   for c in exp_cards]
         for label in labels:
@@ -1154,16 +1821,54 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("captured", text)
         self.assertIn("escape", text.lower())
         self.assertIn("unstable", text.lower())
+        # Audit1 Copilot T-5: the description should explicitly name
+        # gravitational light bending, not just capture/escape/photon
+        # sphere vocabulary.
+        self.assertIn("light bending", text.lower())
 
     def test_parameter_table_defaults_match_main_py(self):
-        table_text = normalized_text(
-            descendants(self.root, lambda n: n.attrs.get("class") == "param-table")[0]
-        )
-        self.assertIn("1.0", table_text)   # GM_over_c2 default
-        self.assertIn("20.0", table_text)  # r0 default
-        self.assertIn("5.0", table_text)   # b default
-        self.assertIn("200.0", table_text)  # lambda_max default
-        self.assertIn("0.01", table_text)  # d_lambda default
+        """Row-by-row: every documented --flag/default pair must equal
+        the live argparse default in main.py.
+
+        Audit1 Codex P2-5: the previous version of this test only checked
+        that five bare numeral substrings ("1.0", "20.0", "5.0", "200.0",
+        "0.01") appeared SOMEWHERE in the whole table's text -- it could
+        not detect a default attached to the wrong parameter (e.g.
+        "20.0" listed as b's default instead of r0's) and did not cover
+        --lw, --dpi, or --outdir at all. This version parses each row of
+        the param-table into a (flag, documented-default) pair and
+        compares it against main.parse_args()'s actual Namespace, called
+        with no command-line arguments so every field is its coded
+        default.
+        """
+        table = descendants(self.root, lambda n: n.attrs.get("class") == "param-table")[0]
+        rows = [
+            row for row in descendants(table, lambda n: n.tag == "tr")
+            if descendants(row, lambda n: n.attrs.get("class") == "pname")
+        ]
+        self.assertGreater(len(rows), 0)
+
+        main_module = importlib.import_module("main")
+        with mock.patch.object(sys, "argv", ["main.py"]):
+            args = main_module.parse_args()
+
+        flag_to_attr = {
+            "--GM_over_c2": "GM_over_c2", "--r0": "r0", "--b": "b",
+            "--lambda_max": "lambda_max", "--d_lambda": "d_lambda",
+            "--lw": "lw", "--dpi": "dpi", "--outdir": "outdir",
+        }
+        documented_flags = set()
+        for row in rows:
+            pname = normalized_text(descendants(row, lambda n: n.attrs.get("class") == "pname")[0])
+            pdefault = normalized_text(
+                descendants(row, lambda n: n.attrs.get("class") == "pdefault")[0]
+            )
+            with self.subTest(flag=pname):
+                self.assertIn(pname, flag_to_attr, f"undocumented flag {pname!r} in param-table")
+                documented_flags.add(pname)
+                actual_default = getattr(args, flag_to_attr[pname])
+                self.assertEqual(pdefault, str(actual_default))
+        self.assertEqual(documented_flags, set(flag_to_attr))
 
 
 if __name__ == "__main__":

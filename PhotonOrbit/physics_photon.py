@@ -7,7 +7,7 @@ geodesics in the equatorial plane of Schwarzschild spacetime.
 
 import math
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.2.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -66,17 +66,76 @@ def _require_finite(name, value):
 
 
 def radial_acceleration(r, L, GM_over_c2):
-    """Return d²r/dλ² for an equatorial Schwarzschild null geodesic."""
+    """Return d²r/dλ² for an equatorial Schwarzschild null geodesic.
+
+    Validates that r, L and GM_over_c2 are finite reals (Audit1 Copilot
+    F-2: this public function previously checked only r>0, so an extreme
+    but "finite" r such as 1e200 could raise a raw OverflowError out of
+    r**3, and an extreme L such as 1e308 could silently return nan) and
+    guards the arithmetic itself, so every rejection -- ordinary or
+    extreme -- is the same documented ValueError rather than an
+    uncaught OverflowError or a silent nan.
+    """
+    _require_finite("r", r)
+    _require_finite("L", L)
+    _require_finite("GM_over_c2", GM_over_c2)
     if r <= 0.0:
         raise ValueError("r must remain positive during integration.")
-    return (L * L / r**3) * (1.0 - 3.0 * GM_over_c2 / r)
+    try:
+        value = (L * L / r**3) * (1.0 - 3.0 * GM_over_c2 / r)
+    except (OverflowError, ZeroDivisionError) as exc:
+        # ZeroDivisionError added post-Audit1 (found while reproducing
+        # Copilot F-2/Codex P2-2 with a fresh set of extreme-but-finite
+        # inputs, not itself raised by either audit): an r small enough
+        # that r**3 underflows to a *literal* 0.0 float (e.g. r=1e-200,
+        # since 1e-200**3=1e-600 is far below the smallest positive
+        # float, ~5e-324) makes "L*L / r**3" a division by zero rather
+        # than an overflow -- a distinct Python exception type that the
+        # original OverflowError-only except clause let straight through
+        # as an uncaught traceback. Folding it into the same finite-
+        # value ValueError keeps a single, documented failure mode for
+        # every extreme-input case, regardless of whether the extremity
+        # manifests as overflow (too large) or underflow (too small).
+        raise ValueError(
+            "radial_acceleration overflowed for the given r, L, GM_over_c2; "
+            "these values are too extreme for this program's geometric-unit scale."
+        ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            "radial_acceleration produced a non-finite result for the given "
+            "r, L, GM_over_c2; these values are too extreme for this "
+            "program's geometric-unit scale."
+        )
+    return value
 
 
 def dphi_dlambda(r, L):
-    """Return dφ/dλ = L/r²."""
+    """Return dφ/dλ = L/r².
+
+    Validates r and L (Audit1 Copilot F-2, same rationale as
+    radial_acceleration above) and guards the arithmetic itself.
+    """
+    _require_finite("r", r)
+    _require_finite("L", L)
     if r <= 0.0:
         raise ValueError("r must remain positive during integration.")
-    return L / (r * r)
+    try:
+        value = L / (r * r)
+    except (OverflowError, ZeroDivisionError) as exc:
+        # ZeroDivisionError added post-Audit1; see the matching comment in
+        # radial_acceleration() above -- r*r can underflow to a literal
+        # 0.0 for a sufficiently small (but finite and positive) r.
+        raise ValueError(
+            "dphi_dlambda overflowed for the given r, L; these values are "
+            "too extreme for this program's geometric-unit scale."
+        ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            "dphi_dlambda produced a non-finite result for the given r, L; "
+            "these values are too extreme for this program's geometric-unit "
+            "scale."
+        )
+    return value
 
 
 def _derivatives(r, v_r, phi, L, GM_over_c2):
@@ -153,12 +212,22 @@ def integrate_photon_orbit(GM_over_c2, r0, b, lambda_max, d_lambda):
     if d_lambda <= 0.0:
         raise ValueError("d_lambda must be greater than zero.")
 
-    n_steps = math.ceil(lambda_max / d_lambda)
-    if n_steps > _MAX_STEPS:
+    # Audit1 Codex P1-2/Copilot F-1: compare the ratio to the step cap
+    # BEFORE calling math.ceil() on it. lambda_max/d_lambda can itself
+    # legitimately evaluate to float('inf') for extreme-but-finite inputs
+    # (e.g. lambda_max=1e308, d_lambda=1e-308); Python's float division
+    # returns inf silently for that, but math.ceil(inf) raises an
+    # uncaught OverflowError. Testing the ratio against _MAX_STEPS first
+    # (a plain float comparison, well-defined even against inf) rejects
+    # that case with the normal documented ValueError instead.
+    step_ratio = lambda_max / d_lambda
+    if not math.isfinite(step_ratio) or step_ratio > _MAX_STEPS:
         raise ValueError(
-            f"lambda_max/d_lambda would require about {n_steps:,} steps; "
-            f"limit the run to {_MAX_STEPS:,} steps or fewer."
+            f"lambda_max/d_lambda would require more than {_MAX_STEPS:,} "
+            "steps (or is not finite); limit the run to "
+            f"{_MAX_STEPS:,} steps or fewer."
         )
+    n_steps = math.ceil(step_ratio)
 
     E = 1.0
     L = b
@@ -228,19 +297,56 @@ def integrate_photon_orbit(GM_over_c2, r0, b, lambda_max, d_lambda):
             status = "captured"
             break
 
+        # Has the photon turned outward by the END of this step? Audit1
+        # Codex P1-1: the previous test, "previous_v < 0.0 <= v_r", required
+        # a STRICTLY negative sample beforehand. A legal tangential start
+        # (b at the local kinematic bound, v_r=0 initially) never satisfies
+        # that: Python's -math.sqrt(0.0) is negative zero, and -0.0 < 0.0 is
+        # False, so a photon that starts at rest and is immediately pushed
+        # outward by a positive radial acceleration (any r0 > 3*GM_over_c2)
+        # never had the flag set and could travel arbitrarily far while
+        # still being reported as status="lambda_max". Testing new_v > 0.0
+        # directly (with no requirement on the sign of the sample before
+        # it) catches that first outward step, while still leaving the
+        # exact circular orbit (r0=3*GM_over_c2, b=b_crit, where v_r and
+        # the acceleration are both exactly 0.0 forever) never satisfying
+        # new_v > 0.0, so it correctly stays "lambda_max".
+        now_outward = turned_outward or new_v > 0.0
+
+        # Stop at the escape radius rather than overshooting past it.
+        # Audit1 Codex P1-2: escaping trajectories previously accepted and
+        # appended a whole RK4 step before checking r>=escape_radius, so
+        # the recorded lambda_final/delta_phi/closest-approach-adjacent
+        # diagnostics carried a step-phase error that did not shrink
+        # smoothly with d_lambda -- contaminating exactly the convergence
+        # comparison EXP-9 asks students to make. Linear interpolation
+        # within the crossing step, symmetric with the horizon-crossing
+        # interpolation above, locates the escape_radius crossing itself.
+        if now_outward and new_r >= escape_radius:
+            if new_r > previous_r:
+                fraction = (escape_radius - previous_r) / (new_r - previous_r)
+                fraction = min(1.0, max(0.0, fraction))
+            else:
+                fraction = 1.0
+
+            r = escape_radius
+            v_r = previous_v + fraction * (new_v - previous_v)
+            phi = previous_phi + fraction * (new_phi - previous_phi)
+            lambda_value = previous_lambda + fraction * h
+
+            x_values.append(r * math.cos(phi))
+            y_values.append(r * math.sin(phi))
+            min_r = min(min_r, r)
+            status = "escaped"
+            break
+
         r, v_r, phi = new_r, new_v, new_phi
         lambda_value += h
-
-        if previous_v < 0.0 <= v_r:
-            turned_outward = True
+        turned_outward = now_outward
 
         x_values.append(r * math.cos(phi))
         y_values.append(r * math.sin(phi))
         min_r = min(min_r, r)
-
-        if turned_outward and r >= escape_radius:
-            status = "escaped"
-            break
 
     info = {
         "status": status,

@@ -89,7 +89,15 @@ def main():
             dpi=args.dpi,
             lw=args.lw,
         )
-    except (ValueError, RuntimeError, OSError) as exc:
+    except (ValueError, RuntimeError, OSError, OverflowError, ZeroDivisionError) as exc:
+        # OverflowError and ZeroDivisionError are caught here purely as
+        # defense in depth: as of Audit1 (Codex P1-2/Copilot F-1) plus a
+        # follow-up underflow fix found while reproducing those findings,
+        # physics_photon.py itself now rejects extreme-but-finite inputs
+        # with a clean ValueError/RuntimeError before either of these can
+        # occur, so this branch should not normally be reached; it stays
+        # only to guarantee main.py never surfaces a raw traceback if a
+        # future extreme-input path is missed.
         raise SystemExit(f"PhotonOrbit: {exc}") from exc
 
 

@@ -16,48 +16,128 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 
 
-def _timestamp_name(prefix):
-    return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+def _base_stem(prefix):
+    return f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 
-def _unique_path(outdir, prefix):
+def _reserve_unique_stem(outdir, prefix):
     """
-    Return a PNG path in `outdir` for `prefix` that does not already exist.
+    Atomically reserve a filename stem in `outdir` for which neither
+    "<stem>.png" nor "<stem>.provenance.txt" already exists, and return
+    (stem, png_path, sidecar_path). The PNG path is left behind as an
+    empty, exclusively-created placeholder that fig.savefig() then
+    overwrites with real image data.
 
-    Two runs with the same impact parameter and outcome status (for example
-    the repeated d_lambda convergence runs of EXP-9) that both land in the
-    same wall-clock second would otherwise collide on
-    `_timestamp_name(prefix)` and the second run would silently overwrite
-    the first, discarding it with no warning. If the plain timestamped name
-    is already taken, this appends "_2", "_3", ... until an unused name is
-    found, so every saved run is kept.
+    Two runs with the same impact parameter and outcome status (for
+    example the repeated d_lambda convergence runs of EXP-9) that both
+    land in the same wall-clock second would otherwise collide on a plain
+    timestamped name; appending "_2", "_3", ... resolves that. Audit1
+    Codex P3-1 / Copilot F-3: a plain "does it exist yet?" check followed
+    by a later write is a check-then-act race between two concurrent
+    PhotonOrbit processes -- both can observe the same candidate name as
+    free before either has written to it. os.open(..., O_CREAT|O_EXCL) is
+    a single atomic syscall: it either creates the file because no one
+    else got there first, or fails with FileExistsError because someone
+    did, with no window in between. Reserving the PNG path this way (and
+    checking the sidecar path is also free before attempting it) makes
+    the stem genuinely unique across concurrent processes, not merely
+    across sequential calls in one process.
     """
-    base = _timestamp_name(prefix)
-    path = os.path.join(outdir, base)
-    if not os.path.exists(path):
-        return path
-    stem, ext = os.path.splitext(base)
-    n = 2
+    base = _base_stem(prefix)
+    n = None
     while True:
-        candidate = os.path.join(outdir, f"{stem}_{n}{ext}")
-        if not os.path.exists(candidate):
-            return candidate
-        n += 1
+        stem = base if n is None else f"{base}_{n}"
+        png_path = os.path.join(outdir, f"{stem}.png")
+        sidecar_path = os.path.join(outdir, f"{stem}.provenance.txt")
+        if not os.path.exists(sidecar_path):
+            try:
+                fd = os.open(png_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.close(fd)
+            except FileExistsError:
+                pass
+            else:
+                return stem, png_path, sidecar_path
+        n = 2 if n is None else n + 1
 
 
-def _finish(fig, outdir, prefix, dpi):
-    """Optionally save a timestamped PNG, then display the figure."""
+def _format_provenance(b, info, dpi, lw, GM_over_c2, r0, lambda_max, d_lambda):
+    """
+    Build the text written to a saved run's ``.provenance.txt`` sidecar.
+
+    Audit1 Codex P1-3 / Copilot Section 7: a saved PNG's on-figure
+    annotation states only b, status, closest approach and delta_phi --
+    not GM_over_c2, r0, lambda_max, d_lambda, dpi, lw, or the program's
+    version/build -- so the PNG alone could not be used to independently
+    reconstruct the run that produced it. Every value below is written
+    with Python's repr() (the shortest string that round-trips back to
+    the exact same float), not the console's human-readable .6g/.4g
+    formatting, so copying a value out of this file and back into
+    --GM_over_c2/--r0/--b/--lambda_max/--d_lambda reproduces the exact
+    run, including numerically sensitive near-separatrix cases where a
+    six-significant-digit rounding of b changes the outcome.
+    """
+    def line(name, value):
+        if value is None:
+            return f"    {name} = (not provided to plot_photon_orbit)"
+        return f"    {name} = {value!r}"
+
+    lines = [
+        f"PhotonOrbit {info.get('model_version', '?')} "
+        f"(build {info.get('build_id', '?')})",
+        "",
+        "Physics parameters (repr precision; safe to copy back as CLI flags):",
+        line("GM_over_c2", GM_over_c2),
+        line("r0", r0),
+        line("b", b),
+        line("lambda_max", lambda_max),
+        line("d_lambda", d_lambda),
+        "",
+        "Rendering parameters:",
+        f"    dpi = {dpi!r}",
+        f"    lw  = {lw!r}",
+        "",
+        "Outcome:",
+    ]
+    for key in ("status", "closest_approach", "delta_phi", "lambda_final", "steps"):
+        if key in info:
+            lines.append(f"    {key} = {info[key]!r}")
+    lines.append("")
+    if None not in (GM_over_c2, r0, lambda_max, d_lambda):
+        lines.append("Reproduce with:")
+        lines.append(
+            "    python main.py --GM_over_c2 {0!r} --r0 {1!r} --b {2!r} "
+            "--lambda_max {3!r} --d_lambda {4!r}".format(
+                GM_over_c2, r0, b, lambda_max, d_lambda
+            )
+        )
+    else:
+        lines.append(
+            "(Reproduce-with command omitted: this figure was produced by a "
+            "direct call to plot_photon_orbit() that did not supply "
+            "GM_over_c2/r0/lambda_max/d_lambda.)"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _finish(fig, outdir, prefix, dpi, provenance=None):
+    """Optionally save a timestamped PNG (and its provenance sidecar),
+    then display the figure."""
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        path = _unique_path(outdir, prefix)
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
-        print(f"[plot_photon] PNG saved -> {path}")
+        _, png_path, sidecar_path = _reserve_unique_stem(outdir, prefix)
+        fig.savefig(png_path, dpi=dpi, bbox_inches="tight")
+        print(f"[plot_photon] PNG saved -> {png_path}")
+        if provenance is not None:
+            with open(sidecar_path, "w", encoding="utf-8") as sidecar:
+                sidecar.write(provenance)
+            print(f"[plot_photon] Provenance saved -> {sidecar_path}")
     print("[plot_photon] Displaying figure on screen ...")
     plt.show()
     plt.close(fig)
 
 
-def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5):
+def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5,
+                       GM_over_c2=None, r0=None, lambda_max=None, d_lambda=None):
     """
     Plot a photon trajectory, event horizon, photon sphere, and diagnostics.
 
@@ -70,6 +150,13 @@ def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5)
         Resolution of the saved PNG. Ignored when outdir is None.
     lw : float
         Line width, in points, used for the plotted trajectory.
+    GM_over_c2, r0, lambda_max, d_lambda : float or None
+        The physics parameters that produced x_values/y_values/info.
+        Optional -- a direct caller that only has the trajectory and
+        diagnostics can omit them -- but when given (as driver_photon.py
+        always does) and outdir is also given, they are written losslessly
+        into a ``.provenance.txt`` sidecar next to the saved PNG, so the
+        run can be exactly reproduced later (Audit1 Codex P1-3).
     """
     if not x_values or len(x_values) != len(y_values):
         raise ValueError("x_values and y_values must be nonempty arrays of equal length.")
@@ -138,4 +225,5 @@ def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5)
     ax.grid(True)
 
     prefix = f"photon_b{b:.4g}_{info['status']}"
-    _finish(fig, outdir, prefix, dpi)
+    provenance = _format_provenance(b, info, dpi, lw, GM_over_c2, r0, lambda_max, d_lambda)
+    _finish(fig, outdir, prefix, dpi, provenance=provenance)
