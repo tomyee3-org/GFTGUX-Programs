@@ -23,9 +23,9 @@ This module owns every governing equation used by the program:
               galaxy-formation mode.
 
   diagnostics energy and virial-ratio bookkeeping, Lagrangian radii,
-              two-body relaxation and dynamical timescales, an escaper
-              (unbound-particle) criterion, and the phase-space divergence
-              measure used by the chaos-sensitivity mode.
+              two-body relaxation and dynamical timescales, an
+              instantaneous-unboundedness criterion, and the position-space
+              divergence measure used by the chaos-sensitivity mode.
 
 SI units are used internally throughout.  User-facing quantities are solar
 masses, parsecs, km/s and megayears; main.py and driver_nbg.py convert at
@@ -128,6 +128,16 @@ MAX_BODIES = 5_000
 MIN_STEPS = 1
 MAX_STEPS = 200_000
 MAX_SNAPSHOTS = 4_000
+# Audit1 fix (Codex P2-9, 2026-09-03): MAX_BODIES and MAX_SNAPSHOTS were
+# each individually bounded, but nothing bounded their PRODUCT -- the
+# stored positions and velocities histories are each
+# (n_snapshots, n_bodies, 3) float64 arrays, so MAX_BODIES=5000 combined
+# with MAX_SNAPSHOTS=4000 could allocate about 5000*4000*3*8*2 bytes
+# (position + velocity) = 960 MB for a single run, which is not a
+# "memory-safety guard" in any practical sense for a teaching tool. This
+# caps the product directly; see integrate_nbody() and
+# TestLeapfrogAndIntegration.test_integrate_nbody_rejects_excessive_body_snapshot_product.
+MAX_BODY_SNAPSHOT_PRODUCT = 2_000_000
 MIN_THETA = 0.0
 MAX_THETA = 2.0
 #: Above this particle count, the O(N^2) direct force method is accepted
@@ -210,6 +220,25 @@ def _require_method(method):
     return method
 
 
+def _require_theta(theta):
+    """
+    Audit1 fix (Codex P2-9/P2-10, Copilot A14, 2026-09-03): run_cluster(),
+    run_galaxy() and run_chaos() previously only checked theta for
+    finiteness up front (compute_accelerations_tree's own [MIN_THETA,
+    MAX_THETA] range check was the sole gate against an out-of-range
+    theta, deep inside the first leapfrog step -- after initial
+    conditions, timescales and the full step count had already been
+    computed). An out-of-range theta is now rejected at the same point
+    as every other run-mode argument, before any of that setup work.
+    """
+    theta = _require_finite("theta", theta)
+    if not (MIN_THETA <= theta <= MAX_THETA):
+        raise ValueError(
+            f"theta must lie in [{MIN_THETA:g}, {MAX_THETA:g}]; got {theta:g}."
+        )
+    return theta
+
+
 def _as_finite_array(values, name, shape=None):
     try:
         array = np.asarray(values, dtype=float)
@@ -285,6 +314,13 @@ def compute_accelerations_direct(positions, masses, softening):
     positions = _as_finite_array(positions, "positions")
     masses = _as_finite_array(masses, "masses")
     n = masses.size
+    if positions.shape != (n, 3):
+        raise ValueError(
+            f"positions must have shape ({n}, 3) to match masses; got "
+            f"{positions.shape}."
+        )
+    if np.any(masses <= 0.0):
+        raise ValueError("all masses must be strictly positive.")
     softening = _require_positive("softening", softening)
     eps2 = softening * softening
 
@@ -382,6 +418,11 @@ def build_octree(positions, masses):
     positions = _as_finite_array(positions, "positions")
     masses = _as_finite_array(masses, "masses")
     n = masses.size
+    if positions.shape != (n, 3):
+        raise ValueError(
+            f"positions must have shape ({n}, 3) to match masses; got "
+            f"{positions.shape}."
+        )
     lo = positions.min(axis=0)
     hi = positions.max(axis=0)
     center = tuple((0.5 * (lo + hi)).tolist())
@@ -426,11 +467,30 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2):
         dx, dy, dz = node.comx - xi, node.comy - yi, node.comz - zi
         dist2 = dx * dx + dy * dy + dz * dz
         size = 2.0 * node.half_size
+        # Audit1 fix (Codex P1-5, Copilot A10, 2026-09-03): an internal
+        # node containing body i's own position must never be accepted as
+        # a monopole, however small its opening angle appears -- accepting
+        # it would fold body i's own mass and position into the node's
+        # mass/center-of-mass and apply a spurious self-force. Node bounds
+        # are exact octree-construction cubes (see _build_octree), so a
+        # simple axis-aligned containment test against this node's own
+        # GEOMETRIC center (cx, cy, cz -- NOT its mass-weighted comx/comy/
+        # comz, which need not lie inside the cube at all) and half_size is
+        # exact, not approximate; a contained body forces descent into the
+        # children regardless of theta. Reproduced pre-fix: an 8-body
+        # adversarial configuration with the target at one corner and 7
+        # bodies clustered near the opposite corner gave a 49.27% relative
+        # acceleration error at theta in [0.7, 1.0], entirely eliminated by
+        # this check (see TestOctreeAndTreeAcceleration.
+        # test_target_containing_node_is_never_accepted_as_monopole).
+        contains_i = (abs(node.cx - xi) <= node.half_size
+                      and abs(node.cy - yi) <= node.half_size
+                      and abs(node.cz - zi) <= node.half_size)
         # dist2 == 0 forces recursion rather than division by zero: it can
         # only occur when this body's own position coincides exactly with
         # the node's mass-weighted center, which is not a legitimate case
         # for the monopole approximation regardless of theta.
-        if dist2 > 0.0 and (size * size) < theta2 * dist2:
+        if dist2 > 0.0 and not contains_i and (size * size) < theta2 * dist2:
             r2 = dist2 + eps2
             f = node.mass * r2 ** -1.5
             ax += f * dx
@@ -457,11 +517,14 @@ def compute_accelerations_tree(positions, masses, theta, softening):
     """
     positions = _as_finite_array(positions, "positions")
     masses = _as_finite_array(masses, "masses")
-    theta = _require_finite("theta", theta)
-    if not (MIN_THETA <= theta <= MAX_THETA):
+    if positions.shape != (masses.size, 3):
         raise ValueError(
-            f"theta must lie in [{MIN_THETA:g}, {MAX_THETA:g}]; got {theta:g}."
+            f"positions must have shape ({masses.size}, 3) to match masses; "
+            f"got {positions.shape}."
         )
+    if np.any(masses <= 0.0):
+        raise ValueError("all masses must be strictly positive.")
+    theta = _require_theta(theta)
     softening = _require_positive("softening", softening)
     eps2 = softening * softening
 
@@ -491,10 +554,22 @@ def compute_accelerations(positions, masses, softening, method="tree", theta=0.5
 
 # ======================================================================
 # Energy, momentum and virial diagnostics
+#
+# Two distinct scalars are computed from the pairwise separations here, and
+# Audit1 (Codex/Copilot, 2026-09-03) correctly found the original release
+# conflating them: potential_energy() (U) is the right quantity for total-
+# energy bookkeeping (E = T + U, conserved by the integrator up to numerical
+# error), but it is NOT the quantity the scalar virial theorem uses once
+# gravity is softened. virial_force_term() (Wvir) is that quantity; see its
+# docstring. Use potential_energy() for energy conservation and
+# virial_force_term() for virial-ratio/equilibrium diagnostics -- never the
+# other way around.
 # ======================================================================
 def kinetic_energy(velocities, masses):
     velocities = _as_finite_array(velocities, "velocities")
     masses = _as_finite_array(masses, "masses")
+    if np.any(masses <= 0.0):
+        raise ValueError("all masses must be strictly positive.")
     return float(0.5 * np.sum(masses * np.einsum("ij,ij->i", velocities, velocities)))
 
 
@@ -505,9 +580,15 @@ def potential_energy(positions, masses, softening):
     Direct O(N^2) summation. Used only for periodic diagnostics (not once
     per integration step), so its cost is independent of which force
     method (tree or direct) drives the actual time integration.
+
+    This is the correct quantity for total-energy bookkeeping (E = T + U).
+    It is NOT, by itself, the virial-theorem quantity once softening is
+    nonzero -- see virial_force_term().
     """
     positions = _as_finite_array(positions, "positions")
     masses = _as_finite_array(masses, "masses")
+    if np.any(masses <= 0.0):
+        raise ValueError("all masses must be strictly positive.")
     softening = _require_positive("softening", softening)
     eps2 = softening * softening
     n = masses.size
@@ -521,31 +602,108 @@ def potential_energy(positions, masses, softening):
     return float(u)
 
 
+def virial_force_term(positions, masses, softening):
+    """
+    The scalar virial-theorem quantity for Plummer-softened gravity,
+
+        Wvir = sum_i r_i . F_i
+             = -sum_{i<j} G m_i m_j r_ij^2 / (r_ij^2 + eps^2)^(3/2),
+
+    where F_i is the total softened force on body i.  This is NOT the same
+    number as potential_energy() (U) once eps > 0: the softened force is not
+    homogeneous of degree -1 in separation, so U (which pairs with 1/r) is
+    not the quantity the virial theorem actually constrains.  As eps -> 0,
+    Wvir -> U exactly (the r_ij^2/(r_ij^2+eps^2) factor -> 1), which is the
+    check test_virial_force_term_reduces_to_potential_energy_as_softening_
+    vanishes verifies.
+
+    Audit1 finding (Codex P1-1, Copilot A2, 2026-09-03): the original
+    release reported virial_ratio(kinetic, potential_energy(...)) -- i.e.
+    2T/|U| -- as "the" virial ratio and as an exact equilibrium diagnostic
+    for the softened equations actually being integrated.  For eps/a of
+    order the program's own Dehnen-softening default (roughly 0.2-0.25 for
+    the default cluster N), the two ratios differ by several percent to
+    tens of percent (measured: 2T/|U| = 1.298 vs 2T/|Wvir| = 1.380 for one
+    N=200 Plummer realization at the default softening).  virial_ratio()
+    itself is unchanged (it is simply 2T/|W| for whatever W is supplied);
+    every CALLER that wants an equilibrium diagnostic for the softened
+    force must now pass virial_force_term(...), not potential_energy(...),
+    and every caller that wants total energy must keep using
+    potential_energy(...).  See run_cluster()/run_galaxy() and the Help
+    file's Governing Equations section.
+    """
+    positions = _as_finite_array(positions, "positions")
+    masses = _as_finite_array(masses, "masses")
+    if np.any(masses <= 0.0):
+        raise ValueError("all masses must be strictly positive.")
+    softening = _require_positive("softening", softening)
+    eps2 = softening * softening
+    n = masses.size
+    w = 0.0
+    for i in range(n - 1):
+        d = positions[i + 1:] - positions[i]
+        r2 = np.einsum("ij,ij->i", d, d)
+        denom = (r2 + eps2) ** 1.5
+        w -= G * masses[i] * np.sum(masses[i + 1:] * r2 / denom)
+    if not math.isfinite(w):
+        raise ValueError("virial force term overflowed.")
+    return float(w)
+
+
 def total_energy(positions, velocities, masses, softening):
     return kinetic_energy(velocities, masses) + potential_energy(
         positions, masses, softening
     )
 
 
-def virial_ratio(kinetic, potential):
-    """2T / |W|; 1.0 marks exact virial equilibrium for a self-gravitating
-    system with a 1/r potential. Returns nan if potential is exactly zero
-    (only possible for a vanishing or fully unbound system)."""
-    if potential == 0.0:
+def virial_ratio(kinetic, work_term):
+    """2T / |W|, given the kinetic energy T and a virial-theorem work term
+    W. 1.0 marks exact virial equilibrium. For Plummer-softened gravity,
+    W must be virial_force_term(...), NOT potential_energy(...) -- the two
+    differ once softening is nonzero; see virial_force_term()'s docstring.
+    Returns nan if work_term is exactly zero (only possible for a
+    vanishing or fully unbound system)."""
+    if work_term == 0.0:
         return float("nan")
-    return 2.0 * kinetic / abs(potential)
+    return 2.0 * kinetic / abs(work_term)
 
 
 def center_of_mass(positions, masses):
+    """
+    Mass-weighted mean position, sum_i m_i x_i / sum_i m_i.
+
+    Audit1 fix (Codex P2-9, 2026-09-03): a non-positive total mass
+    previously fell through to a silent 0/0 division, returning
+    [nan, nan, nan] together with a RuntimeWarning rather than an
+    actionable error -- masses are not required to be positive by this
+    function's signature alone (unlike, e.g., kinetic_energy(), which
+    does enforce it), so this checks the one thing that would otherwise
+    make the division ill-defined.
+    """
     positions = _as_finite_array(positions, "positions")
     masses = _as_finite_array(masses, "masses")
-    return np.sum(masses[:, None] * positions, axis=0) / np.sum(masses)
+    total_mass = np.sum(masses)
+    if total_mass <= 0.0:
+        raise ValueError(
+            f"total mass must be strictly positive to define a center of "
+            f"mass; got {total_mass:g}."
+        )
+    return np.sum(masses[:, None] * positions, axis=0) / total_mass
 
 
 def center_of_mass_velocity(velocities, masses):
+    """Mass-weighted mean velocity; see center_of_mass()'s docstring for
+    why a non-positive total mass is rejected rather than silently
+    producing NaN (Audit1 P2-9, 2026-09-03)."""
     velocities = _as_finite_array(velocities, "velocities")
     masses = _as_finite_array(masses, "masses")
-    return np.sum(masses[:, None] * velocities, axis=0) / np.sum(masses)
+    total_mass = np.sum(masses)
+    if total_mass <= 0.0:
+        raise ValueError(
+            f"total mass must be strictly positive to define a "
+            f"center-of-mass velocity; got {total_mass:g}."
+        )
+    return np.sum(masses[:, None] * velocities, axis=0) / total_mass
 
 
 def recenter(positions, velocities, masses):
@@ -616,8 +774,8 @@ def specific_energies(positions, velocities, masses, softening):
     Per-body specific (per unit mass) mechanical energy in the center-of-
     mass frame, e_i = (1/2) v_i^2 + Phi_i, where Phi_i is the softened
     potential at body i due to every OTHER body. A positive e_i marks a
-    body that is formally unbound from the rest of the system given its
-    instantaneous position and velocity (see identify_escapers).
+    body that is INSTANTANEOUSLY unbound from the rest of the system
+    given its current position and velocity (see identify_unbound).
 
     O(N^2); intended for periodic diagnostics, not every integration step.
     """
@@ -639,7 +797,17 @@ def high_velocity_fraction(positions, velocities, masses, softening, threshold=0
     Help file), that final crossing is suppressed far more than the
     gradual growth of this tail is, so this fraction is a far more
     sensitive, continuously varying leading indicator of relaxation than
-    waiting for identify_escapers() to register an actual escaper.
+    waiting for identify_unbound() to register a positive-energy body.
+
+    ``threshold`` must be strictly positive but is not required to be
+    below 1 (Audit1 note, Copilot A19, 2026-09-03): a value at or above 1
+    is not unsafe -- it always returns 0.0, because the ``bound`` mask
+    used here already excludes anything at or past the local escape
+    speed, so nothing can simultaneously be bound and at or above
+    threshold=1 times that speed. That is a documented degenerate case
+    for an unusual argument, not an error, so it is not rejected; a
+    threshold intended to mean "near escape but still bound" should be
+    chosen in (0, 1).
     """
     threshold = _require_positive("threshold", threshold)
     phi, speed2 = _phi_and_speed2(positions, velocities, masses, softening)
@@ -649,9 +817,31 @@ def high_velocity_fraction(positions, velocities, masses, softening, threshold=0
     return float(np.mean(fast & bound))
 
 
-def identify_escapers(positions, velocities, masses, softening):
-    """Boolean mask: True where a body's specific energy is positive
-    (formally unbound), evaluated in the system's center-of-mass frame."""
+def identify_unbound(positions, velocities, masses, softening):
+    """
+    Boolean mask: True where a body's specific energy is INSTANTANEOUSLY
+    positive (formally unbound given its current position and velocity),
+    evaluated in the system's center-of-mass frame.
+
+    Audit1 fix (Codex P1-7, Copilot A13, 2026-09-03): renamed from
+    identify_escapers(). A positive specific energy is the physically
+    correct criterion for a body that WILL eventually escape to infinity
+    in a static potential that falls to zero there, regardless of its
+    instantaneous radial velocity sign -- a body can be energetically
+    unbound while momentarily moving inward (e.g. on the incoming branch
+    of a hyperbolic-like encounter), so no outward-motion requirement is
+    added here (a prior release's Help file incorrectly claimed one was
+    already applied; that Help claim is corrected, not this function).
+    But in an N-body system the potential is NOT static -- it evolves as
+    the other bodies move -- so a body flagged here can later return to
+    negative energy as the potential changes; this count is therefore
+    NOT necessarily monotonically increasing over a run, and a body
+    counted here is "instantaneously unbound," not a confirmed,
+    permanent escaper. Downstream summary fields (n_unbound,
+    unbound_fraction_final) and documentation are named accordingly; see
+    TestEscapersAndFastFraction.test_unbound_count_is_not_guaranteed_monotonic
+    and .test_inward_moving_positive_energy_body_is_still_flagged_unbound.
+    """
     return specific_energies(positions, velocities, masses, softening) > 0.0
 
 
@@ -712,7 +902,7 @@ def _isotropic_directions(n, rng):
     ))
 
 
-def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc,
+def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc, softening=None,
                     max_radius_factor=50.0, seed=None):
     """
     Sample an isotropic, isolated Plummer (1911) sphere in virial
@@ -725,10 +915,40 @@ def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc,
     Enclosed mass:     M(r)/M = r^3 / (r^2 + a^2)^(3/2) = x1  =>
                        r = a (x1^(-2/3) - 1)^(-1/2)
 
+    Audit1 fix (Codex P1-3, Copilot A11, 2026-09-03): the velocity
+    rejection sampler below draws speeds from the exact Plummer
+    distribution function, which is in virial equilibrium for the
+    SMOOTH, unsoftened Plummer potential Phi(r) = -GM/sqrt(r^2+a^2).
+    This program integrates a discrete, Plummer-SOFTENED N-body
+    realization instead (pairwise force ~ 1/(r^2+eps^2)), whose actual
+    scalar-virial quantity Wvir (virial_force_term()) differs from the
+    idealized continuum energy the DF was matched to -- both because
+    N is finite and because eps > 0. Left uncorrected, this is a
+    systematic energy-SCALE mismatch (not a shape mismatch: relative
+    particle-to-particle speeds are still drawn correctly), and it was
+    previously being measured and reported as if it were genuine
+    two-body-relaxation-driven evolution during the first few crossing
+    times of a "relaxation" run, when it was actually just the discrete
+    system relaxing away from a mismatched initial condition. The fix:
+    after sampling, rescale ALL velocities by one overall constant (so
+    the DF's shape is unchanged) to put the actual discrete, softened
+    realization into exact virial equilibrium, 2T/|Wvir| = 1, under the
+    force law it will actually be integrated with -- see
+    TestInitialConditions.test_plummer_sphere_starts_in_exact_softened_virial_equilibrium.
+
     Velocities are drawn from the exact isotropic Plummer distribution
     function f(E) ~ (-E)^(7/2) by rejection sampling q = v/v_esc(r)
-    against g(q) = q^2 (1 - q^2)^(7/2), whose maximum is g(2/3) approx
-    0.0930033; the envelope 0.1 accepts with probability >~90%.
+    against g(q) = q^2 (1 - q^2)^(7/2). Audit1 correction (Codex P3-4,
+    Copilot A16, 2026-09-03): the maximum of g is at q = 1/sqrt(4.5)
+    approx 0.4714 (from dg/dq = 0 => 1 - 4.5 q^2 = 0), not at q = 2/3 as
+    previously stated here; the true maximum value is g(0.4714) approx
+    0.09221, not 0.0930033. The envelope constant 0.1 used below was
+    already comfortably above the true maximum (0.1 > 0.09221), so the
+    sampler itself was always correct -- only this derivation was wrong.
+    The overall per-attempt acceptance probability is
+    integral_0^1 g(q) dq / 0.1 approx 0.4295 / 0.1 approx 43%, not the
+    ">~90%" previously claimed (see
+    TestInitialConditions.test_plummer_velocity_envelope_is_a_valid_upper_bound).
 
     The Plummer profile's mass distribution formally extends to infinite
     radius, which is impractical to realize with a finite N-body sample
@@ -748,6 +968,8 @@ def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc,
     max_radius_factor = _require_positive("max_radius_factor", max_radius_factor)
 
     a = scale_radius_pc * PC
+    softening = softening if softening is not None else dehnen_softening(n_bodies, a)
+    softening = _require_positive("softening", softening)
     total_mass = total_mass_msun * M_sun
     m_body = total_mass / n_bodies
     r_max = max_radius_factor * a
@@ -799,13 +1021,37 @@ def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc,
     velocities = (speed_frac * v_esc)[:, None] * _isotropic_directions(n_bodies, rng)
 
     masses = np.full(n_bodies, m_body)
+    # Recenter BEFORE the equilibrium rescale below: scaling a zero-mean
+    # velocity set by one overall constant preserves zero mean exactly, so
+    # doing this first (rather than after, as a prior release did) makes
+    # the rescale exact rather than only approximately so (Audit1 Copilot
+    # P2-1; see uniform_sphere() for the N=3 worst case this order fixes).
     positions, velocities = recenter(positions, velocities, masses)
+
+    t_sampled = kinetic_energy(velocities, masses)
+    wvir_sampled = virial_force_term(positions, masses, softening)
+    if t_sampled > 0.0 and wvir_sampled != 0.0:
+        target_t = 0.5 * abs(wvir_sampled)
+        velocities = velocities * math.sqrt(target_t / t_sampled)
+    # A uniform rescale by one overall constant cannot change the mean, so
+    # this is a no-op up to floating-point roundoff; kept for defensiveness.
+    positions, velocities = recenter(positions, velocities, masses)
+    virial_ratio_initial = virial_ratio(
+        kinetic_energy(velocities, masses),
+        virial_force_term(positions, masses, softening),
+    )
 
     diagnostics = dict(
         n_bodies=n_bodies, total_mass_msun=total_mass_msun,
         scale_radius_pc=scale_radius_pc, m_body_msun=total_mass_msun / n_bodies,
         max_radius_factor=max_radius_factor,
         fraction_redrawn=n_redrawn / (n_redrawn + n_bodies),
+        softening=softening,
+        virial_ratio_before_correction=(
+            virial_ratio(t_sampled, wvir_sampled) if wvir_sampled != 0.0
+            else float("nan")
+        ),
+        virial_ratio_initial=virial_ratio_initial,
         model="Plummer (1911)",
     )
     return dict(positions=positions, velocities=velocities, masses=masses,
@@ -813,22 +1059,43 @@ def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc,
 
 
 def uniform_sphere(n_bodies, total_mass_msun, radius_pc, virial_ratio_init=0.0,
-                    seed=None):
+                    softening=None, seed=None):
     """
     Sample bodies uniformly through the volume of a sphere of given
-    radius, with an initial virial ratio Q0 = T0 / |W0| set exactly by
-    rescaling randomly drawn velocities (rather than trusting the
-    realization's own sampling noise to hit Q0), where
+    radius, with an initial virial ratio Q0 = 2 T0 / |Wvir0| set exactly
+    by rescaling randomly drawn velocities by one overall constant
+    (rather than trusting the realization's own sampling noise to hit
+    Q0), where Wvir0 = virial_force_term(positions, masses, softening) is
+    computed from the ACTUAL discrete, Plummer-softened realization that
+    will be integrated -- not the idealized continuum, unsoftened
+    self-energy W0 = -3 G M^2 / (5 R) a prior release used instead.
 
-        W0 = -3 G M^2 / (5 R)     (uniform-sphere self-energy, exact)
+    Audit1 fix (Codex P1-2/P1-3, Copilot A1/A11, 2026-09-03), two
+    changes bundled together because they touch the same few lines:
+
+    1. Convention: Q0 is now defined with the SAME 2T/|W| normalization
+       as the virial_ratio() output diagnostic (equilibrium = 1), not
+       the previous T/|W0| convention (equilibrium = 0.5) -- the two
+       conventions previously in use for the same word "virial ratio"
+       made the virial_ratio_init argument and the virial_ratio_initial
+       summary field disagree by close to a factor of 2 for the same
+       physical state, which is corrected here rather than merely
+       documented.
+    2. Energy scale: using the idealized continuum W0 instead of the
+       actual discrete, softened Wvir0 as the equilibrium reference was
+       itself a second, independent source of the same kind of scale
+       mismatch documented in plummer_sphere()'s docstring (Codex P1-3):
+       for any nonzero softening or finite N, W0 != Wvir0, so scaling to
+       Q0 = 1 against W0 does not actually put the realization in
+       equilibrium under the force law it is integrated with.
 
     Q0 = 0 (the default) is a perfectly cold start: every body begins at
     rest, and the sphere free-falls before violently relaxing into a
     quasi-equilibrium remnant -- the classic toy model of collisionless
     "violent relaxation" (Lynden-Bell 1967; the numerical experiment goes
-    back to van Albada 1982, MNRAS 201, 939). Q0 = 0.5 is virial
-    equilibrium for this profile; values in between give a "warm" collapse
-    with a milder relaxation transient.
+    back to van Albada 1982, MNRAS 201, 939). Q0 = 1 is virial
+    equilibrium for the actual discrete, softened realization; values in
+    between give a "warm" collapse with a milder relaxation transient.
 
     Returns the same dict contract as plummer_sphere().
     """
@@ -844,6 +1111,8 @@ def uniform_sphere(n_bodies, total_mass_msun, radius_pc, virial_ratio_init=0.0,
         )
 
     r_sphere = radius_pc * PC
+    softening = softening if softening is not None else dehnen_softening(n_bodies, r_sphere)
+    softening = _require_positive("softening", softening)
     total_mass = total_mass_msun * M_sun
     m_body = total_mass / n_bodies
 
@@ -852,23 +1121,44 @@ def uniform_sphere(n_bodies, total_mass_msun, radius_pc, virial_ratio_init=0.0,
     r = r_sphere * u ** (1.0 / 3.0)
     positions = r[:, None] * _isotropic_directions(n_bodies, rng)
     masses = np.full(n_bodies, m_body)
+    w0 = -3.0 * G * total_mass ** 2 / (5.0 * r_sphere)  # idealized reference only
 
-    w0 = -3.0 * G * total_mass ** 2 / (5.0 * r_sphere)
-    target_t = virial_ratio_init * abs(w0)
-
-    if target_t <= 0.0:
+    if virial_ratio_init <= 0.0:
         velocities = np.zeros_like(positions)
+        positions, velocities = recenter(positions, velocities, masses)
     else:
         raw_v = rng.normal(size=(n_bodies, 3))
+        # Recenter (subtract the mass-weighted mean position AND velocity)
+        # BEFORE rescaling to the target kinetic energy, not after: scaling
+        # an already-zero-mean velocity set by one overall constant keeps
+        # it exactly zero-mean, so this order makes the rescale hit the
+        # target T exactly for any N. Scaling first and recentering
+        # afterward (the prior order) lets the recentering step perturb T
+        # away from target -- negligible at large N, but severe at small N
+        # (Audit1 Copilot P2-1: measured final-T/target-T ratio at N=3
+        # ranging 0.148-0.983 across 50 seeds under the old order, versus
+        # 0.979-1.000 at N=300).
+        positions, raw_v = recenter(positions, raw_v, masses)
+        wvir0 = virial_force_term(positions, masses, softening)
+        target_t = 0.5 * virial_ratio_init * abs(wvir0)
         t_raw = kinetic_energy(raw_v, masses)
-        velocities = raw_v * math.sqrt(target_t / t_raw)
+        velocities = raw_v * math.sqrt(target_t / t_raw) if t_raw > 0.0 else raw_v
+        # A uniform rescale by one overall constant cannot change the
+        # mean, so this is a no-op up to floating-point roundoff; kept for
+        # defensiveness.
+        positions, velocities = recenter(positions, velocities, masses)
 
-    positions, velocities = recenter(positions, velocities, masses)
+    virial_ratio_initial = virial_ratio(
+        kinetic_energy(velocities, masses),
+        virial_force_term(positions, masses, softening),
+    )
 
     diagnostics = dict(
         n_bodies=n_bodies, total_mass_msun=total_mass_msun,
         radius_pc=radius_pc, m_body_msun=total_mass_msun / n_bodies,
         virial_ratio_init=virial_ratio_init,
+        virial_ratio_initial=virial_ratio_initial,
+        softening=softening,
         analytic_potential_energy=w0,
         model="uniform sphere (cold/warm collapse)",
     )
@@ -888,24 +1178,51 @@ def leapfrog_step(positions, velocities, masses, dt, softening,
         x1      = x0 + v_(1/2) dt
         v1      = v_(1/2) + a(x1) dt/2
 
-    Leapfrog is a second-order symplectic integrator: for a fixed
-    timestep it does not conserve energy exactly, but the error
-    oscillates around a constant offset rather than growing without
-    bound, which is what makes it the standard choice for long N-body
-    integrations rather than, say, forward Euler.
+    Leapfrog is a second-order symplectic integrator WHEN the kick comes
+    from a conservative force (a gradient of one potential, with a
+    symmetric acceleration Jacobian) -- which holds exactly for
+    method="direct". Audit1 qualification (Codex P2-8, 2026-09-03): the
+    Barnes-Hut tree force (method="tree") is target-dependent and not
+    pair-symmetric, and its approximation changes discontinuously as
+    bodies cross cell boundaries between steps, so it has not been
+    demonstrated to be the gradient of any single approximate
+    Hamiltonian; the broad "symplectic, bounded nonsecular energy error"
+    guarantee is therefore only established here for method="direct",
+    not asserted for method="tree" merely because the same KDK update
+    formula is used with either force.
 
     ``accel``, if given, is the already-computed acceleration at the
     input state (a(x0)), avoiding a redundant force evaluation when the
     caller is stepping in a loop and already has it from the previous
-    step's final kick; if omitted it is computed here.
+    step's final kick; if omitted it is computed here. Audit1 fix (Codex
+    P2-9, 2026-09-03): a caller-supplied accel is now validated (shape
+    and finiteness) rather than trusted -- a prior release passed it
+    straight into the kick with no check, so a bad value from a
+    misbehaving caller would silently corrupt the whole subsequent
+    integration instead of failing at the point of the bad input.
 
     Returns (positions_new, velocities_new, accel_new).
+
+    Audit1 fix (Copilot A11, 2026-09-03): dt must be strictly positive, not
+    merely nonzero. Every documented mode of this program represents
+    forward-in-time evolution, and a negative dt previously ran silently
+    "backward" with no warning or documentation -- a forward-simulation
+    API accepting an undocumented reversed-time mode by accident is a
+    trap for a direct caller, not a supported feature. Reversed-time
+    integration is not offered here; a caller who genuinely wants it can
+    negate the returned velocities and re-run forward, which is
+    mathematically equivalent for this reversible integrator.
     """
-    dt = _require_finite("dt", dt)
-    if dt == 0.0:
-        raise ValueError("dt must not be zero.")
+    dt = _require_positive("dt", dt)
     if accel is None:
         accel = compute_accelerations(positions, masses, softening, method, theta)
+    else:
+        accel = _as_finite_array(accel, "accel")
+        if accel.shape != positions.shape:
+            raise ValueError(
+                f"accel must have the same shape as positions; got "
+                f"{accel.shape} vs {np.shape(positions)}."
+            )
     v_half = velocities + 0.5 * dt * accel
     positions_new = positions + dt * v_half
     accel_new = compute_accelerations(positions_new, masses, softening, method, theta)
@@ -919,10 +1236,16 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
     Run a fixed-step leapfrog N-body integration and return snapshots.
 
     Snapshots (including the initial state) are recorded every
-    ``snapshot_stride`` steps. Energy, momentum and angular momentum are
-    evaluated only at snapshot times (always by direct summation,
+    ``snapshot_stride`` steps. Energy, momentum, and the virial work term
+    are evaluated only at snapshot times (always by direct summation,
     independent of which force method drives the stepping), so their cost
-    does not scale with n_steps for a large stride.
+    does not scale with n_steps for a large stride. Audit1 correction
+    (Copilot A12, 2026-09-03): this docstring previously also claimed
+    angular momentum was evaluated here; no angular momentum array was
+    ever computed or returned, and that claim is removed rather than
+    implemented -- angular momentum for these initial conditions is
+    formally zero and not a diagnostic this program currently tracks (see
+    Experiment 16 in the Help file, which invites a student to add it).
 
     Returns a dict with:
         t              (n_snap,)      seconds, snapshot times
@@ -930,14 +1253,17 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
         velocities     (n_snap, N, 3) m/s
         kinetic        (n_snap,)      J (per the fixed body masses)
         potential      (n_snap,)      J
+        virial_work    (n_snap,)      J  (see virial_force_term)
         energy         (n_snap,)      J  (kinetic + potential)
         momentum       (n_snap, 3)    kg m/s
         n_steps_taken  int
+
+    Audit1 fix (Copilot A11, 2026-09-03): dt must be strictly positive;
+    see leapfrog_step's docstring for why a negative (reversed-time) dt
+    is rejected rather than silently supported.
     """
     positions, velocities, masses = _validate_state(positions, velocities, masses)
-    dt = _require_finite("dt", dt)
-    if dt == 0.0:
-        raise ValueError("dt must not be zero.")
+    dt = _require_positive("dt", dt)
     n_steps = _require_int("n_steps", n_steps, lo=MIN_STEPS, hi=MAX_STEPS)
     softening = _require_positive("softening", softening)
     method = _require_method(method)
@@ -958,13 +1284,23 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
             f"the limit of {MAX_SNAPSHOTS:,}; raise snapshot_stride or lower "
             "n_steps."
         )
-
     n_bodies = masses.size
+    body_snapshot_product = n_bodies * n_snapshots
+    if body_snapshot_product > MAX_BODY_SNAPSHOT_PRODUCT:
+        raise ValueError(
+            f"n_bodies * n_snapshots = {n_bodies:,} * {n_snapshots:,} = "
+            f"{body_snapshot_product:,} exceeds the combined limit of "
+            f"{MAX_BODY_SNAPSHOT_PRODUCT:,} (positions and velocities are "
+            "each stored as a full (n_snapshots, n_bodies, 3) history); "
+            "raise snapshot_stride or lower n_bodies/n_steps."
+        )
+
     t_hist = np.empty(n_snapshots)
     pos_hist = np.empty((n_snapshots, n_bodies, 3))
     vel_hist = np.empty((n_snapshots, n_bodies, 3))
     kin_hist = np.empty(n_snapshots)
     pot_hist = np.empty(n_snapshots)
+    vir_hist = np.empty(n_snapshots)
     mom_hist = np.empty((n_snapshots, 3))
 
     def _record(k, t, pos, vel):
@@ -973,6 +1309,11 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
         vel_hist[k] = vel
         kin_hist[k] = kinetic_energy(vel, masses)
         pot_hist[k] = potential_energy(pos, masses, softening)
+        # Wvir (virial_force_term), not U (potential_energy), is the correct
+        # denominator for the virial ratio once softening is nonzero -- see
+        # the module note above potential_energy() and virial_force_term()'s
+        # own docstring (Audit1 Codex P1-1, Copilot A2, 2026-09-03).
+        vir_hist[k] = virial_force_term(pos, masses, softening)
         mom_hist[k] = np.sum(masses[:, None] * vel, axis=0)
 
     pos, vel = positions.copy(), velocities.copy()
@@ -995,7 +1336,8 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
 
     return dict(
         t=t_hist, positions=pos_hist, velocities=vel_hist,
-        kinetic=kin_hist, potential=pot_hist, energy=kin_hist + pot_hist,
+        kinetic=kin_hist, potential=pot_hist, virial_work=vir_hist,
+        energy=kin_hist + pot_hist,
         momentum=mom_hist, n_steps_taken=n_steps, masses=masses,
         softening=softening, method=method, theta=theta, dt=dt,
     )
@@ -1004,12 +1346,35 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
 # ======================================================================
 # Chaos / sensitivity-to-initial-conditions diagnostics
 # ======================================================================
-def perturb_positions(positions, relative_perturbation, seed=None):
+def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
     """
     Return a copy of ``positions`` with every body's position displaced by
-    an independent, isotropic random offset of characteristic size
+    an independent, isotropic random offset, such that the RMS per-body
+    displacement magnitude -- sqrt(mean_i |offset_i|^2) -- equals
     ``relative_perturbation`` times the RMS radius of the configuration
     (about its own centroid).
+
+    Audit1 fix (Codex P2-2, Copilot A9, 2026-09-03): each Cartesian
+    component is drawn with sigma = relative_perturbation * rms_radius /
+    sqrt(3), not sigma = relative_perturbation * rms_radius as a prior
+    release used. Three independent Gaussian components each with
+    variance sigma^2 sum to a squared vector magnitude with mean 3
+    sigma^2, so the RMS vector displacement was previously
+    sqrt(3) * relative_perturbation * rms_radius -- about 73% larger than
+    documented (an N=1000 probe measured a ratio of 1.7356 against the
+    predicted sqrt(3) = 1.7321). Dividing the per-component sigma by
+    sqrt(3) here makes the RMS VECTOR displacement equal to
+    relative_perturbation * rms_radius exactly, matching the documented
+    and intended meaning of the parameter; see
+    TestChaosDiagnostics.test_perturbation_rms_vector_magnitude_matches_documented_value.
+
+    If ``masses`` is given, the random offsets are also recentered to
+    remove their own mass-weighted mean before being added, so the
+    perturbation does not impart a net center-of-mass shift to the
+    perturbed copy relative to the original -- otherwise the subsequent
+    divergence measurement would partly be tracking a spurious coherent
+    translation rather than the system's internal chaotic divergence
+    (see position_space_divergence()).
 
     This follows the classic gravitational N-body sensitivity experiment
     (Miller 1964, ApJ 140, 250): two realizations that start indistinguishably
@@ -1026,37 +1391,117 @@ def perturb_positions(positions, relative_perturbation, seed=None):
     if rms_radius == 0.0:
         rms_radius = 1.0
     rng = np.random.default_rng(seed)
-    offset = rng.normal(size=positions.shape) * (relative_perturbation * rms_radius)
+    sigma_per_component = (relative_perturbation * rms_radius) / math.sqrt(3.0)
+    offset = rng.normal(size=positions.shape) * sigma_per_component
+    if masses is not None:
+        masses = _as_finite_array(masses, "masses")
+        offset = offset - center_of_mass(offset, masses)
     return positions + offset
 
 
-def phase_space_divergence(positions_a, positions_b):
+def position_space_divergence(positions_a, positions_b, masses=None):
     """
     RMS per-body position separation (meters) between two realizations of
     the same system, sqrt( mean_i |x_a,i - x_b,i|^2 ).
+
+    Audit1 fix (Codex P1-6, Copilot A12, 2026-09-03): renamed from
+    phase_space_divergence() -- this measures separation in POSITION
+    space only (velocities are not involved at all), so the previous
+    name overstated what is actually computed; a genuine phase-space
+    distance would need a velocity term too (with some, inherently
+    arbitrary, choice of relative weighting between position and
+    velocity units). If ``masses`` is given, each realization is
+    recentered to its own mass-weighted center of mass before differencing,
+    removing any coherent center-of-mass translation between the two
+    realizations (e.g. from perturb_positions() displacing the system's
+    own centroid, or from the tree method's imperfect momentum
+    conservation letting the two realizations' centroids drift apart)
+    from what should be a measurement of internal, relative chaotic
+    divergence.
     """
     positions_a = _as_finite_array(positions_a, "positions_a")
     positions_b = _as_finite_array(positions_b, "positions_b")
     if positions_a.shape != positions_b.shape:
         raise ValueError("positions_a and positions_b must have the same shape.")
+    if masses is not None:
+        # Recenter per snapshot without assuming positions_a/positions_b
+        # are a single (n_bodies, 3) snapshot rather than a whole
+        # (n_snapshots, n_bodies, 3) history -- center_of_mass() only
+        # handles the former, so the mass-weighted mean over the
+        # body axis (second-to-last) is computed directly here, with
+        # keepdims so it broadcasts against either shape.
+        masses = _as_finite_array(masses, "masses")
+        mass_sum = np.sum(masses)
+        com_a = np.sum(masses[:, None] * positions_a, axis=-2, keepdims=True) / mass_sum
+        com_b = np.sum(masses[:, None] * positions_b, axis=-2, keepdims=True) / mass_sum
+        positions_a = positions_a - com_a
+        positions_b = positions_b - com_b
     diff2 = np.sum((positions_a - positions_b) ** 2, axis=-1)
     return np.sqrt(np.mean(diff2, axis=-1))
 
 
-def estimate_lyapunov_exponent(t, divergence):
+def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.98,
+                                max_segment_slope_spread=0.15):
     """
     Estimate an exponential growth rate lambda from a divergence time
     series by an ordinary least-squares fit of ln(divergence) against t,
-    restricted to the window where growth is still exponential: after the
-    series has grown to at least 3x its initial value (so early numerical
-    or sampling noise in the tiny initial separation does not dominate the
-    fit), and before it exceeds half of its own overall maximum (so the
-    fit does not include the eventual saturation once the two copies are
-    no longer close, which is neither exponential nor informative).
+    restricted to a single CONTIGUOUS window where growth is plausibly
+    exponential, and only accepted if that fit is actually good.
 
-    Returns a dict with 'lambda' (1/s), 'lyapunov_time' (s, = 1/lambda,
-    or inf if lambda <= 0), and 'n_points_used'; 'lambda' and
-    'lyapunov_time' are nan if fewer than 3 points fall in the window.
+    Audit1 fix (Codex P1-6.4, Copilot A12, 2026-09-03): a prior release
+    fit every point satisfying two amplitude thresholds (divergence in
+    [3*d0, 0.5*d_max]) with no check that those points form a single
+    contiguous interval, that the growth in it is close to exponential,
+    or any reported goodness of fit -- so it could, and did, fit a
+    physically meaningless "line" through scattered points from an
+    oscillating series, or through smoothly curving (non-exponential)
+    data whose net change happened to fall in the amplitude window.
+    Measured false positives from that version: divergence = 1 + t gave
+    lambda = 0.0476 (should be rejected, no exponential regime exists);
+    divergence = 1 + t^2 gave lambda = 0.0750 (same). This version:
+
+    1. Requires the amplitude-window points to form the single LONGEST
+       contiguous run in time index (not a scattered subset) -- this
+       alone rejects an oscillating series, which cannot sustain a long
+       contiguous run through a monotonically-defined amplitude window.
+    2. Requires at least ``min_points`` points in that run (default 5,
+       raised from the prior version's 3, which is too few to assess fit
+       quality at all).
+    3. Requires the OLS fit of ln(divergence) against t over that window
+       to reach R^2 >= ``min_r_squared`` (default 0.98) -- this alone
+       rejects divergence = 1+t (R^2 approx 0.86 over the corresponding
+       window) and divergence = 1+t^2 (R^2 approx 0.82), both far below
+       threshold, because neither is close to exponential over a window
+       spanning almost two orders of magnitude in amplitude.
+    4. Splits the window into thirds and requires the three independently
+       fit sub-slopes to agree with each other to within a fractional
+       spread of ``max_segment_slope_spread`` (default 0.15) -- this
+       catches smooth curvature subtle enough to still pass a whole-
+       window R^2 test (verified against a logistic/saturating curve
+       whose early-to-mid rise otherwise reaches R^2 approx 0.999 over
+       the same amplitude window: its three sub-slopes disagree by a
+       fractional spread of approximately 0.18, above threshold, and it
+       is correctly rejected, whereas a genuine noisy exponential's
+       sub-slopes agree to within a spread under 0.01 at up to 5%
+       per-point multiplicative noise in the validation used to pick
+       these thresholds).
+
+    This is a heuristic gate, not a hypothesis test with a p-value; a
+    sufficiently pathological adversarial input could still slip through
+    (KNOWN LIMITATION -- documented rather than silently claimed solved,
+    per this project's testing requirements). It substantially raises the
+    bar over the prior version, which had no gate at all beyond the two
+    amplitude thresholds, and it is validated in this codebase against
+    linear, quadratic, oscillatory and saturating synthetic inputs (see
+    TestChaosDiagnostics), all of which it rejects, while accepting
+    genuine (possibly noisy) exponential growth.
+
+    Returns a dict with 'lyapunov_exponent' (1/s), 'lyapunov_time' (s,
+    = 1/lambda), 'n_points_used', 'r_squared' (whole-window fit quality),
+    and 'segment_slope_spread' (the three-segment consistency check
+    value, or nan if too few points to compute it). All numeric fields
+    are nan (and lyapunov_time is left nan, not inf) when no window
+    passes every gate.
     """
     t = _as_finite_array(t, "t")
     divergence = _as_finite_array(divergence, "divergence")
@@ -1064,21 +1509,70 @@ def estimate_lyapunov_exponent(t, divergence):
         raise ValueError("t and divergence must have the same shape.")
     if np.any(divergence < 0.0):
         raise ValueError("divergence must be non-negative.")
+    if t.size < 2 or np.any(np.diff(t) <= 0.0):
+        raise ValueError("t must be strictly increasing with at least two points.")
+
+    def _rejected(n_used, r_squared=float("nan"), spread=float("nan")):
+        return dict(lyapunov_exponent=float("nan"), lyapunov_time=float("nan"),
+                    n_points_used=n_used, r_squared=r_squared,
+                    segment_slope_spread=spread)
 
     d0 = divergence[0]
     if d0 <= 0.0:
         raise ValueError("divergence[0] must be positive to define a growth window.")
     d_max = float(divergence.max())
-    mask = (divergence >= 3.0 * d0) & (divergence <= 0.5 * d_max) & (divergence > 0.0)
-    n_used = int(np.sum(mask))
-    if n_used < 3:
-        return dict(lyapunov_exponent=float("nan"), lyapunov_time=float("nan"),
-                    n_points_used=n_used)
+    in_window = (divergence >= 3.0 * d0) & (divergence <= 0.5 * d_max) & (divergence > 0.0)
 
-    slope, _intercept = np.polyfit(t[mask], np.log(divergence[mask]), 1)
+    # Longest contiguous (in time index) run of in-window points.
+    runs = []
+    start = None
+    for i, flag in enumerate(in_window):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, in_window.size))
+    if not runs:
+        return _rejected(0)
+    lo, hi = max(runs, key=lambda r: r[1] - r[0])
+    n_used = hi - lo
+    if n_used < min_points:
+        return _rejected(n_used)
+
+    tw, dw = t[lo:hi], divergence[lo:hi]
+    logd = np.log(dw)
+    slope, intercept = np.polyfit(tw, logd, 1)
+    fit = slope * tw + intercept
+    ss_res = float(np.sum((logd - fit) ** 2))
+    ss_tot = float(np.sum((logd - np.mean(logd)) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 0.0
+    if r_squared < min_r_squared:
+        return _rejected(n_used, r_squared=r_squared)
+
+    spread = float("nan")
+    if n_used >= 6:
+        edges = [0, n_used // 3, 2 * n_used // 3, n_used]
+        seg_slopes = []
+        for a, b in zip(edges[:-1], edges[1:]):
+            if b - a < 2:
+                return _rejected(n_used, r_squared=r_squared)
+            s, _ = np.polyfit(tw[a:b], logd[a:b], 1)
+            seg_slopes.append(s)
+        if any(s <= 0.0 for s in seg_slopes):
+            return _rejected(n_used, r_squared=r_squared)
+        spread = (max(seg_slopes) - min(seg_slopes)) / max(abs(s) for s in seg_slopes)
+        if spread > max_segment_slope_spread:
+            return _rejected(n_used, r_squared=r_squared, spread=spread)
+
+    if slope <= 0.0:
+        return _rejected(n_used, r_squared=r_squared, spread=spread)
+
     lam = float(slope)
-    t_lyap = (1.0 / lam) if lam > 0.0 else float("inf")
-    return dict(lyapunov_exponent=lam, lyapunov_time=t_lyap, n_points_used=n_used)
+    return dict(lyapunov_exponent=lam, lyapunov_time=1.0 / lam,
+                n_points_used=n_used, r_squared=r_squared,
+                segment_slope_spread=spread)
 
 
 # ======================================================================
@@ -1097,7 +1591,18 @@ LAGRANGIAN_FRACTIONS_DEFAULT = (0.1, 0.25, 0.5, 0.75, 0.9)
 
 
 def _pick_stride(n_steps, target_snapshots):
-    return max(1, n_steps // max(1, target_snapshots))
+    """
+    Audit1 fix (Copilot A16, 2026-09-03): floor division here previously
+    let the actual snapshot count run to nearly DOUBLE target_snapshots
+    whenever n_steps fell just under 2 * target_snapshots (e.g.
+    n_steps=199, target_snapshots=100 gave stride = 199 // 100 = 1, i.e.
+    close to 200 snapshots instead of ~100). Ceiling division keeps the
+    realized count close to the requested target across that whole
+    range, while still always storing at least the initial and final
+    steps.
+    """
+    target_snapshots = max(1, target_snapshots)
+    return max(1, -(-n_steps // target_snapshots))  # ceil(n_steps / target)
 
 
 def _lagrangian_track(pos_hist, masses, fractions):
@@ -1110,8 +1615,13 @@ def _lagrangian_track(pos_hist, masses, fractions):
     return out
 
 
-def _virial_track(kinetic, potential):
-    return np.array([virial_ratio(k, w) for k, w in zip(kinetic, potential)])
+def _virial_track(kinetic, virial_work):
+    """
+    virial_work must be the Wvir series from virial_force_term(), not the
+    potential-energy series -- see virial_ratio()'s docstring (Audit1
+    Codex P1-1, Copilot A2, 2026-09-03).
+    """
+    return np.array([virial_ratio(k, w) for k, w in zip(kinetic, virial_work)])
 
 
 def _energy_drift(energy):
@@ -1141,30 +1651,48 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     not, which is itself one of the lessons here.
 
     Two different diagnostics track the same underlying process at two
-    different sensitivities. ``n_escaped`` (identify_escapers) counts
-    bodies that have formally crossed their local escape speed -- the
-    strict definition of evaporation, but it can stay at zero for the
-    default run length AND the default (Dehnen-optimal) softening,
-    because that softening is chosen to minimize the force error against
-    the smooth mass distribution, which necessarily also damps the close,
-    hard two-body encounters that physically drive relaxation and
-    evaporation in the first place. ``high_velocity_fraction`` (the
-    fraction of bodies already above 90% of their local escape speed)
-    grows continuously and is visible with the default settings; it is
-    the leading indicator of the same process. Seeing actual escapers
-    within a practical run generally requires lowering ``softening_pc``
-    below its default AND raising ``steps_per_crossing`` to compensate
-    (a smaller softening length demands a smaller timestep) -- an explicit
-    exercise in the Help file, not a change made silently here.
+    different sensitivities. ``n_unbound`` (identify_unbound) counts
+    bodies that are INSTANTANEOUSLY unbound (positive specific energy)
+    right now -- not a confirmed, permanent escape count: a body counted
+    here can return to negative energy at a later snapshot as the
+    system's own potential evolves, so n_unbound is not guaranteed to be
+    monotonically increasing over a run (Audit1 Codex/Copilot P1-7,
+    2026-09-03; a prior release's naming, n_escaped/evaporated_fraction,
+    and a prior test's final->=initial assertion both overstated this as
+    confirmed evaporation). It can also stay at zero for the default run
+    length AND the default (Dehnen-optimal) softening, because that
+    softening is chosen to minimize the force error against the smooth
+    mass distribution, which necessarily also damps the close, hard
+    two-body encounters that physically drive relaxation and evaporation
+    in the first place. ``high_velocity_fraction`` (the fraction of
+    bodies already above 90% of their local escape speed) grows
+    continuously and is visible with the default settings; it is the
+    leading indicator of the same process. Seeing n_unbound > 0 within a
+    practical run generally requires lowering ``softening_pc`` below its
+    default AND raising ``steps_per_crossing`` to compensate (a smaller
+    softening length demands a smaller timestep) -- an explicit exercise
+    in the Help file, not a change made silently here.
     """
     n_bodies = _require_int("n_bodies", n_bodies, lo=MIN_BODIES, hi=MAX_BODIES)
     n_relax = _require_positive("n_relax", n_relax)
     steps_per_crossing = _require_int("steps_per_crossing", steps_per_crossing, lo=4)
-    theta = _require_finite("theta", theta)
+    theta = _require_theta(theta)
     method = _require_method(method)
     target_snapshots = _require_int("target_snapshots", target_snapshots, lo=2)
 
-    ic = plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc, seed=seed)
+    # Softening is computed here, before the initial conditions, because
+    # plummer_sphere() now needs it (Audit1 P1-3: it rescales velocities
+    # to the ACTUAL discrete, softened equilibrium, not an idealized
+    # unsoftened one) -- dehnen_softening() depends only on n_bodies and
+    # scale_radius_pc, not on the sampled realization, so this reordering
+    # changes nothing about what softening value is chosen.
+    softening = (softening_pc * PC if softening_pc is not None
+                 else dehnen_softening(n_bodies, scale_radius_pc * PC))
+    softening = _require_positive("softening", softening)
+    softening_explicit = softening_pc is not None
+
+    ic = plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc,
+                         softening=softening, seed=seed)
     pos0, vel0, masses = ic["positions"], ic["velocities"], ic["masses"]
     total_mass_kg = float(masses.sum())
 
@@ -1176,9 +1704,6 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     n_steps = _require_int(
         "computed n_steps", round(n_relax * t_relax0 / dt), lo=MIN_STEPS, hi=MAX_STEPS
     )
-    softening = (softening_pc * PC if softening_pc is not None
-                 else dehnen_softening(n_bodies, scale_radius_pc * PC))
-    softening = _require_positive("softening", softening)
     stride = _pick_stride(n_steps, target_snapshots)
 
     warnings = []
@@ -1198,10 +1723,10 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
                            method=method, theta=theta, snapshot_stride=stride)
 
     lagrangian = _lagrangian_track(sim["positions"], masses, lagrangian_fractions)
-    virial = _virial_track(sim["kinetic"], sim["potential"])
-    n_escaped = np.array([
-        int(np.sum(identify_escapers(sim["positions"][k], sim["velocities"][k],
-                                      masses, softening)))
+    virial = _virial_track(sim["kinetic"], sim["virial_work"])
+    n_unbound = np.array([
+        int(np.sum(identify_unbound(sim["positions"][k], sim["velocities"][k],
+                                     masses, softening)))
         for k in range(sim["t"].size)
     ])
     fast_fraction = np.array([
@@ -1220,14 +1745,16 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     summary = dict(
         n_bodies=n_bodies, total_mass_msun=total_mass_msun,
         scale_radius_pc=scale_radius_pc, m_body_msun=total_mass_msun / n_bodies,
-        softening_pc=softening / PC, theta=theta, method=method,
+        softening_pc=softening / PC, softening_explicit=softening_explicit,
+        theta=theta, method=method,
+        steps_per_crossing=steps_per_crossing, target_snapshots=target_snapshots,
         dt_myr=dt / MYR, n_steps=n_steps, n_snapshots=sim["t"].size,
         t_cross0_myr=t_cross0 / MYR, t_relax0_myr=t_relax0 / MYR,
         n_relax_requested=n_relax, total_time_myr=sim["t"][-1] / MYR,
         r50_initial_pc=r50_0 / PC, r50_final_pc=lagrangian[-1, list(lagrangian_fractions).index(0.5)] / PC
         if 0.5 in lagrangian_fractions else float("nan"),
-        n_escaped_initial=int(n_escaped[0]), n_escaped_final=int(n_escaped[-1]),
-        evaporated_fraction_final=float(n_escaped[-1] / n_bodies),
+        n_unbound_initial=int(n_unbound[0]), n_unbound_final=int(n_unbound[-1]),
+        unbound_fraction_final=float(n_unbound[-1] / n_bodies),
         high_velocity_fraction_initial=float(fast_fraction[0]),
         high_velocity_fraction_final=float(fast_fraction[-1]),
         virial_ratio_initial=float(virial[0]), virial_ratio_final=float(virial[-1]),
@@ -1239,9 +1766,10 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     return dict(kind="cluster", t=sim["t"], positions=sim["positions"],
                 velocities=sim["velocities"], masses=masses,
                 lagrangian_radii=lagrangian, virial_ratio=virial,
-                n_escaped=n_escaped, high_velocity_fraction=fast_fraction,
+                n_unbound=n_unbound, high_velocity_fraction=fast_fraction,
                 energy=sim["energy"],
                 kinetic=sim["kinetic"], potential=sim["potential"],
+                virial_work=sim["virial_work"],
                 momentum=sim["momentum"], softening=softening,
                 summary=summary)
 
@@ -1274,15 +1802,24 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
     n_bodies = _require_int("n_bodies", n_bodies, lo=MIN_BODIES, hi=MAX_BODIES)
     n_freefall = _require_positive("n_freefall", n_freefall)
     steps_per_freefall = _require_int("steps_per_freefall", steps_per_freefall, lo=4)
-    theta = _require_finite("theta", theta)
+    theta = _require_theta(theta)
     method = _require_method(method)
     target_snapshots = _require_int("target_snapshots", target_snapshots, lo=2)
 
+    r_sphere = radius_pc * PC
+    # Computed before the initial conditions, as in run_cluster(): see the
+    # comment there (Audit1 P1-3) -- dehnen_softening() does not depend on
+    # the sampled realization, only on n_bodies and radius_pc.
+    softening = (softening_pc * PC if softening_pc is not None
+                 else dehnen_softening(n_bodies, r_sphere))
+    softening = _require_positive("softening", softening)
+    softening_explicit = softening_pc is not None
+
     ic = uniform_sphere(n_bodies, total_mass_msun, radius_pc,
-                         virial_ratio_init=virial_ratio_init, seed=seed)
+                         virial_ratio_init=virial_ratio_init,
+                         softening=softening, seed=seed)
     pos0, vel0, masses = ic["positions"], ic["velocities"], ic["masses"]
     total_mass_kg = float(masses.sum())
-    r_sphere = radius_pc * PC
 
     mean_density = total_mass_kg / (4.0 / 3.0 * math.pi * r_sphere ** 3)
     t_ff = free_fall_time(mean_density)
@@ -1291,9 +1828,6 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
     n_steps = _require_int(
         "computed n_steps", round(n_freefall * t_ff / dt), lo=MIN_STEPS, hi=MAX_STEPS
     )
-    softening = (softening_pc * PC if softening_pc is not None
-                 else dehnen_softening(n_bodies, radius_pc * PC))
-    softening = _require_positive("softening", softening)
     stride = _pick_stride(n_steps, target_snapshots)
 
     warnings = []
@@ -1307,7 +1841,7 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
                            method=method, theta=theta, snapshot_stride=stride)
 
     lagrangian = _lagrangian_track(sim["positions"], masses, lagrangian_fractions)
-    virial = _virial_track(sim["kinetic"], sim["potential"])
+    virial = _virial_track(sim["kinetic"], sim["virial_work"])
     energy_drift = _energy_drift(sim["energy"])
     if energy_drift > 0.02:
         warnings.append(
@@ -1318,14 +1852,19 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
         )
     r50_series = lagrangian[:, list(lagrangian_fractions).index(0.5)] \
         if 0.5 in lagrangian_fractions else None
-    r50_min_myr = float(sim["t"][int(np.argmin(r50_series))] / MYR) \
-        if r50_series is not None else float("nan")
+    collapse_idx = int(np.argmin(r50_series)) if r50_series is not None else None
+    r50_min_myr = float(sim["t"][collapse_idx] / MYR) \
+        if collapse_idx is not None else float("nan")
+    virial_at_collapse = float(virial[collapse_idx]) \
+        if collapse_idx is not None else float("nan")
 
     summary = dict(
         n_bodies=n_bodies, total_mass_msun=total_mass_msun, radius_pc=radius_pc,
         m_body_msun=total_mass_msun / n_bodies,
         virial_ratio_init=virial_ratio_init,
-        softening_pc=softening / PC, theta=theta, method=method,
+        softening_pc=softening / PC, softening_explicit=softening_explicit,
+        theta=theta, method=method,
+        steps_per_freefall=steps_per_freefall, target_snapshots=target_snapshots,
         dt_myr=dt / MYR, n_steps=n_steps, n_snapshots=sim["t"].size,
         t_freefall_myr=t_ff / MYR, n_freefall_requested=n_freefall,
         total_time_myr=sim["t"][-1] / MYR,
@@ -1334,6 +1873,7 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
         r50_minimum_pc=(float(r50_series.min()) / PC) if r50_series is not None else float("nan"),
         time_of_deepest_collapse_myr=r50_min_myr,
         virial_ratio_initial=float(virial[0]), virial_ratio_final=float(virial[-1]),
+        virial_ratio_at_deepest_collapse=virial_at_collapse,
         max_fractional_energy_drift=energy_drift,
         lagrangian_fractions=tuple(lagrangian_fractions),
         seed=seed, warnings=warnings,
@@ -1343,14 +1883,15 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
                 velocities=sim["velocities"], masses=masses,
                 lagrangian_radii=lagrangian, virial_ratio=virial,
                 energy=sim["energy"], kinetic=sim["kinetic"],
-                potential=sim["potential"], momentum=sim["momentum"],
+                potential=sim["potential"], virial_work=sim["virial_work"],
+                momentum=sim["momentum"],
                 softening=softening, summary=summary)
 
 
 def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
               relative_perturbation=1.0e-8, n_cross=120.0,
               steps_per_crossing=50, softening_pc=None, theta=0.5,
-              method="tree", target_snapshots=200, seed=None,
+              method="direct", target_snapshots=200, seed=None,
               perturbation_seed=None):
     """
     Chaos mode: two Plummer-sphere realizations that start indistinguishably
@@ -1358,9 +1899,26 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     isotropic random position offset of relative size
     ``relative_perturbation`` applied to every body -- are integrated with
     IDENTICAL code, parameters and timestep, and their growing separation
-    is tracked (perturb_positions, phase_space_divergence). See Miller
+    is tracked (perturb_positions, position_space_divergence). See Miller
     (1964) for the original demonstration that gravitational N-body
     motion is chaotic in this sense.
+
+    Audit1 fix (Codex P1-6.3, Copilot A12, 2026-09-03): ``method``
+    defaults to "direct", not "tree", for this mode specifically (the
+    other two modes keep "tree" as their default). The Barnes-Hut tree
+    is pair-asymmetric and rebuilt independently for the two
+    realizations each step, so nearly-coincident bodies that fall on
+    opposite sides of a cell boundary in one realization but not the
+    other pick up a small, discontinuous, algorithmic force difference
+    on top of the genuine physical divergence being measured -- this
+    inflates or corrupts the very quantity chaos mode exists to measure.
+    A controlled N=40 comparison at fixed initial conditions found the
+    tree method both LESS accurate (larger energy drift) and SLOWER than
+    direct summation at this mode's default N, so there is no accuracy/
+    speed tradeoff being given up by defaulting to direct here; method
+    remains an explicit, overridable argument for students who want to
+    see the tree method's extra, non-physical contribution to divergence
+    for themselves.
 
     The run length is a multiple, ``n_cross``, of the shared initial
     crossing time; a large multiple is needed here (order 10-100
@@ -1372,17 +1930,32 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     n_bodies = _require_int("n_bodies", n_bodies, lo=MIN_BODIES, hi=MAX_BODIES)
     n_cross = _require_positive("n_cross", n_cross)
     steps_per_crossing = _require_int("steps_per_crossing", steps_per_crossing, lo=4)
-    theta = _require_finite("theta", theta)
+    theta = _require_theta(theta)
     method = _require_method(method)
     target_snapshots = _require_int("target_snapshots", target_snapshots, lo=2)
     relative_perturbation = _require_positive(
         "relative_perturbation", relative_perturbation
     )
 
-    ic = plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc, seed=seed)
+    # Softening computed before the initial conditions -- see run_cluster()
+    # (Audit1 P1-3): plummer_sphere() needs it to rescale to the actual
+    # discrete, softened equilibrium.
+    softening = (softening_pc * PC if softening_pc is not None
+                 else dehnen_softening(n_bodies, scale_radius_pc * PC))
+    softening = _require_positive("softening", softening)
+    softening_explicit = softening_pc is not None
+
+    ic = plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc,
+                         softening=softening, seed=seed)
     pos_a, vel0, masses = ic["positions"], ic["velocities"], ic["masses"]
     total_mass_kg = float(masses.sum())
-    pos_b = perturb_positions(pos_a, relative_perturbation, seed=perturbation_seed)
+    # masses= removes any net center-of-mass shift the random perturbation
+    # itself would otherwise impart to realization B relative to A (Audit1
+    # P1-6.2, Copilot A12): without it, a coherent COM translation between
+    # the two realizations is folded into the measured divergence, which
+    # is supposed to isolate their internal, relative chaotic divergence.
+    pos_b = perturb_positions(pos_a, relative_perturbation, masses=masses,
+                               seed=perturbation_seed)
 
     r50_0 = half_mass_radius(pos_a, masses)
     t_cross0 = crossing_time(r50_0, total_mass_kg)
@@ -1390,9 +1963,6 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     n_steps = _require_int(
         "computed n_steps", round(n_cross * t_cross0 / dt), lo=MIN_STEPS, hi=MAX_STEPS
     )
-    softening = (softening_pc * PC if softening_pc is not None
-                 else dehnen_softening(n_bodies, scale_radius_pc * PC))
-    softening = _require_positive("softening", softening)
     stride = _pick_stride(n_steps, target_snapshots)
 
     warnings = []
@@ -1407,7 +1977,8 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     sim_b = integrate_nbody(pos_b, vel0, masses, dt, n_steps, softening,
                              method=method, theta=theta, snapshot_stride=stride)
 
-    divergence = phase_space_divergence(sim_a["positions"], sim_b["positions"])
+    divergence = position_space_divergence(sim_a["positions"], sim_b["positions"],
+                                            masses=masses)
     lyap = estimate_lyapunov_exponent(sim_a["t"], divergence)
     energy_drift_a = _energy_drift(sim_a["energy"])
     energy_drift_b = _energy_drift(sim_b["energy"])
@@ -1418,18 +1989,24 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
             "dt (raise steps_per_crossing) so the divergence measured is "
             "physical growth, not integration error."
         )
-    if lyap["n_points_used"] < 3:
+    if not math.isfinite(lyap["lyapunov_exponent"]):
         warnings.append(
             "the separation between the two realizations never developed a "
-            "clean exponential-growth window (it may still be too small, "
-            "or has already saturated at the system size); raise n_cross "
-            "or relative_perturbation and re-run."
+            "single contiguous window that passed this program's "
+            "exponential-growth-quality checks (r_squared >= 0.98 and "
+            "consistent sub-segment slopes) -- it may still be too small, "
+            "may have already saturated at the system size, or may be "
+            "noisier than these checks tolerate; raise n_cross or "
+            "relative_perturbation and re-run, or inspect the plotted "
+            "divergence curve directly."
         )
 
     summary = dict(
         n_bodies=n_bodies, total_mass_msun=total_mass_msun,
         scale_radius_pc=scale_radius_pc, relative_perturbation=relative_perturbation,
-        softening_pc=softening / PC, theta=theta, method=method,
+        softening_pc=softening / PC, softening_explicit=softening_explicit,
+        theta=theta, method=method,
+        steps_per_crossing=steps_per_crossing, target_snapshots=target_snapshots,
         dt_myr=dt / MYR, n_steps=n_steps, n_snapshots=sim_a["t"].size,
         t_cross0_myr=t_cross0 / MYR, n_cross_requested=n_cross,
         total_time_myr=sim_a["t"][-1] / MYR,
@@ -1440,9 +2017,10 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
                                     if math.isfinite(lyap["lyapunov_exponent"])
                                     else float("nan")),
         lyapunov_time_myr=(lyap["lyapunov_time"] / MYR
-                            if math.isfinite(lyap["lyapunov_time"]) else float("inf")),
+                            if math.isfinite(lyap["lyapunov_time"]) else float("nan")),
         lyapunov_time_over_t_cross=(lyap["lyapunov_time"] / t_cross0
-                                     if math.isfinite(lyap["lyapunov_time"]) else float("inf")),
+                                     if math.isfinite(lyap["lyapunov_time"]) else float("nan")),
+        lyapunov_fit_r_squared=lyap["r_squared"],
         n_points_used_in_fit=lyap["n_points_used"],
         max_fractional_energy_drift=max(energy_drift_a, energy_drift_b),
         seed=seed, perturbation_seed=perturbation_seed, warnings=warnings,

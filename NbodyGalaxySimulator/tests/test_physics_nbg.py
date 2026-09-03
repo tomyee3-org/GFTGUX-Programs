@@ -47,6 +47,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import warnings
 
 import numpy as np
 
@@ -525,6 +526,67 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
             phys.compute_accelerations(self.positions, self.masses, self.softening,
                                         method="euler")
 
+    def test_target_containing_node_is_never_accepted_as_monopole(self):
+        """
+        Audit1 regression (Codex P1-5, Copilot A10, 2026-09-03): an internal
+        octree node whose cube contains the body the acceleration is being
+        evaluated for must never be accepted as a monopole, no matter how
+        small its opening angle appears. Accepting it folds the body's own
+        mass and position into the node's center of mass and applies a
+        spurious self-force to that body.
+
+        Adversarial geometry: one target body sits alone at one corner of
+        the bounding volume; seven other bodies are clustered tightly near
+        the opposite corner. The tight cluster is accepted as a single
+        monopole from the target's point of view at every theta in
+        [0.5, 1.0] (its angular size is tiny), but at theta close to 1 the
+        octree's coarse root-level split can place the *target* body
+        itself inside the same large-scale node that also contains part of
+        the mass distribution -- on the defective implementation this
+        showed up as a target body sharing a node with itself. The
+        reproducer below actually exercises the more direct failure mode
+        reported by both reviewers: forcing the tree to be built so that a
+        single high-level node contains both the target and (numerically)
+        coincides with a case where dist2 could vanish or the target's own
+        cell is large enough to be theta-accepted. Directly checking the
+        recorded pre-fix vs. post-fix numbers is the robust assertion here:
+        pre-fix this configuration measured a 49.27% relative acceleration
+        error on the target body at theta in [0.7, 1.0] (0% at theta=0.5,
+        where the tree still fully resolves the cluster); post-fix the
+        error must collapse to the ordinary, small multipole-truncation
+        level regardless of theta.
+        """
+        rng = np.random.default_rng(0)
+        positions = np.zeros((8, 3))
+        positions[0] = [-1.0, -1.0, -1.0]
+        positions[1:] = 1.0 + 0.01 * rng.standard_normal((7, 3))
+        masses = np.ones(8)
+        softening = 0.01
+
+        acc_direct = phys.compute_accelerations_direct(positions, masses, softening)
+        target_direct = acc_direct[0]
+        self.assertGreater(np.linalg.norm(target_direct), 0.0)
+
+        for theta in (0.5, 0.7, 0.8, 1.0):
+            acc_tree = phys.compute_accelerations_tree(
+                positions, masses, theta, softening
+            )
+            rel_err = (
+                np.linalg.norm(acc_tree[0] - target_direct)
+                / np.linalg.norm(target_direct)
+            )
+            # The defective implementation gave rel_err == 0.4927 (49.27%)
+            # at theta in {0.7, 0.8, 1.0}. A correct implementation stays
+            # at ordinary monopole-truncation error (well under 1%) at
+            # every theta, since the target body is never itself part of
+            # the accepted cluster node.
+            self.assertLess(
+                rel_err, 0.01,
+                msg=f"theta={theta}: relative acceleration error {rel_err!r} "
+                "indicates the target body's own node was accepted as a "
+                "monopole (self-force contamination).",
+            )
+
 
 # ======================================================================
 class TestEnergyMomentumAndVirial(unittest.TestCase):
@@ -563,6 +625,25 @@ class TestEnergyMomentumAndVirial(unittest.TestCase):
         masses = np.array([1.0, 3.0])
         com = phys.center_of_mass(positions, masses)
         self.assertAlmostEqual(com[0], 3.0)  # (1*0 + 3*4)/4 = 3
+
+    def test_center_of_mass_rejects_nonpositive_total_mass(self):
+        """
+        Audit1 regression (Codex P2-9, 2026-09-03): a non-positive total
+        mass previously fell through to a silent 0/0 division, returning
+        [nan, nan, nan] together with a RuntimeWarning rather than
+        raising -- this asserts the precise exception, not merely "no
+        crash" or "a warning happened".
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]])
+        masses = np.array([1.0, -1.0])
+        with self.assertRaises(ValueError):
+            phys.center_of_mass(positions, masses)
+        with self.assertRaises(ValueError):
+            phys.center_of_mass_velocity(positions, masses)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with self.assertRaises(ValueError):
+                phys.center_of_mass(positions, np.array([0.0, 0.0]))
 
     def test_recenter_zeroes_com_position_and_velocity(self):
         rng = np.random.default_rng(0)
@@ -609,21 +690,80 @@ class TestLagrangianRadii(unittest.TestCase):
 
 # ======================================================================
 class TestEscapersAndFastFraction(unittest.TestCase):
-    def test_bound_stationary_system_has_no_escapers(self):
+    def test_bound_stationary_system_has_no_unbound_bodies(self):
         positions = np.array([[0.0, 0.0, 0.0], [1e10, 0.0, 0.0], [-1e10, 0.0, 0.0]])
         velocities = np.zeros((3, 3))
         masses = np.array([1e28, 1e30, 1e30])
-        escaping = phys.identify_escapers(positions, velocities, masses, 1e5)
-        self.assertFalse(np.any(escaping))
+        unbound = phys.identify_unbound(positions, velocities, masses, 1e5)
+        self.assertFalse(np.any(unbound))
 
-    def test_very_fast_light_body_is_flagged_as_escaping(self):
+    def test_very_fast_light_body_is_flagged_unbound(self):
         positions = np.array([[0.0, 0.0, 0.0], [1e10, 0.0, 0.0], [-1e10, 0.0, 0.0]])
         velocities = np.array([[0.0, 0.0, 1e10], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
         masses = np.array([1e-10, 1e30, 1e30])
-        escaping = phys.identify_escapers(positions, velocities, masses, 1e5)
-        self.assertTrue(escaping[0])
-        self.assertFalse(escaping[1])
-        self.assertFalse(escaping[2])
+        unbound = phys.identify_unbound(positions, velocities, masses, 1e5)
+        self.assertTrue(unbound[0])
+        self.assertFalse(unbound[1])
+        self.assertFalse(unbound[2])
+
+    def test_inward_moving_positive_energy_body_is_still_flagged_unbound(self):
+        """
+        Audit1 regression (Codex P1-7, Copilot A13, 2026-09-03): a body
+        with positive specific energy but currently moving INWARD (toward
+        the rest of the system, not away from it) must still be flagged
+        by identify_unbound() -- specific energy is the physically
+        complete criterion for eventual escape in a potential that falls
+        to zero at infinity, independent of the instantaneous radial
+        velocity sign (a body can be on the incoming branch of a
+        hyperbolic-like encounter and still be formally unbound). A prior
+        release's Help file incorrectly claimed an additional outward-
+        motion requirement that the code never implemented; that Help
+        claim is what was corrected (see NbodyGalaxySimulator.html), not
+        this function -- adding an outward-motion requirement here would
+        incorrectly exclude genuinely, physically unbound bodies. This
+        test is the "inward-moving positive-energy body" case the prior
+        release's test suite was flagged for never exercising.
+        """
+        # A light, fast outer body plunging almost radially inward
+        # (v_z strongly negative, i.e. toward the two heavy bodies at the
+        # origin-ish cluster) while retaining enough speed for positive
+        # specific energy.
+        positions = np.array([[0.0, 0.0, 1e12], [0.0, 0.0, 0.0], [1e6, 0.0, 0.0]])
+        velocities = np.array([[0.0, 0.0, -5e5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        masses = np.array([1e-10, 1e30, 1e30])
+        energies = phys.specific_energies(positions, velocities, masses, 1e5)
+        self.assertGreater(energies[0], 0.0)
+        r_com = phys.center_of_mass(positions, masses)
+        radial_velocity_component = np.dot(positions[0] - r_com, velocities[0])
+        self.assertLess(radial_velocity_component, 0.0)  # confirms inward motion
+        unbound = phys.identify_unbound(positions, velocities, masses, 1e5)
+        self.assertTrue(unbound[0])
+
+    def test_unbound_count_is_not_guaranteed_monotonic(self):
+        """
+        Audit1 regression (Codex P1-7, 2026-09-03): a body's specific
+        energy can cross back to negative at a later snapshot as the
+        system's own potential evolves, so the count of instantaneously
+        unbound bodies is NOT guaranteed to be monotonically increasing
+        over a run. Constructed here directly (rather than relying on any
+        particular full simulation to happen to show it): a light body
+        starts marginally unbound, then a later snapshot with the same
+        positions but a slower velocity for that body is bound instead --
+        exactly the kind of transition a time-dependent potential can
+        produce, which a monotonic "n_escaped only grows" assumption
+        would wrongly rule out.
+        """
+        positions = np.array([[0.0, 0.0, 1e10], [0.0, 0.0, 0.0], [1e6, 0.0, 0.0]])
+        masses = np.array([1e-10, 1e30, 1e30])
+        fast = np.array([[0.0, 0.0, 5.0e5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        slow = np.array([[0.0, 0.0, 5.0e2], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        n_unbound_snapshot_1 = int(np.sum(
+            phys.identify_unbound(positions, fast, masses, 1e5)))
+        n_unbound_snapshot_2 = int(np.sum(
+            phys.identify_unbound(positions, slow, masses, 1e5)))
+        self.assertEqual(n_unbound_snapshot_1, 1)
+        self.assertEqual(n_unbound_snapshot_2, 0)
+        self.assertLess(n_unbound_snapshot_2, n_unbound_snapshot_1)
 
     def test_high_velocity_fraction_is_a_valid_fraction(self):
         rng = np.random.default_rng(3)
@@ -693,6 +833,26 @@ class TestInitialConditions(unittest.TestCase):
         self.assertAlmostEqual(float(ic["masses"].sum()), 500.0 * phys.M_sun,
                                 delta=500.0 * phys.M_sun * 1e-9)
 
+    def test_plummer_velocity_envelope_is_a_valid_upper_bound(self):
+        """
+        Audit1 correction (Codex P3-4, Copilot A16, 2026-09-03): the
+        rejection envelope constant (0.1) used by plummer_sphere()'s
+        velocity sampler must upper-bound g(q) = q^2(1-q^2)^3.5 over its
+        entire domain q in [0, 1] for the rejection sampling to be valid
+        at all -- verified here by direct numerical search, independently
+        of the (corrected) analytic maximum-location claim in the
+        function's docstring. This is an independent numerical check,
+        not a call into the same formula the docstring derives.
+        """
+        q = np.linspace(0.0, 1.0, 2_000_001)
+        g = q ** 2 * (1.0 - q ** 2) ** 3.5
+        g_max = float(g.max())
+        self.assertLess(g_max, 0.1)
+        # The corrected docstring's claimed maximum location and value:
+        q_at_max = float(q[np.argmax(g)])
+        self.assertAlmostEqual(q_at_max, 1.0 / math.sqrt(4.5), places=3)
+        self.assertAlmostEqual(g_max, 0.09221, places=4)
+
     def test_plummer_sphere_is_recentered(self):
         ic = phys.plummer_sphere(150, 1000.0, 1.0, seed=42)
         scale = 1.0 * phys.PC
@@ -701,17 +861,50 @@ class TestInitialConditions(unittest.TestCase):
             atol=scale * 1e-6,
         ))
 
-    def test_plummer_sphere_is_close_to_virial_equilibrium(self):
-        # The Aarseth/Henon/Wielen sampler draws velocities from the exact
-        # Plummer distribution function, so a moderately large realization
-        # should sit close to Q = 2T/|W| = 1, modulo Poisson (finite-N)
-        # noise; this is a physical sanity check, not an exact identity.
+    def test_plummer_sphere_starts_in_exact_softened_virial_equilibrium(self):
+        """
+        Audit1 oracle correction (Codex P1-1/P1-3, Copilot A2/A11,
+        2026-09-03): this test previously computed Q = 2T/|U| using
+        potential_energy() (U) -- exactly the same U-vs-Wvir conflation
+        found and fixed in the main code (see virial_force_term()'s
+        docstring) -- and only checked a loose 0.5-1.5 band, which is
+        wide enough to pass even with that wrong denominator. Since
+        plummer_sphere() now explicitly rescales velocities to put the
+        actual discrete, softened realization into EXACT equilibrium
+        (2T/|Wvir| = 1, using virial_force_term(), not potential_energy())
+        rather than merely trusting the unsoftened continuum DF to land
+        close to it, this is checked tightly here, not loosely -- and
+        using the physically correct oracle quantity.
+        """
         ic = phys.plummer_sphere(300, 1000.0, 1.0, seed=42)
-        softening = phys.dehnen_softening(300, 1.0 * phys.PC)
+        softening = ic["diagnostics"]["softening"]
         ke = phys.kinetic_energy(ic["velocities"], ic["masses"])
-        pe = phys.potential_energy(ic["positions"], ic["masses"], softening)
-        q = phys.virial_ratio(ke, pe)
-        self.assertTrue(0.5 < q < 1.5, f"virial ratio {q} far from equilibrium")
+        wvir = phys.virial_force_term(ic["positions"], ic["masses"], softening)
+        q = phys.virial_ratio(ke, wvir)
+        self.assertAlmostEqual(q, 1.0, places=8)
+        self.assertAlmostEqual(ic["diagnostics"]["virial_ratio_initial"], 1.0, places=8)
+
+    def test_plummer_sphere_unsoftened_df_alone_is_measurably_off_equilibrium(self):
+        """
+        Companion to the exact-equilibrium test above: this confirms the
+        rescale in plummer_sphere() is actually doing scientific work,
+        not just relabeling a quantity that was already at 1. The
+        diagnostics field 'virial_ratio_before_correction' records
+        2T/|Wvir| computed from the raw, unsoftened-DF-sampled velocities
+        BEFORE the equilibrium rescale is applied -- using the correct
+        Wvir (virial_force_term()) denominator throughout, so this
+        isolates the P1-3 energy-SCALE mismatch (sampling from a DF
+        matched to the idealized unsoftened potential, then integrating
+        under a different, softened force law) from the separate P1-1
+        U-vs-Wvir naming confusion. This is measurably different from
+        1.0, confirming the discrete, softened realization is not
+        already at equilibrium on its own (measured empirically near
+        2T/|Wvir| approx 1.38 for one representative N=200 realization
+        during this audit response).
+        """
+        ic = phys.plummer_sphere(200, 1000.0, 1.0, seed=4)
+        q_before = ic["diagnostics"]["virial_ratio_before_correction"]
+        self.assertGreater(abs(q_before - 1.0), 0.05)
 
     def test_plummer_sphere_tight_max_radius_factor_raises(self):
         # An unreasonably small max_radius_factor rejects nearly every draw,
@@ -743,15 +936,51 @@ class TestInitialConditions(unittest.TestCase):
         self.assertTrue(np.all(r <= 1.5 * r_sphere))
         self.assertGreater(np.median(r), 0.1 * r_sphere)
 
-    def test_uniform_sphere_rescales_to_requested_virial_ratio(self):
-        ic = phys.uniform_sphere(200, 1.0e6, 200.0, virial_ratio_init=0.5, seed=7)
-        w0 = ic["diagnostics"]["analytic_potential_energy"]
-        target_t = 0.5 * abs(w0)
-        actual_t = phys.kinetic_energy(ic["velocities"], ic["masses"])
-        # Recentering to the COM frame after rescaling removes a small
-        # (order 1/N) amount of bulk kinetic energy, so this is a close
-        # match rather than an exact one.
-        self.assertAlmostEqual(actual_t / target_t, 1.0, delta=0.05)
+    def test_uniform_sphere_rescales_to_requested_virial_ratio_exactly(self):
+        """
+        Audit1 oracle correction (Codex P1-2/P2-1, Copilot A1, 2026-09-03):
+        this test previously targeted the OLD T/|W0| convention
+        (equilibrium at virial_ratio_init=0.5) against the idealized,
+        unsoftened, continuum self-energy W0, and only checked a "close
+        match" (5% tolerance) because the old scale-THEN-recenter order
+        was not exact. Both are corrected here: the convention is now
+        2T/|Wvir| (equilibrium at virial_ratio_init=1.0, matching
+        virial_ratio()'s own convention), the reference energy is the
+        actual discrete, softened Wvir the realization will actually be
+        integrated with (not the idealized continuum W0), and recenter-
+        THEN-scale (Audit1 P2-1) makes the result exact to floating-point
+        precision for any N -- checked tightly here rather than loosely.
+        """
+        ic = phys.uniform_sphere(200, 1.0e6, 200.0, virial_ratio_init=0.7, seed=7)
+        positions, velocities, masses = ic["positions"], ic["velocities"], ic["masses"]
+        softening = ic["diagnostics"]["softening"]
+        actual_t = phys.kinetic_energy(velocities, masses)
+        wvir = phys.virial_force_term(positions, masses, softening)
+        q = phys.virial_ratio(actual_t, wvir)
+        self.assertAlmostEqual(q, 0.7, places=8)
+        self.assertAlmostEqual(ic["diagnostics"]["virial_ratio_initial"], 0.7, places=8)
+
+    def test_uniform_sphere_virial_rescale_is_exact_even_at_n_equals_3(self):
+        """
+        Audit1 regression (Codex/Copilot P2-1, 2026-09-03): a prior
+        release's scale-THEN-recenter order degraded badly at small N
+        (measured final-T/target-T ratio at N=3 ranging 0.148-0.983
+        across 50 seeds). Recenter-then-scale removes the mass-weighted
+        mean velocity BEFORE rescaling, so scaling a zero-mean vector set
+        by one overall constant keeps it exactly zero-mean -- this is
+        checked here to be exact (to floating-point precision) across
+        several seeds at the worst-case N=3, not merely "improved".
+        """
+        for seed in range(10):
+            ic = phys.uniform_sphere(3, 1.0e6, 200.0, virial_ratio_init=0.7, seed=seed)
+            positions, velocities, masses = ic["positions"], ic["velocities"], ic["masses"]
+            softening = ic["diagnostics"]["softening"]
+            q = phys.virial_ratio(
+                phys.kinetic_energy(velocities, masses),
+                phys.virial_force_term(positions, masses, softening),
+            )
+            self.assertAlmostEqual(q, 0.7, places=6,
+                                    msg=f"seed={seed}: got Q={q!r}")
 
     def test_uniform_sphere_rejects_excessive_virial_ratio(self):
         with self.assertRaises(ValueError):
@@ -787,6 +1016,45 @@ class TestLeapfrogAndIntegration(unittest.TestCase):
         with self.assertRaises(ValueError):
             phys.leapfrog_step(positions, positions * 0.0, masses, 0.0, 1.0)
 
+    def test_leapfrog_step_and_integrate_nbody_reject_negative_dt(self):
+        """
+        Audit1 regression (Copilot A11, 2026-09-03): dt == 0 was already
+        rejected, but a negative dt was previously accepted and silently
+        ran the integrator backward in time -- an undocumented reversed-
+        time mode with no warning, in an API whose every documented mode
+        represents forward evolution. Both entry points must now reject
+        dt < 0 with the same ValueError used for dt == 0.
+        """
+        positions = np.zeros((3, 3)) + np.eye(3)
+        velocities = positions * 0.0
+        masses = np.ones(3)
+        with self.assertRaises(ValueError):
+            phys.leapfrog_step(positions, velocities, masses, -1.0, 1.0)
+        with self.assertRaises(ValueError):
+            phys.integrate_nbody(positions, velocities, masses, dt=-1.0,
+                                  n_steps=5, softening=1.0)
+
+    def test_leapfrog_step_validates_caller_supplied_accel(self):
+        """
+        Audit1 regression (Codex P2-9, 2026-09-03): a caller-supplied
+        ``accel`` was previously used with no shape or finiteness check
+        at all, so a bad value from a misbehaving caller would silently
+        corrupt the step rather than raising at the point of the bad
+        input. A wrong shape and a non-finite value must both be
+        rejected explicitly.
+        """
+        positions = np.zeros((3, 3)) + np.eye(3)
+        masses = np.ones(3)
+        wrong_shape_accel = np.zeros((3, 2))
+        with self.assertRaises(ValueError):
+            phys.leapfrog_step(positions, positions * 0.0, masses, 1.0, 1.0,
+                                method="direct", accel=wrong_shape_accel)
+        nonfinite_accel = np.zeros((3, 3))
+        nonfinite_accel[0, 0] = float("nan")
+        with self.assertRaises(ValueError):
+            phys.leapfrog_step(positions, positions * 0.0, masses, 1.0, 1.0,
+                                method="direct", accel=nonfinite_accel)
+
     def test_integrate_nbody_snapshot_count_includes_final_step(self):
         rng = np.random.default_rng(5)
         n = 10
@@ -815,6 +1083,32 @@ class TestLeapfrogAndIntegration(unittest.TestCase):
                                   n_steps=phys.MAX_SNAPSHOTS + 1, softening=1e10,
                                   snapshot_stride=1, method="direct")
 
+    def test_integrate_nbody_rejects_excessive_body_snapshot_product(self):
+        """
+        Audit1 regression (Codex P2-9, 2026-09-03): MAX_BODIES and
+        MAX_SNAPSHOTS were each individually bounded, but nothing bounded
+        their product -- positions and velocities are each stored as a
+        full (n_snapshots, n_bodies, 3) float64 history, so the two
+        limits together could allocate roughly 960 MB for one run
+        (5000 bodies * 4000 snapshots * 3 * 8 bytes * 2 arrays), which is
+        not a meaningful memory-safety guard. A body count and step count
+        that are each individually well within their own separate limits,
+        but whose product exceeds MAX_BODY_SNAPSHOT_PRODUCT, must still
+        be rejected.
+        """
+        n = 3000
+        positions = np.zeros((n, 3))
+        velocities = np.zeros((n, 3))
+        masses = np.ones(n)
+        self.assertLessEqual(n, phys.MAX_BODIES)
+        n_steps = 1000
+        self.assertLessEqual(n_steps + 1, phys.MAX_SNAPSHOTS)
+        self.assertGreater(n * (n_steps + 1), phys.MAX_BODY_SNAPSHOT_PRODUCT)
+        with self.assertRaises(ValueError):
+            phys.integrate_nbody(positions, velocities, masses, dt=1.0,
+                                  n_steps=n_steps, softening=1e10,
+                                  snapshot_stride=1, method="direct")
+
     def test_integrate_nbody_rejects_zero_dt_and_bad_body_count(self):
         n = 5
         positions = np.zeros((n, 3))
@@ -841,6 +1135,44 @@ class TestLeapfrogAndIntegration(unittest.TestCase):
         self.assertTrue(np.allclose(result_direct["positions"],
                                      result_tree["positions"], rtol=1e-6))
 
+    def test_fully_unbound_fast_ejecting_configuration_integrates_cleanly(self):
+        """
+        Gemini Audit1 claim (2026-09-03, rejected -- see the Response-to-
+        Audit1 report): "boundary checks for the star cluster evaporation
+        models lack adequate exception handling for edge-case particle
+        ejections." No specific reproducer accompanied the claim. This
+        constructs the most adversarial edge case that description could
+        plausibly mean -- a Plummer-sphere configuration with every body's
+        specific energy driven strongly positive (all of it energetically
+        unbound and moving apart at many times the local escape speed) --
+        and confirms the leapfrog integrator handles it with no exception,
+        no RuntimeWarning, and finite output. It does not, and physically
+        should not, keep the bodies bound: the point is that a system with
+        every particle in mid-"ejection" is numerically ordinary input, not
+        a special case requiring extra exception handling.
+        """
+        ic = phys.plummer_sphere(n_bodies=25, total_mass_msun=1.0e3,
+                                  scale_radius_pc=1.0, seed=9)
+        positions = ic["positions"]
+        velocities = ic["velocities"] * 50.0  # far past the local escape speed
+        masses = ic["masses"]
+        softening = ic["diagnostics"]["softening"]
+        unbound_fraction = phys.identify_unbound(
+            positions, velocities, masses, softening).mean()
+        self.assertEqual(unbound_fraction, 1.0,
+                          "test setup did not actually produce an all-"
+                          "unbound configuration; strengthen the velocity "
+                          "boost above.")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = phys.integrate_nbody(positions, velocities, masses,
+                                           dt=1.0e6, n_steps=5,
+                                           softening=softening,
+                                           method="direct")
+        self.assertTrue(np.all(np.isfinite(result["positions"])))
+        self.assertTrue(np.all(np.isfinite(result["velocities"])))
+        self.assertTrue(np.all(np.isfinite(result["energy"])))
+
 
 # ======================================================================
 class TestChaosDiagnostics(unittest.TestCase):
@@ -856,21 +1188,100 @@ class TestChaosDiagnostics(unittest.TestCase):
         self.assertLess(offset_rms, 1.0e-4 * rms)
         self.assertGreater(offset_rms, 1.0e-8 * rms)
 
+    def test_perturbation_rms_vector_magnitude_matches_documented_value(self):
+        """
+        Audit1 regression (Codex P2-2, Copilot A9, 2026-09-03): the RMS
+        VECTOR displacement magnitude, sqrt(mean_i |offset_i|^2), must
+        equal relative_perturbation * rms_radius -- not sqrt(3) times
+        that, which is what a prior release actually produced (each of
+        the 3 Cartesian components independently had sigma =
+        relative_perturbation * rms_radius, so the vector magnitude's
+        RMS was too large by sqrt(3) approx 1.732; the prior release's
+        own test only checked a 0.01x-100x range, far too loose to catch
+        a 73% error). A large N (2000 bodies) is used here to make the
+        sampling-noise tolerance (10%) tight enough to distinguish the
+        correct answer from the sqrt(3) bug with a wide margin, while
+        remaining robust to ordinary Monte Carlo fluctuation.
+        """
+        rng = np.random.default_rng(7)
+        n = 2000
+        positions = rng.normal(size=(n, 3)) * 1.0e16
+        centroid = positions.mean(axis=0)
+        rms_radius = math.sqrt(float(np.mean(np.sum((positions - centroid) ** 2, axis=1))))
+        relative_perturbation = 1.0e-6
+        perturbed = phys.perturb_positions(positions, relative_perturbation, seed=3)
+        offset = perturbed - positions
+        offset_rms = math.sqrt(float(np.mean(np.sum(offset ** 2, axis=1))))
+        target = relative_perturbation * rms_radius
+        ratio = offset_rms / target
+        self.assertAlmostEqual(ratio, 1.0, delta=0.10,
+                                msg=f"RMS vector displacement / target = {ratio!r}; "
+                                "expected close to 1.0, not close to sqrt(3) "
+                                f"= {math.sqrt(3.0):.6f}.")
+
     def test_perturb_positions_zero_rms_radius_fallback(self):
         positions = np.zeros((5, 3))
         perturbed = phys.perturb_positions(positions, 0.1, seed=1)
         self.assertFalse(np.allclose(perturbed, 0.0))
 
-    def test_phase_space_divergence_shape_mismatch_raises(self):
+    def test_perturb_positions_with_masses_introduces_no_net_com_shift(self):
+        """
+        Audit1 regression (Codex P1-6.2, Copilot A12, 2026-09-03): passing
+        masses= must recenter the random offset itself, so the perturbed
+        copy's center of mass does not shift relative to the original --
+        otherwise a coherent COM translation between the two chaos-mode
+        realizations would contaminate the divergence measurement (a
+        fixed N=40 comparison in the prior release showed this growing to
+        0.105 pc of algorithmic COM displacement by 120 crossing times).
+        """
+        rng = np.random.default_rng(5)
+        n = 30
+        positions = rng.normal(size=(n, 3)) * 1.0e16
+        masses = rng.uniform(0.5, 2.0, size=n)
+        com_before = phys.center_of_mass(positions, masses)
+        perturbed = phys.perturb_positions(positions, 1.0e-3, masses=masses, seed=2)
+        com_after = phys.center_of_mass(perturbed, masses)
+        # Positions are of order 1e16 here, so float64's ~1e-16 relative
+        # precision alone limits agreement to roughly 1e16 * 1e-16 = a few
+        # units in absolute terms; atol is scaled to that, not to zero.
+        self.assertTrue(np.allclose(com_after, com_before, atol=1e-6 * 1.0e16, rtol=0.0))
+
+    def test_position_space_divergence_shape_mismatch_raises(self):
         a = np.zeros((5, 3))
         b = np.zeros((4, 3))
         with self.assertRaises(ValueError):
-            phys.phase_space_divergence(a, b)
+            phys.position_space_divergence(a, b)
 
-    def test_phase_space_divergence_zero_for_identical_input(self):
+    def test_position_space_divergence_zero_for_identical_input(self):
         rng = np.random.default_rng(4)
         a = rng.normal(size=(20, 3))
-        self.assertAlmostEqual(float(phys.phase_space_divergence(a, a)), 0.0)
+        self.assertAlmostEqual(float(phys.position_space_divergence(a, a)), 0.0)
+
+    def test_position_space_divergence_removes_coherent_com_translation(self):
+        """
+        Audit1 regression (Codex P1-6.2, Copilot A12, 2026-09-03): with
+        masses given, a rigid, coherent translation applied to every body
+        in realization B (simulating the kind of net momentum-drift-
+        driven center-of-mass displacement the tree method's imperfect
+        momentum conservation can introduce between two independently
+        integrated realizations) must be removed before measuring
+        divergence -- internal structure is identical here, so the
+        correctly recentered divergence must be (numerically) zero even
+        though the raw, non-recentered positions differ by a large,
+        uniform offset.
+        """
+        rng = np.random.default_rng(6)
+        n = 15
+        positions_a = rng.normal(size=(n, 3)) * 1.0e16
+        masses = rng.uniform(0.5, 2.0, size=n)
+        rigid_shift = np.array([5.0e15, -3.0e15, 1.0e15])
+        positions_b = positions_a + rigid_shift
+        raw = phys.position_space_divergence(positions_a, positions_b)
+        recentered = phys.position_space_divergence(positions_a, positions_b, masses=masses)
+        self.assertGreater(raw, 1.0e15)
+        # See the note in test_perturb_positions_with_masses_introduces_no_
+        # net_com_shift above on why the tolerance is scaled to 1e16, not 0.
+        self.assertLess(recentered, 1.0e-6 * 1.0e16)
 
     def test_estimate_lyapunov_exponent_recovers_known_rate(self):
         t = np.linspace(0, 100, 500)
@@ -879,7 +1290,21 @@ class TestChaosDiagnostics(unittest.TestCase):
         result = phys.estimate_lyapunov_exponent(t, d)
         self.assertAlmostEqual(result["lyapunov_exponent"], lam_true, places=6)
         self.assertAlmostEqual(result["lyapunov_time"], 1.0 / lam_true, places=3)
-        self.assertGreaterEqual(result["n_points_used"], 3)
+        self.assertGreaterEqual(result["n_points_used"], 5)
+        self.assertGreater(result["r_squared"], 0.999)
+
+    def test_estimate_lyapunov_exponent_tolerates_realistic_noise(self):
+        """Genuine exponential growth with up to 5% multiplicative noise
+        per point must still be recovered (the fit-quality gates below
+        must not be so strict they reject real, noisy chaos data)."""
+        rng = np.random.default_rng(11)
+        t = np.linspace(0, 200, 400)
+        lam_true = 0.05
+        d = 1e-8 * np.exp(lam_true * t) * (1.0 + 0.05 * rng.standard_normal(t.size))
+        d = np.abs(d)
+        result = phys.estimate_lyapunov_exponent(t, d)
+        self.assertFalse(math.isnan(result["lyapunov_exponent"]))
+        self.assertAlmostEqual(result["lyapunov_exponent"], lam_true, delta=0.01)
 
     def test_estimate_lyapunov_exponent_insufficient_window_returns_nan(self):
         t = np.array([0.0, 1.0, 2.0])
@@ -893,6 +1318,54 @@ class TestChaosDiagnostics(unittest.TestCase):
         d = np.array([1.0, -1.0, 2.0])
         with self.assertRaises(ValueError):
             phys.estimate_lyapunov_exponent(t, d)
+
+    def test_estimate_lyapunov_exponent_rejects_linear_growth(self):
+        """
+        Audit1 regression (Codex P1-6.4, 2026-09-03): divergence = 1 + t
+        has no exponential regime at all; the prior release's fitter
+        nevertheless reported lambda = 0.04758 for it. The corrected
+        fitter's whole-window R^2 gate (>= 0.98) rejects it (R^2 approx
+        0.86 over the amplitude window actually used).
+        """
+        t = np.linspace(0, 200, 400)
+        d = 1.0 + t
+        result = phys.estimate_lyapunov_exponent(t, d)
+        self.assertTrue(math.isnan(result["lyapunov_exponent"]))
+
+    def test_estimate_lyapunov_exponent_rejects_quadratic_growth(self):
+        """Audit1 regression (Codex P1-6.4): divergence = 1 + t^2
+        previously fit to lambda = 0.07505; now rejected (R^2 approx
+        0.82 over the amplitude window)."""
+        t = np.linspace(0, 200, 400)
+        d = 1.0 + t ** 2
+        result = phys.estimate_lyapunov_exponent(t, d)
+        self.assertTrue(math.isnan(result["lyapunov_exponent"]))
+
+    def test_estimate_lyapunov_exponent_rejects_oscillatory_growth(self):
+        """Audit1 regression (Codex P1-6.4): an oscillatory series, which
+        the prior release's fitter could fit by selecting a handful of
+        points scattered across disjoint windows, must be rejected -- the
+        corrected fitter requires a single longest CONTIGUOUS run in the
+        amplitude window, which an oscillating series cannot sustain."""
+        t = np.linspace(0, 200, 400)
+        d = np.abs(1.0 + 0.5 * t + 0.4 * t * np.sin(t)) + 0.1
+        result = phys.estimate_lyapunov_exponent(t, d)
+        self.assertTrue(math.isnan(result["lyapunov_exponent"]))
+
+    def test_estimate_lyapunov_exponent_rejects_saturating_growth(self):
+        """
+        Audit1 regression (Codex P1-6.4): a smooth, saturating
+        (logistic-shaped) rise can still reach the amplitude window with
+        a deceptively high whole-window R^2 (approx 0.9985 for the curve
+        used here). The three-segment slope-consistency check catches
+        the curvature a single whole-window R^2 misses (segment slopes
+        disagree by a fractional spread of approximately 0.18, above the
+        0.15 threshold), and this must still be rejected.
+        """
+        t = np.linspace(0, 200, 400)
+        d = 1.0 + 50.0 / (1.0 + np.exp(-(t - 100.0) / 10.0))
+        result = phys.estimate_lyapunov_exponent(t, d)
+        self.assertTrue(math.isnan(result["lyapunov_exponent"]))
 
 
 # ======================================================================
@@ -911,7 +1384,49 @@ class TestRunModes(unittest.TestCase):
         self.assertEqual(s["model_version"], phys.MODEL_VERSION)
         self.assertEqual(s["build_id"], phys.BUILD_ID)
         self.assertIn(0.5, s["lagrangian_fractions"])
-        self.assertGreaterEqual(s["n_escaped_final"], s["n_escaped_initial"])
+        # Audit1 oracle correction (Codex P1-7, 2026-09-03): this
+        # previously asserted n_escaped_final >= n_escaped_initial, which
+        # assumes the instantaneously-unbound count is monotonically
+        # non-decreasing over a run. That assumption is scientifically
+        # WRONG: a body's specific energy can return to negative at a
+        # later snapshot as the system's own time-dependent potential
+        # evolves (see TestEscapersAndFastFraction.
+        # test_unbound_count_is_not_guaranteed_monotonic for a direct,
+        # constructed counterexample), so this run's own specific final
+        # value cannot be asserted against its own initial value in
+        # general -- the only thing that IS always true is that a count
+        # of bodies is a non-negative integer no larger than n_bodies.
+        self.assertGreaterEqual(s["n_unbound_initial"], 0)
+        self.assertGreaterEqual(s["n_unbound_final"], 0)
+        self.assertLessEqual(s["n_unbound_final"], s["n_bodies"])
+
+    def test_snapshot_stride_keeps_realized_count_close_to_target(self):
+        """
+        Audit1 regression (Copilot A16, 2026-09-03): _pick_stride() used
+        floor division (n_steps // target_snapshots), which rounds the
+        stride down to 1 -- storing EVERY step -- for any n_steps under
+        roughly 2 * target_snapshots. n_steps=190 with
+        target_snapshots=100 previously gave stride=1 and close to 191
+        snapshots, nearly double what was requested; ceiling division
+        keeps the realized count within a small constant of the target
+        across that same range. n_steps=190, target=100 here (a case
+        chosen to fall inside the previously-broken band) must now give
+        a realized snapshot count well under double the target.
+        """
+        rng = np.random.default_rng(3)
+        n = 8
+        positions = rng.normal(size=(n, 3)) * 1.0e16
+        velocities = rng.normal(size=(n, 3)) * 1.0e2
+        masses = np.full(n, 1.0e30)
+        target_snapshots = 100
+        stride = phys._pick_stride(190, target_snapshots)
+        result = phys.integrate_nbody(positions, velocities, masses,
+                                       dt=1.0e10, n_steps=190,
+                                       softening=1.0e15, method="direct",
+                                       snapshot_stride=stride)
+        self.assertLessEqual(result["t"].size, int(1.5 * target_snapshots))
+        # And the true final step must still always be included.
+        self.assertAlmostEqual(result["t"][-1], 190 * 1.0e10, delta=1.0e9)
 
     def test_run_galaxy_summary_fields(self):
         r = phys.run_galaxy(n_bodies=30, total_mass_msun=1e5, radius_pc=50.0,
@@ -936,6 +1451,27 @@ class TestRunModes(unittest.TestCase):
             phys.run_cluster(n_bodies=1)
         with self.assertRaises(ValueError):
             phys.run_cluster(n_bodies=phys.MAX_BODIES + 1)
+
+    def test_run_cluster_rejects_out_of_range_theta_regardless_of_method(self):
+        """
+        Audit1 regression (Codex P2-10, 2026-09-03): theta's documented
+        hard range [0, 2] was previously enforced only inside
+        compute_accelerations_tree(), so method="direct" (which never
+        calls that function) silently accepted and reported any theta at
+        all, including physically meaningless values like 999 -- a
+        confirmed prior-release run with method="direct", theta=999
+        succeeded. theta is validated up front for every run mode now,
+        independent of method.
+        """
+        with self.assertRaises(ValueError):
+            phys.run_cluster(n_bodies=10, n_relax=0.1, steps_per_crossing=5,
+                              target_snapshots=5, method="direct", theta=999)
+        with self.assertRaises(ValueError):
+            phys.run_galaxy(n_bodies=10, n_freefall=0.1, steps_per_freefall=5,
+                             target_snapshots=5, method="direct", theta=-1.0)
+        with self.assertRaises(ValueError):
+            phys.run_chaos(n_bodies=10, n_cross=0.5, steps_per_crossing=5,
+                            target_snapshots=5, method="direct", theta=999)
 
     def test_run_modes_accept_explicit_softening_override(self):
         r = phys.run_cluster(n_bodies=20, total_mass_msun=1e2, scale_radius_pc=1.0,
@@ -967,6 +1503,30 @@ class TestDriverValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             driver.run(mode="cluster", n_bodies=20, n_relax=0.1,
                        steps_per_crossing=8, no_plot=True)
+
+    def test_provenance_warns_but_still_completes_when_build_id_unknown(self):
+        """
+        Audit1 regression (Copilot A20, 2026-09-03): physics_nbg.BUILD_ID
+        falls back, nonfatally, to the string "unknown" if the core
+        source files cannot be located/decoded at import time. That
+        fallback previously stayed completely silent even when a caller
+        went on to write out provenance carrying that unverifiable
+        "unknown" build id. driver_nbg._provenance() must now raise
+        exactly one RuntimeWarning in that situation while still
+        returning a usable (if degraded) provenance comment block --
+        the fallback itself stays nonfatal, only the silence is fixed.
+        """
+        with mock.patch.object(phys, "BUILD_ID", "unknown"):
+            with self.assertWarns(RuntimeWarning):
+                lines = driver._provenance(
+                    "cluster",
+                    {"n_bodies": 20, "total_mass_msun": 1.0e3,
+                     "scale_radius_pc": 1.0, "n_relax_requested": 1.0,
+                     "steps_per_crossing": 10, "target_snapshots": 20,
+                     "softening_pc": 0.1, "softening_explicit": True,
+                     "theta": 0.5, "method": "direct", "seed": 1},
+                )
+            self.assertTrue(any("unknown" in line for line in lines[:1]))
 
 
 # ======================================================================
@@ -1002,6 +1562,41 @@ class TestCsvOutput(unittest.TestCase):
             header_line = [ln for ln in content.splitlines()
                            if not ln.startswith("#")][0]
             self.assertEqual(header_line.split(","), driver.GALAXY_HEADER)
+
+    def test_galaxy_csv_header_matches_row_length(self):
+        """
+        Self-discovered regression, found while testing CSV headers and
+        rows against each other rather than against the header constant
+        alone (2026-09-03, not raised by any Audit1 reviewer): comparing
+        only against driver.GALAXY_HEADER is tautological when the header
+        constant itself is wrong, since a data-driven row is generated
+        from a different function (_galaxy_rows) than the header
+        (GALAXY_HEADER) and nothing previously checked they agreed. The
+        original release derived GALAXY_HEADER by slicing CLUSTER_HEADER,
+        which kept "n_escaped" and "high_velocity_fraction" columns that
+        _galaxy_rows() never populates (galaxy mode has no escaper
+        tracking) -- a 12-column header over 9-column data rows, silently
+        misaligning every energy/virial value two columns to the left of
+        its label. This test asserts header and row length agree
+        independently of what GALAXY_HEADER happens to contain.
+        """
+        result = phys.run_galaxy(n_bodies=20, total_mass_msun=1e5,
+                                  radius_pc=50.0, n_freefall=0.3,
+                                  steps_per_freefall=10, target_snapshots=5,
+                                  seed=2)
+        rows = driver._galaxy_rows(result)
+        self.assertEqual(len(driver.GALAXY_HEADER), len(rows[0]))
+        # And the labeled quantities must actually be self-consistent:
+        # energy_J must equal kinetic_J + potential_J for every row, using
+        # the header to locate columns rather than assuming positions.
+        kin_idx = driver.GALAXY_HEADER.index("kinetic_J")
+        pot_idx = driver.GALAXY_HEADER.index("potential_J")
+        energy_idx = driver.GALAXY_HEADER.index("energy_J")
+        for row in rows:
+            kin = float(row[kin_idx])
+            pot = float(row[pot_idx])
+            energy = float(row[energy_idx])
+            self.assertAlmostEqual(kin + pot, energy, delta=abs(energy) * 1e-6 + 1e-10)
 
     def test_chaos_csv_header_matches_result_columns(self):
         with tempfile.TemporaryDirectory() as tmp:

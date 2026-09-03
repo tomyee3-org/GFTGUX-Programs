@@ -17,10 +17,13 @@ Three calculations share one program, chosen with --mode:
 All three share one engine: a Barnes-Hut octree (Barnes & Hut 1986) or,
 for comparison, direct O(N^2) summation, with Plummer-softened gravity and
 a kick-drift-kick (leapfrog) integrator. *Multiple*, the direct-summation
-few-body program elsewhere in this project, is assumed as a prerequisite:
-this program does not re-teach Newtonian two-body motion or leapfrog
-integration from scratch. It starts where Multiple's exact, unsoftened
-O(N^2) approach stops being practical, and is deliberately a standalone
+few-body program elsewhere in this project (which integrates with an
+adaptive predictor-corrector scheme, not leapfrog), is assumed as a
+prerequisite: this program does not re-teach Newtonian two-body motion
+from scratch. It starts where Multiple's exact, unsoftened O(N^2)
+approach stops being practical, trading Multiple's adaptive, per-step
+accuracy for this program's fixed-timestep leapfrog scheme so that many
+more bodies can be handled at once, and is deliberately a standalone
 program rather than an added mode of Multiple, so as not to pull tree
 codes and force softening into that program's introductory tutorial flow.
 
@@ -29,7 +32,7 @@ Examples
   # A 200-star Plummer cluster, watching two-body relaxation
   python main.py --mode cluster
 
-  # The same cluster with softening lowered so real escapers appear
+  # The same cluster with softening lowered so real unbound bodies appear
   # (needs a smaller timestep to stay accurate -- see the Help file)
   python main.py --mode cluster --softening_pc 0.03 --steps_per_crossing 300 --n_relax 100
 
@@ -114,8 +117,8 @@ def parse_args():
     g.add_argument("--radius_pc", type=_finite_float, default=None, metavar="PC",
                    help="initial sphere radius [pc] (default 200.0)")
     g.add_argument("--virial_ratio_init", type=_finite_float, default=None,
-                   metavar="Q0", help="initial virial ratio 2T/|W|; 0 = "
-                        "perfectly cold, 0.5 = virial equilibrium (default 0.0)")
+                   metavar="Q0", help="initial virial ratio 2T/|W_vir|; 0 = "
+                        "perfectly cold, 1.0 = virial equilibrium (default 0.0)")
     g.add_argument("--n_freefall", type=_finite_float, default=None, metavar="X",
                    help="run length as a multiple of the initial free-fall "
                         "time (default 8.0)")
@@ -146,7 +149,8 @@ def parse_args():
                         f"{physics_nbg.MIN_THETA:g}-{physics_nbg.MAX_THETA:g} "
                         "(default 0.5); 0 forces an exact full-tree descent")
     g.add_argument("--method", choices=("tree", "direct"), default=None,
-                   help="force evaluation method (default: tree)")
+                   help="force evaluation method "
+                        "(default: tree for cluster/galaxy, direct for chaos)")
     g.add_argument("--target_snapshots", type=_positive_int, default=None,
                    metavar="N", help="approximate number of recorded "
                         "snapshots (default: 150-200 depending on mode)")

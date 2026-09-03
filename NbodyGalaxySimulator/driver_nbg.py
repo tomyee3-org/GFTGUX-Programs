@@ -15,6 +15,7 @@ physics_nbg.py; nothing here recomputes or duplicates it.
 import csv
 import math
 import os
+import warnings
 from datetime import datetime
 
 import numpy as np
@@ -63,16 +64,34 @@ def _validate_output(outdir, csvdir, dpi, lw):
 # ======================================================================
 # CSV output
 # ======================================================================
+# Audit1 fix (Codex P2-3, Copilot A6, 2026-09-03): _provenance() below is
+# passed result["summary"] -- the run's SUMMARY dict -- not the raw CLI
+# keyword arguments, so every name here must be an actual summary key.  A
+# prior release listed "n_relax", "n_freefall" and "n_cross" (the summary
+# instead stores these as n_relax_requested / n_freefall_requested /
+# n_cross_requested) and omitted target_snapshots entirely even though it
+# changes the sampled time series and the Lyapunov fit; every one of the
+# mismatched/omitted names silently wrote "None" into the CSV provenance
+# comments and the printed run header. All keys below were checked
+# against each run_*() summary dict's actual keys (see
+# TestCsvOutput.test_provenance_lines_match_actual_summary_values). softening_explicit is
+# listed alongside softening_pc so the comment records whether the value
+# was chosen by the student or computed by dehnen_softening() -- a bare
+# resolved number cannot be told apart from an explicit override
+# otherwise, defeating the reproducibility contract.
 PARAMS_BY_MODE = {
-    "cluster": ("n_bodies", "total_mass_msun", "scale_radius_pc", "n_relax",
-                "steps_per_crossing", "softening_pc", "theta", "method",
+    "cluster": ("n_bodies", "total_mass_msun", "scale_radius_pc",
+                "n_relax_requested", "steps_per_crossing", "target_snapshots",
+                "softening_pc", "softening_explicit", "theta", "method",
                 "seed"),
     "galaxy":  ("n_bodies", "total_mass_msun", "radius_pc", "virial_ratio_init",
-                "n_freefall", "steps_per_freefall", "softening_pc", "theta",
+                "n_freefall_requested", "steps_per_freefall", "target_snapshots",
+                "softening_pc", "softening_explicit", "theta",
                 "method", "seed"),
     "chaos":   ("n_bodies", "total_mass_msun", "scale_radius_pc",
-                "relative_perturbation", "n_cross", "steps_per_crossing",
-                "softening_pc", "theta", "method", "seed", "perturbation_seed"),
+                "relative_perturbation", "n_cross_requested", "steps_per_crossing",
+                "target_snapshots", "softening_pc", "softening_explicit",
+                "theta", "method", "seed", "perturbation_seed"),
 }
 
 
@@ -100,7 +119,26 @@ def _provenance(mode, kw):
     Only the parameters that the selected mode actually uses are listed,
     so a CSV file can never suggest that an irrelevant option had an
     effect on the numbers beside it.
+
+    Audit1 fix (Copilot A20, 2026-09-03): physics_nbg.BUILD_ID silently
+    falls back to the string "unknown" if the core source files cannot
+    be located or decoded at import time (e.g. some frozen or zipped
+    distributions) -- a deliberately nonfatal fallback so the program
+    still runs. But a provenance record that silently degrades is a
+    provenance record a reader can't trust without checking by hand, so
+    every time provenance is actually written out (here, the one
+    chokepoint both the CSV and PNG-sidecar paths call), a concise
+    warning is now raised whenever BUILD_ID could not be resolved,
+    while the run itself still completes.
     """
+    if phys.BUILD_ID == "unknown":
+        warnings.warn(
+            "BUILD_ID could not be computed (core source files not found "
+            "or not decodable next to physics_nbg.py); provenance below "
+            "records BUILD_ID as 'unknown' and cannot be used to verify "
+            "which source revision produced this output.",
+            RuntimeWarning, stacklevel=2,
+        )
     lines = [
         f"NbodyGalaxySimulator version {phys.MODEL_VERSION} "
         f"(build {phys.BUILD_ID})",
@@ -112,8 +150,17 @@ def _provenance(mode, kw):
     ]
     for name in PARAMS_BY_MODE[mode]:
         value = kw.get(name)
-        if name == "softening_pc" and value is None:
-            value = "computed from Dehnen (2001) optimal-softening scaling (default)"
+        if name == "softening_pc":
+            # kw is the run's SUMMARY dict, which always stores the
+            # resolved numeric softening actually used (never None) --
+            # softening_explicit (recorded separately, right below this
+            # line) is what distinguishes a student-supplied override
+            # from the Dehnen (2001) default computed from n_bodies and
+            # the scale radius (Audit1 Codex P2-3).
+            suffix = "" if kw.get("softening_explicit") else \
+                " (default: computed from Dehnen (2001) optimal-softening scaling)"
+            lines.append(f"    {name} = {value}{suffix}")
+            continue
         lines.append(f"    {name} = {value}")
     lines.append("options belonging to the other modes were not used")
     return lines
@@ -141,10 +188,28 @@ def _write_csv(csvdir, prefix, header, rows, comments=()):
     return path
 
 
+# virial_work_J is the scalar virial-theorem quantity Wvir =
+# sum_i r_i.F_i (virial_force_term()), not the potential energy U
+# (potential_energy()) -- the two coincide only as softening -> 0. It is
+# recorded alongside potential_J so that virial_ratio = 2*kinetic_J /
+# abs(virial_work_J) is independently checkable from the CSV (Audit1
+# Codex P1-1, Copilot A2, 2026-09-03).
 CLUSTER_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
-                   "virial_ratio", "n_escaped", "high_velocity_fraction",
-                   "kinetic_J", "potential_J", "energy_J"]
-GALAXY_HEADER = CLUSTER_HEADER[:-3] + ["kinetic_J", "potential_J", "energy_J"]
+                   "virial_ratio", "n_unbound", "high_velocity_fraction",
+                   "kinetic_J", "potential_J", "virial_work_J", "energy_J"]
+# Self-discovered regression (found while testing CSV headers/rows against
+# each other per the Audit1 response testing requirements, 2026-09-03, not
+# raised by any reviewer): the previous release derived GALAXY_HEADER as
+# CLUSTER_HEADER[:-3] + [...], which kept "n_escaped" and
+# "high_velocity_fraction" -- columns _galaxy_rows() never populates,
+# because galaxy mode has no escaper tracking. That produced a 12-column
+# header over 9-column data rows (every value from kinetic_J onward
+# silently shifted two columns left of its header). GALAXY_HEADER is now
+# built to match _galaxy_rows() exactly: see
+# TestCsvOutput.test_galaxy_csv_header_matches_row_length.
+GALAXY_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
+                  "virial_ratio", "kinetic_J", "potential_J", "virial_work_J",
+                  "energy_J"]
 CHAOS_HEADER = ["t_Myr", "divergence_pc", "energy_a_J", "energy_b_J"]
 
 
@@ -156,10 +221,11 @@ def _cluster_rows(result):
             f"{result['t'][i] / phys.MYR:.8g}",
             *[f"{lag[i, j] / phys.PC:.6g}" for j in range(lag.shape[1])],
             f"{result['virial_ratio'][i]:.6g}",
-            int(result["n_escaped"][i]),
+            int(result["n_unbound"][i]),
             f"{result['high_velocity_fraction'][i]:.6g}",
             f"{result['kinetic'][i]:.6e}",
             f"{result['potential'][i]:.6e}",
+            f"{result['virial_work'][i]:.6e}",
             f"{result['energy'][i]:.6e}",
         ])
     return rows
@@ -175,6 +241,7 @@ def _galaxy_rows(result):
             f"{result['virial_ratio'][i]:.6g}",
             f"{result['kinetic'][i]:.6e}",
             f"{result['potential'][i]:.6e}",
+            f"{result['virial_work'][i]:.6e}",
             f"{result['energy'][i]:.6e}",
         ])
     return rows
@@ -245,23 +312,25 @@ def _print_cluster_summary(s):
           f"{s['r50_final_pc']:.4g}  pc")
     print(f"  Virial ratio 2T/|W| : {s['virial_ratio_initial']:.4f} -> "
           f"{s['virial_ratio_final']:.4f}")
-    print(f"  Escaped (formal)    : {s['n_escaped_initial']} -> "
-          f"{s['n_escaped_final']}  of {s['n_bodies']} "
-          f"({s['evaporated_fraction_final']:.2%})")
+    print(f"  Unbound (instant.)  : {s['n_unbound_initial']} -> "
+          f"{s['n_unbound_final']}  of {s['n_bodies']} "
+          f"({s['unbound_fraction_final']:.2%})  [instantaneous, not a "
+          "cumulative escape count -- see the Help file]")
     print(f"  Near-escape tail    : {s['high_velocity_fraction_initial']:.2%} -> "
           f"{s['high_velocity_fraction_final']:.2%}  "
           "(fraction above 90% of local escape speed)")
     print(f"  Max energy drift    : {s['max_fractional_energy_drift']:.3%}")
     print(SEP)
-    if s["n_escaped_final"] == 0:
-        print("  No body formally escaped in this run.  This is expected at the")
-        print("  default softening and run length: two-body evaporation is a slow")
-        print("  process (order 10^2 relaxation times for an isolated cluster),")
-        print("  and force softening chosen for accuracy also suppresses the hard")
-        print("  encounters that physically drive it.  Watch the near-escape tail")
-        print("  and half-mass radius above for the same process at an earlier")
-        print("  stage; see the Help file for the reduced-softening exercise that")
-        print("  produces genuine escapers within a practical run.")
+    if s["n_unbound_final"] == 0:
+        print("  No body was instantaneously unbound at the end of this run.  This")
+        print("  is expected at the default softening and run length: two-body")
+        print("  evaporation is a slow process (order 10^2 relaxation times for an")
+        print("  isolated cluster), and force softening chosen for accuracy also")
+        print("  suppresses the hard encounters that physically drive it.  Watch")
+        print("  the near-escape tail and half-mass radius above for the same")
+        print("  process at an earlier stage; see the Help file for the reduced-")
+        print("  softening exercise that produces instantaneously-unbound bodies")
+        print("  within a practical run.")
     print(SEP)
     _print_warnings(s)
 
@@ -287,16 +356,21 @@ def _print_galaxy_summary(s):
           f"{s['time_of_deepest_collapse_myr']:.3g} Myr) -> "
           f"{s['r50_final_pc']:.4g} pc (final)")
     print(f"  Virial ratio 2T/|W| : {s['virial_ratio_initial']:.4f} -> "
-          f"{s['virial_ratio_final']:.4f}")
+          f"{s['virial_ratio_final']:.4f}  "
+          f"(at deepest collapse: {s['virial_ratio_at_deepest_collapse']:.4f})")
     print(f"  Max energy drift    : {s['max_fractional_energy_drift']:.3%}")
     print(SEP)
     print("  A perfectly cold sphere collapses, overshoots, and rebounds into a")
     print("  quasi-equilibrium remnant through 'violent relaxation' (Lynden-Bell")
-    print("  1967).  Classic numerical experiments (e.g. van Albada 1982) find")
-    print("  that this relaxation is generally INCOMPLETE: the final virial ratio")
-    print("  commonly settles below 1 with an extended, non-Maxwellian halo,")
-    print("  rather than reaching a clean Q = 1 equilibrium -- watch for that")
-    print("  same signature above rather than expecting Q -> 1.")
+    print("  1967).  The virial ratio above typically settles into a modest")
+    print("  oscillation close to Q = 1 rather than converging to it exactly --")
+    print("  watch for that oscillation, not a single settled number, as the")
+    print("  signature of a properly virialized remnant.  A run ending far from")
+    print("  Q = 1 (well below or above) more often means the run has not yet")
+    print("  had time to virialize, or dt/softening need tightening, than it")
+    print("  means genuine incomplete relaxation -- see the Help file's Domain")
+    print("  of Validity section before drawing physical conclusions from Q")
+    print("  alone.")
     print(SEP)
     _print_warnings(s)
 
@@ -324,7 +398,8 @@ def _print_chaos_summary(s):
         print(f"  Lyapunov time       : {s['lyapunov_time_myr']:.4g}  Myr  "
               f"({s['lyapunov_time_over_t_cross']:.3g} x crossing times)")
         print(f"  Fit used            : {s['n_points_used_in_fit']} of "
-              f"{s['n_snapshots']} snapshots")
+              f"{s['n_snapshots']} snapshots  (R^2 = "
+              f"{s['lyapunov_fit_r_squared']:.5f})")
     else:
         print("  No clean exponential-growth window was found in this run; "
               "see the notes below.")
@@ -356,10 +431,23 @@ def run(mode="cluster",
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}.")
     dpi, lw = _validate_output(outdir, csvdir, dpi, lw)
-    no_plot = bool(no_plot)
-    if no_plot and outdir is None and csvdir is None:
-        raise ValueError("no_plot requires --csvdir or --outdir; otherwise "
-                          "this run would produce no output at all.")
+    # Audit1 fix (Codex P2-4, Copilot A7, 2026-09-03): a bare bool() call
+    # silently coerces ANY value -- including the string "False", which is
+    # truthy -- into True with no error, which is exactly the kind of
+    # input mistake a type check exists to catch for a boolean flag.
+    if not isinstance(no_plot, bool):
+        raise TypeError(f"no_plot must be a bool; got {type(no_plot).__name__}.")
+    # --outdir controls only the figure that no_plot skips, so accepting
+    # no_plot=True with outdir set but csvdir unset let a run "succeed"
+    # while producing no artifact at all (a confirmed CLI run printed
+    # "skipping figure generation despite --outdir being set" and left
+    # the directory empty). csvdir is the only artifact no_plot leaves
+    # available, so it is what is now required.
+    if no_plot and csvdir is None:
+        raise ValueError("no_plot requires --csvdir: --outdir alone controls "
+                          "only the plot that no_plot skips, so a run with "
+                          "no_plot and no csvdir would produce no output "
+                          "at all.")
 
     def _kw(**pairs):
         return {k: v for k, v in pairs.items() if v is not None}

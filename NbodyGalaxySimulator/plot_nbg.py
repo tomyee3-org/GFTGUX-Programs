@@ -200,14 +200,20 @@ def plot_cluster(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     ax.set_title("Virial ratio")
 
     ax = axes[1, 1]
-    ax.plot(t, result["n_escaped"], color=C_WARN, lw=lw, label="formally escaped")
+    ax.plot(t, result["n_unbound"], color=C_WARN, lw=lw,
+            label="instantaneously unbound")
     ax2 = ax.twinx()
     ax2.plot(t, np.asarray(result["high_velocity_fraction"]) * 100.0,
              color=C_A, lw=lw, ls="--", label="near-escape tail")
     ax.set_xlabel("time  [Myr]")
-    ax.set_ylabel("number escaped", color=C_WARN)
+    # Audit1 fix (Codex P1-7, Copilot A13, 2026-09-03): labeled
+    # "instantaneously unbound", not "number escaped" -- this is a
+    # snapshot-by-snapshot positive-specific-energy count, not a
+    # cumulative, confirmed escape count (see identify_unbound()'s
+    # docstring); it is not guaranteed to be monotonically increasing.
+    ax.set_ylabel("instantaneously unbound", color=C_WARN)
     ax2.set_ylabel("near-escape tail  [%]", color=C_A)
-    ax.set_title("Evaporation diagnostics")
+    ax.set_title("Unbound-fraction diagnostics")
 
     _energy_panel(axes[1, 2], t, result["energy"], "total energy", C_A)
     axes[1, 2].set_title(f"Energy conservation (max drift "
@@ -299,6 +305,7 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     ax = axes[0, 1]
     ax.semilogy(t, np.maximum(div, 1e-300), color=C_A, lw=lw)
     lam = s["lyapunov_exponent_per_myr"]
+    has_fit_overlay = False
     if np.isfinite(lam) and lam > 0:
         n_used = s["n_points_used_in_fit"]
         d0 = div[0]
@@ -306,7 +313,9 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
         mask = (div >= 3.0 * d0) & (div <= 0.5 * d_max)
         if np.any(mask):
             ax.semilogy(t[mask], div[mask], color=C_FIT, lw=lw * 1.8,
-                        label=f"fit window ({n_used} pts)")
+                        label=f"fit window ({n_used} pts, "
+                              f"$R^2$={s['lyapunov_fit_r_squared']:.4f})")
+            has_fit_overlay = True
         ax.set_title(f"Divergence (Lyapunov time = "
                      f"{s['lyapunov_time_myr']:.3g} Myr = "
                      f"{s['lyapunov_time_over_t_cross']:.2g} $t_\\mathrm{{cross}}$)")
@@ -314,7 +323,16 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
         ax.set_title("Divergence (no clean exponential window found)")
     ax.set_xlabel("time  [Myr]")
     ax.set_ylabel("RMS separation  [pc]")
-    ax.legend(fontsize=7)
+    # Audit1 fix (Codex P3-3, Copilot A17, 2026-09-03): legend() was
+    # called unconditionally, but the only labeled artist on this axis is
+    # the fit-window overlay above, which is added only when a fit was
+    # found. Calling legend() with nothing labeled raises matplotlib's
+    # "No artists with labels found to put in legend" UserWarning on
+    # every unsuccessful-fit run -- an unexpected warning by this
+    # project's own testing standard. Only call it when there is
+    # something to show.
+    if has_fit_overlay:
+        ax.legend(fontsize=7)
 
     ax = axes[1, 0]
     _energy_panel(ax, t, result["energy_a"], "realization A", C_A)
