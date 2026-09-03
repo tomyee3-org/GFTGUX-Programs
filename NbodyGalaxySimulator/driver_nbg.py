@@ -64,21 +64,19 @@ def _validate_output(outdir, csvdir, dpi, lw):
 # ======================================================================
 # CSV output
 # ======================================================================
-# Audit1 fix (Codex P2-3, Copilot A6, 2026-09-03): _provenance() below is
-# passed result["summary"] -- the run's SUMMARY dict -- not the raw CLI
-# keyword arguments, so every name here must be an actual summary key.  A
-# prior release listed "n_relax", "n_freefall" and "n_cross" (the summary
-# instead stores these as n_relax_requested / n_freefall_requested /
-# n_cross_requested) and omitted target_snapshots entirely even though it
-# changes the sampled time series and the Lyapunov fit; every one of the
-# mismatched/omitted names silently wrote "None" into the CSV provenance
-# comments and the printed run header. All keys below were checked
-# against each run_*() summary dict's actual keys (see
-# TestCsvOutput.test_provenance_lines_match_actual_summary_values). softening_explicit is
-# listed alongside softening_pc so the comment records whether the value
-# was chosen by the student or computed by dehnen_softening() -- a bare
-# resolved number cannot be told apart from an explicit override
-# otherwise, defeating the reproducibility contract.
+# _provenance() below is passed result["summary"] -- the run's SUMMARY
+# dict -- not the raw CLI keyword arguments, so every name here must be
+# an actual summary key (e.g. "n_relax_requested", not "n_relax"; the
+# summary dicts do not store the raw argument names verbatim). A
+# mismatched or omitted name here would silently write "None" into the
+# CSV provenance comments and the printed run header instead of failing
+# loudly, so every key below is checked against each run_*() summary
+# dict's actual keys by
+# TestCsvOutput.test_provenance_lines_match_actual_summary_values.
+# softening_explicit is listed alongside softening_pc so the comment
+# records whether the value was chosen by the student or computed by
+# dehnen_softening() -- a bare resolved number cannot be told apart from
+# an explicit override otherwise, defeating the reproducibility contract.
 PARAMS_BY_MODE = {
     "cluster": ("n_bodies", "total_mass_msun", "scale_radius_pc",
                 "n_relax_requested", "steps_per_crossing", "target_snapshots",
@@ -120,16 +118,15 @@ def _provenance(mode, kw):
     so a CSV file can never suggest that an irrelevant option had an
     effect on the numbers beside it.
 
-    Audit1 fix (Copilot A20, 2026-09-03): physics_nbg.BUILD_ID silently
-    falls back to the string "unknown" if the core source files cannot
-    be located or decoded at import time (e.g. some frozen or zipped
-    distributions) -- a deliberately nonfatal fallback so the program
-    still runs. But a provenance record that silently degrades is a
-    provenance record a reader can't trust without checking by hand, so
-    every time provenance is actually written out (here, the one
-    chokepoint both the CSV and PNG-sidecar paths call), a concise
-    warning is now raised whenever BUILD_ID could not be resolved,
-    while the run itself still completes.
+    physics_nbg.BUILD_ID silently falls back to the string "unknown" if
+    the core source files cannot be located or decoded at import time
+    (e.g. some frozen or zipped distributions) -- a deliberately
+    nonfatal fallback so the program still runs. But a provenance record
+    that silently degrades is a provenance record a reader can't trust
+    without checking by hand, so every time provenance is actually
+    written out (here, the one chokepoint both the CSV and PNG-sidecar
+    paths call), a concise warning is raised whenever BUILD_ID could not
+    be resolved, while the run itself still completes.
     """
     if phys.BUILD_ID == "unknown":
         warnings.warn(
@@ -155,10 +152,12 @@ def _provenance(mode, kw):
             # resolved numeric softening actually used (never None) --
             # softening_explicit (recorded separately, right below this
             # line) is what distinguishes a student-supplied override
-            # from the Dehnen (2001) default computed from n_bodies and
-            # the scale radius (Audit1 Codex P2-3).
+            # from the default computed by dehnen_softening() from
+            # n_bodies and the scale radius (Athanassoula et al. 2000
+            # optimal-softening scaling; see that function's docstring).
             suffix = "" if kw.get("softening_explicit") else \
-                " (default: computed from Dehnen (2001) optimal-softening scaling)"
+                " (default: computed by dehnen_softening(), the " \
+                "Athanassoula et al. 2000 optimal-softening scaling)"
             lines.append(f"    {name} = {value}{suffix}")
             continue
         lines.append(f"    {name} = {value}")
@@ -192,21 +191,15 @@ def _write_csv(csvdir, prefix, header, rows, comments=()):
 # sum_i r_i.F_i (virial_force_term()), not the potential energy U
 # (potential_energy()) -- the two coincide only as softening -> 0. It is
 # recorded alongside potential_J so that virial_ratio = 2*kinetic_J /
-# abs(virial_work_J) is independently checkable from the CSV (Audit1
-# Codex P1-1, Copilot A2, 2026-09-03).
+# abs(virial_work_J) is independently checkable from the CSV.
 CLUSTER_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
                    "virial_ratio", "n_unbound", "high_velocity_fraction",
                    "kinetic_J", "potential_J", "virial_work_J", "energy_J"]
-# Self-discovered regression (found while testing CSV headers/rows against
-# each other per the Audit1 response testing requirements, 2026-09-03, not
-# raised by any reviewer): the previous release derived GALAXY_HEADER as
-# CLUSTER_HEADER[:-3] + [...], which kept "n_escaped" and
-# "high_velocity_fraction" -- columns _galaxy_rows() never populates,
-# because galaxy mode has no escaper tracking. That produced a 12-column
-# header over 9-column data rows (every value from kinetic_J onward
-# silently shifted two columns left of its header). GALAXY_HEADER is now
-# built to match _galaxy_rows() exactly: see
-# TestCsvOutput.test_galaxy_csv_header_matches_row_length.
+# GALAXY_HEADER is built to match _galaxy_rows() exactly, column for
+# column, rather than derived from CLUSTER_HEADER by slicing -- galaxy
+# mode has no escaper tracking, so it must not carry "n_unbound" or
+# "high_velocity_fraction" columns that _galaxy_rows() never populates;
+# see TestCsvOutput.test_galaxy_csv_header_matches_row_length.
 GALAXY_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
                   "virial_ratio", "kinetic_J", "potential_J", "virial_work_J",
                   "energy_J"]
@@ -319,7 +312,7 @@ def _print_cluster_summary(s):
     print(f"  Near-escape tail    : {s['high_velocity_fraction_initial']:.2%} -> "
           f"{s['high_velocity_fraction_final']:.2%}  "
           "(fraction above 90% of local escape speed)")
-    print(f"  Max energy drift    : {s['max_fractional_energy_drift']:.3%}")
+    print(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
     print(SEP)
     if s["n_unbound_final"] == 0:
         print("  No body was instantaneously unbound at the end of this run.  This")
@@ -358,7 +351,7 @@ def _print_galaxy_summary(s):
     print(f"  Virial ratio 2T/|W| : {s['virial_ratio_initial']:.4f} -> "
           f"{s['virial_ratio_final']:.4f}  "
           f"(at deepest collapse: {s['virial_ratio_at_deepest_collapse']:.4f})")
-    print(f"  Max energy drift    : {s['max_fractional_energy_drift']:.3%}")
+    print(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
     print(SEP)
     print("  A perfectly cold sphere collapses, overshoots, and rebounds into a")
     print("  quasi-equilibrium remnant through 'violent relaxation' (Lynden-Bell")
@@ -394,16 +387,19 @@ def _print_chaos_summary(s):
           f"{s['final_divergence_pc']:.4g}  pc  "
           f"(peak {s['max_divergence_pc']:.4g} pc)")
     if math.isfinite(s["lyapunov_exponent_per_myr"]) and s["lyapunov_exponent_per_myr"] > 0:
-        print(f"  Lyapunov exponent   : {s['lyapunov_exponent_per_myr']:.4g}  1/Myr")
-        print(f"  Lyapunov time       : {s['lyapunov_time_myr']:.4g}  Myr  "
+        print(f"  Lyapunov exponent*  : {s['lyapunov_exponent_per_myr']:.4g}  1/Myr")
+        print(f"  Lyapunov time*      : {s['lyapunov_time_myr']:.4g}  Myr  "
               f"({s['lyapunov_time_over_t_cross']:.3g} x crossing times)")
         print(f"  Fit used            : {s['n_points_used_in_fit']} of "
               f"{s['n_snapshots']} snapshots  (R^2 = "
-              f"{s['lyapunov_fit_r_squared']:.5f})")
+              f"{s['lyapunov_fit_r_squared']:.5f}, "
+              f"{s['lyapunov_fit_residual_sign_changes']} residual sign changes)")
+        print("  * heuristic finite-time fit to the measured divergence, not "
+              "a formal chaos test -- see the HTML notes.")
     else:
         print("  No clean exponential-growth window was found in this run; "
               "see the notes below.")
-    print(f"  Max energy drift    : {s['max_fractional_energy_drift']:.3%}")
+    print(f"  Max sampled energy drift : {s['max_fractional_energy_drift']:.3%}")
     print(SEP)
     _print_warnings(s)
 
@@ -431,10 +427,10 @@ def run(mode="cluster",
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}.")
     dpi, lw = _validate_output(outdir, csvdir, dpi, lw)
-    # Audit1 fix (Codex P2-4, Copilot A7, 2026-09-03): a bare bool() call
-    # silently coerces ANY value -- including the string "False", which is
-    # truthy -- into True with no error, which is exactly the kind of
-    # input mistake a type check exists to catch for a boolean flag.
+    # A bare bool() call would silently coerce ANY value -- including the
+    # string "False", which is truthy -- into True with no error, which
+    # is exactly the kind of input mistake a type check exists to catch
+    # for a boolean flag.
     if not isinstance(no_plot, bool):
         raise TypeError(f"no_plot must be a bool; got {type(no_plot).__name__}.")
     # --outdir controls only the figure that no_plot skips, so accepting

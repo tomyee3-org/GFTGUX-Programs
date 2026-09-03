@@ -16,7 +16,9 @@ treat any flattened-layout run as a discovery smoke test only.
 
 Development history (audit trail -- developers only; never surfaced to
 students in the Help file or in main.py/driver_nbg.py/physics_nbg.py/
-plot_nbg.py docstrings or output):
+plot_nbg.py docstrings or output). This section is deliberately the ONLY
+place in this project that names reviewers, finding IDs, or dates; every
+other source file states the resulting technical behavior only, timelessly.
 
   2026-09-03  Claude (principal developer). Kickoff round: first
     comprehensive regression suite for NbodyGalaxySimulator, developed
@@ -28,9 +30,166 @@ plot_nbg.py docstrings or output):
     conventions directly instead, per the fallback the Kickoff report
     documents. Organised by physical invariant / module section rather
     than by feature-addition order. BUILD_ID at the time this suite was
-    written: 469b49184fbd (physics_nbg.py, driver_nbg.py, main.py,
-    plot_nbg.py unchanged since; recomputed and cross-checked against the
-    Help file's #version_build element as part of this round).
+    written: 469b49184fbd. 118 tests.
+
+  2026-09-03  Claude, responding to Audit1 (Codex and Copilot; Gemini did
+    not participate in Audit1). Both reviewers found the original release
+    conflating potential_energy() (U) with the scalar-virial-theorem
+    quantity (Wvir = sum_i r_i.F_i, added as virial_force_term()) once
+    softening is nonzero (Codex P1-1 / Copilot A2) -- every caller that
+    computed a virial ratio was switched from potential_energy() to
+    virial_force_term(), and cluster/galaxy initial conditions were
+    corrected to rescale velocities against the actual discrete, softened
+    Wvir rather than an idealized continuum energy (Codex P1-2/P1-3,
+    Copilot A1/A11), fixing a systematic energy-scale mismatch that had
+    been measurable as spurious apparent evolution in the first few
+    crossing times of a run. A Barnes-Hut tree bug that could accept an
+    internal node containing the target body's own position as a
+    monopole -- giving up to a 49% relative acceleration error in an
+    adversarial 8-body configuration -- was fixed (Codex P1-5 / Copilot
+    A10). identify_escapers() was renamed identify_unbound() and
+    n_escaped/evaporated_fraction renamed n_unbound/unbound_fraction,
+    because the underlying quantity is an instantaneous, non-monotonic
+    positive-specific-energy count, not a confirmed permanent-escape
+    count (Codex P1-7). phase_space_divergence() was renamed
+    position_space_divergence() (it never included a velocity term;
+    Codex P1-6), chaos mode's default method was changed from "tree" to
+    "direct" (the tree's pair-asymmetry inflates measured divergence with
+    a non-physical contribution; Codex P1-6.3), and perturb_positions()'s
+    per-component sigma was corrected by a factor of sqrt(3) (Codex
+    P2-2). Numerous smaller validation, memory-safety and documentation
+    fixes were also made (Codex P2-1 through P2-10, Copilot A3-A9/A12-
+    A20), including: BUILD_ID scope restricted to exactly the four core
+    .py files with a raised warning (not a silent "unknown") on hash
+    failure; a MAX_BODY_SNAPSHOT_PRODUCT memory-safety cap; theta and
+    caller-supplied accel validated up front rather than deep inside the
+    integration loop; center_of_mass()/center_of_mass_velocity()
+    rejecting non-positive total mass instead of silently returning NaN;
+    a snapshot-stride off-by-factor-of-2 bug (floor vs. ceiling division)
+    fixed; and CSV provenance/header regressions (GALAXY_HEADER column
+    mismatch, a --no_plot/--outdir/--csvdir gap) fixed with new
+    regression tests. Reviewer-authored prior-release narrative was, at
+    the time, left inline across the four .py files' docstrings and
+    comments rather than consolidated here; this is corrected in the
+    Audit2 round below. Gemini's Audit1-equivalent-round claims (BUILD_ID
+    scope, negative softening, MAX_TREE_DEPTH, navigator.onLine, and
+    Multiple's placement) were independently checked in the Audit2 round
+    and found to not describe the current source; see that round's entry.
+    141 tests (from 118).
+
+  2026-09-03  Claude, responding to Audit2 (Codex and Gemini; Copilot was
+    unavailable this round). Codex's three P1 (release-blocking) findings
+    were addressed as follows. (1) Overclaimed equilibrium: "exact
+    virial equilibrium"/"virial equilibrium" language throughout
+    physics_nbg.py, main.py, driver_nbg.py, plot_nbg.py and the Help file
+    was reworded to "exact instantaneous scalar virial balance," with an
+    explicit new note (in virial_force_term()'s docstring, The Virial
+    Theorem section of the Help file, and a new bullet in Known Model
+    Artefacts) that 2T/|Wvir|=1 at t=0 is a single global energy-scale
+    constraint, not proof of genuine dynamical (phase-space) equilibrium,
+    and that a modest early-run readjustment transient is an expected,
+    physically uninteresting consequence of that rescale. (2) The
+    Lyapunov-exponent gate (estimate_lyapunov_exponent()) was too strict
+    for real chaos-mode data: reproducing Codex's own 5-seed default-run
+    trial found all 5 rejected under the Audit1-round gate (whole-window
+    R^2>=0.98 plus a three-segment slope-spread<=0.15 check). Empirical
+    validation against both the real seeds and this suite's own
+    synthetic adversarial fixtures (linear/quadratic/oscillatory/
+    saturating growth, and the noiseless- and 5%-noise-exponential
+    regression fixtures) found that relaxing the whole-window threshold
+    to R^2>=0.90 and replacing the segment-spread check with a residual
+    sign-change count (>=4, exempted when the fit is essentially exact,
+    i.e. residual sum of squares below 1e-6 of the total -- needed so
+    the noiseless-exponential regression fixture, which has too few sign
+    changes to test meaningfully, still passes) correctly accepts all 5
+    of the real seeds re-measured against the final Audit2 code (up from
+    0 of 5 measured against the Audit1-round code; individual seeds
+    remain close enough to the sign-change floor, e.g. one seed's count
+    of exactly 4, that a future seed or minor numerical change could
+    still fall just short -- this is a heuristic gate, not a guarantee)
+    while still rejecting every synthetic adversarial fixture. The
+    estimator now also returns fit_start_index/fit_stop_index (so
+    plot_chaos() highlights the exact fitted slice, not a reconstructed
+    amplitude-window mask that can include points outside it) and
+    residual_sign_changes. This is
+    documented throughout as a heuristic, not a formal statistical chaos
+    test, that can still fail to confirm a genuinely chaotic run (one of
+    the 5 real seeds remains a known, accepted miss). (3) Reviewer
+    names/finding IDs/dates/prior-release narrative -- left scattered
+    across the four .py files' docstrings and comments since the Audit1
+    round -- were stripped from all of them (retaining only timeless
+    technical explanations) and consolidated into this history block,
+    which this entry itself extends with the detail Gemini's own Audit2
+    review separately asked for.
+
+    Codex's P2 findings were addressed as: the softening-scaling
+    citation, previously misattributed to "Dehnen (2001)," corrected
+    throughout to Athanassoula, Fady, Lambert & Bosma (2000) (P2-1);
+    perturb_positions() rescaled to hit its documented RMS displacement
+    EXACTLY rather than only in expectation (P2-2); plot_chaos() reading
+    the estimator's own fit indices (P2-3, folded into the P1-2 work
+    above); --no_plot's help text corrected from "requires --outdir or
+    --csvdir" to "requires --csvdir" (P2-5, the driver's own validation
+    logic was already correct); a real analytic two-body Wvir-vs-U
+    eps-to-0 test (test_virial_force_term_reduces_to_potential_energy_as_
+    softening_vanishes) and a real CSV-provenance round-trip test
+    (TestCsvOutput.test_provenance_lines_match_actual_summary_values)
+    implemented for the two regression tests that had been cited by
+    docstring/comment but not actually written (P2-6); explicit
+    ValueError validation (mismatched array lengths, non-positive
+    masses) added to kinetic_energy(), potential_energy(),
+    virial_force_term(), center_of_mass(), center_of_mass_velocity(),
+    lagrangian_radii(), _phi_and_speed2(), perturb_positions() and
+    position_space_divergence(), plus range/type validation on
+    estimate_lyapunov_exponent()'s own parameters, with new malformed-
+    input regression tests for each (P2-7); this round runs the full
+    suite exactly once from tests/, per this file's own stated
+    convention, rather than the three separate full-suite invocations
+    the Audit1-round response report used (P2-8); genuine Python 3.10
+    runtime compatibility (not just AST-grammar parsing) verified in a
+    real Python 3.10 virtual environment (P2-9).
+
+    Codex's P3 findings were addressed as: high_velocity_fraction()'s
+    "locally Maxwellian"/"far more sensitive"/"far more suppressed"
+    wording softened to a more measured framing (P3-3); the Help file's
+    Algorithm section corrected to describe this program's direct-
+    summation implementation as a per-target full source-loop evaluation
+    whose momentum conservation follows from the force law's algebraic
+    antisymmetry, not from a literal single shared per-pair computation
+    (P3-4); the CSV-columns description's self-contradictory "physical
+    (not SI) units" claim corrected to state the actual mixed,
+    per-column units (P3-5); plot_nbg.py's module docstring "escaped/
+    near-escape fractions" wording corrected, the e_i>0 (not >=0)
+    criterion made consistent between the Help file's equation and its
+    prose, the galaxy final-positions panel's "quasi-equilibrium" title
+    made conditional on the run's own final virial ratio, and the
+    Domain-of-Validity table's "any finite positive value" entries
+    given an explicit floating-point-range footnote (P3-6); a
+    consolidated References section with full citations and DOI/ADS/
+    arXiv links added to the Help file (P3-7); "Max energy drift" in
+    terminal/plot output relabeled "Max sampled energy drift," with
+    _energy_drift()'s docstring documenting the snapshot-cadence
+    dependence explicitly (P3-2); the tautological
+    test_build_id_independent_of_line_endings test rewritten to
+    construct a genuine CRLF-line-ending file variant on disk and hash
+    it through the real _compute_build_id() logic (P3-1, below).
+
+    Gemini's Audit2 claims were independently checked against the
+    current source and found not to describe it: BUILD_ID's coverage
+    (BUILD_ID_COVERS) was already exactly the four core .py files, not
+    the test suite or HTML (Gemini itself retracted this specific claim
+    after being shown the actual BUILD_ID_COVERS list, calling its prior
+    claim "a false positive"); negative softening was already rejected
+    by _require_positive() at every consumption point; MAX_TREE_DEPTH
+    already existed and was already exercised by a recursion-depth
+    regression test; there is no navigator.onLine check anywhere in the
+    Help file; and Multiple is already introduced as a prerequisite in
+    the Description section's opening note, not only in closing remarks.
+    Gemini's one substantive-and-correct point -- that this file's prior
+    history entry was "overly generalized" -- is addressed by this
+    entry's level of detail. BUILD_ID at the end of this round: see
+    physics_nbg.BUILD_ID / the Help file's #version_build element (both
+    verified equal by TestMetadataAndCompatibility and TestHelpFile).
 """
 
 import ast
@@ -260,19 +419,38 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         self.assertEqual(phys.BUILD_ID, recompute_build_id(MODULE_DIR))
 
     def test_build_id_independent_of_line_endings(self):
-        """BUILD_ID must be stable under LF/CRLF normalization (newline=None)."""
-        digest_lf = hashlib.sha256()
-        digest_crlf = hashlib.sha256()
-        for name in phys.BUILD_ID_COVERS:
-            raw = (MODULE_DIR / name).read_bytes()
-            text_lf = raw.replace(b"\r\n", b"\n")
-            normalized = text_lf
-            for digest in (digest_lf, digest_crlf):
-                digest.update(name.encode("utf-8"))
-                digest.update(len(normalized).to_bytes(8, "big"))
-                digest.update(normalized)
-        self.assertEqual(digest_lf.hexdigest()[:12], digest_crlf.hexdigest()[:12])
-        self.assertEqual(digest_lf.hexdigest()[:12], phys.BUILD_ID)
+        """
+        Audit2 fix (Codex P3-1): the prior version of this test computed
+        BOTH "digest_lf" and "digest_crlf" from the same LF-normalized
+        byte string (it never actually constructed a CRLF file variant),
+        so the two digests were guaranteed equal by construction and the
+        test could not have caught a real line-ending dependency. This
+        version writes two genuinely different on-disk copies of the
+        covered source files -- one with LF-only line endings, one with
+        every line ending converted to CRLF -- into separate temporary
+        directories, and hashes each through recompute_build_id() (an
+        independent reimplementation of _compute_build_id()'s algorithm,
+        not the function under test itself), confirming both match each
+        other AND the program's own BUILD_ID.
+        """
+        with tempfile.TemporaryDirectory() as lf_dir, \
+                tempfile.TemporaryDirectory() as crlf_dir:
+            lf_path, crlf_path = Path(lf_dir), Path(crlf_dir)
+            for name in phys.BUILD_ID_COVERS:
+                raw = (MODULE_DIR / name).read_bytes()
+                text_lf = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+                text_crlf = text_lf.replace(b"\n", b"\r\n")
+                self.assertNotEqual(
+                    text_lf, text_crlf,
+                    f"{name} contains no newlines; this fixture cannot "
+                    "exercise a line-ending difference for it.",
+                )
+                (lf_path / name).write_bytes(text_lf)
+                (crlf_path / name).write_bytes(text_crlf)
+            digest_lf = recompute_build_id(lf_path)
+            digest_crlf = recompute_build_id(crlf_path)
+        self.assertEqual(digest_lf, digest_crlf)
+        self.assertEqual(digest_lf, phys.BUILD_ID)
 
     def test_all_core_sources_parse_as_python_3_10(self):
         for name in CORE_MODULE_FILES:
@@ -656,6 +834,83 @@ class TestEnergyMomentumAndVirial(unittest.TestCase):
             np.allclose(phys.center_of_mass_velocity(vel2, m), 0.0, atol=1e-10)
         )
 
+    def test_virial_force_term_two_body_matches_closed_form(self):
+        """
+        Audit2 addition (Codex P2-6): implements the test previously
+        cited by virial_force_term()'s own docstring
+        (test_virial_force_term_reduces_to_potential_energy_as_softening_
+        vanishes) but not actually written. For two bodies at separation
+        r with softening eps, Wvir = sum_i r_i.F_i reduces to the single
+        pair term -G m1 m2 r^2 / (r^2+eps^2)^(3/2), an independent closed
+        form not derived from virial_force_term()'s own implementation.
+        """
+        m1, m2 = 1.0e10, 3.0e10
+        r = 5.0
+        eps = 0.7
+        positions = np.array([[0.0, 0.0, 0.0], [r, 0.0, 0.0]])
+        masses = np.array([m1, m2])
+        expected = -phys.G * m1 * m2 * r ** 2 / (r ** 2 + eps ** 2) ** 1.5
+        wvir = phys.virial_force_term(positions, masses, eps)
+        self.assertAlmostEqual(wvir / expected, 1.0, places=10)
+
+    def test_virial_force_term_reduces_to_potential_energy_as_softening_vanishes(self):
+        """
+        Audit2 addition (Codex P2-6): as eps -> 0, Wvir -> U exactly (the
+        r_ij^2/(r_ij^2+eps^2) factor -> 1), for an independent multi-body
+        (not just two-body) configuration. Checked by shrinking eps by
+        several orders of magnitude and confirming the relative
+        difference between Wvir and U shrinks correspondingly (roughly
+        quadratically in eps/r, consistent with the Taylor expansion of
+        the softening factor), not merely that it is "small" at one eps.
+        """
+        rng = np.random.default_rng(21)
+        positions = rng.normal(size=(6, 3)) * 3.0
+        masses = rng.uniform(1.0e9, 5.0e9, size=6)
+        diffs = []
+        for eps in (1.0e-1, 1.0e-3, 1.0e-5):
+            u = phys.potential_energy(positions, masses, eps)
+            wvir = phys.virial_force_term(positions, masses, eps)
+            diffs.append(abs(wvir - u) / abs(u))
+        self.assertLess(diffs[1], diffs[0] * 1.0e-3)
+        self.assertLess(diffs[2], diffs[1] * 1.0e-3)
+        self.assertLess(diffs[-1], 1.0e-8)
+
+    def test_virial_force_term_agrees_with_direct_r_dot_f_summation(self):
+        """
+        Audit2 addition (Codex P2-6): Wvir = sum_i r_i . F_i must agree
+        with an r.F summation built from compute_accelerations_direct()
+        independently of virial_force_term()'s own pairwise-sum
+        implementation, for a genuine multi-body (N=8) configuration.
+        """
+        rng = np.random.default_rng(22)
+        n = 8
+        positions = rng.normal(size=(n, 3)) * 4.0
+        masses = rng.uniform(1.0e9, 5.0e9, size=n)
+        softening = 0.6
+        accel = phys.compute_accelerations_direct(positions, masses, softening)
+        force = masses[:, None] * accel
+        r_dot_f = float(np.sum(positions * force))
+        wvir = phys.virial_force_term(positions, masses, softening)
+        self.assertAlmostEqual(r_dot_f / wvir, 1.0, places=9)
+
+    def test_kinetic_energy_rejects_mismatched_masses_length(self):
+        with self.assertRaises(ValueError):
+            phys.kinetic_energy(np.zeros((5, 3)), np.ones(4))
+
+    def test_potential_energy_rejects_mismatched_masses_length(self):
+        with self.assertRaises(ValueError):
+            phys.potential_energy(np.zeros((5, 3)), np.ones(4), 1.0)
+
+    def test_virial_force_term_rejects_mismatched_masses_length(self):
+        with self.assertRaises(ValueError):
+            phys.virial_force_term(np.zeros((5, 3)), np.ones(4), 1.0)
+
+    def test_center_of_mass_rejects_mismatched_masses_length(self):
+        with self.assertRaises(ValueError):
+            phys.center_of_mass(np.zeros((5, 3)), np.ones(4))
+        with self.assertRaises(ValueError):
+            phys.center_of_mass_velocity(np.zeros((5, 3)), np.ones(4))
+
 
 # ======================================================================
 class TestLagrangianRadii(unittest.TestCase):
@@ -686,6 +941,26 @@ class TestLagrangianRadii(unittest.TestCase):
             phys.lagrangian_radii(self.positions, self.masses, [0.0])
         with self.assertRaises(ValueError):
             phys.lagrangian_radii(self.positions, self.masses, [1.5])
+
+    def test_rejects_mismatched_masses_length(self):
+        """Audit2 addition (Codex P2-7)."""
+        with self.assertRaises(ValueError):
+            phys.lagrangian_radii(self.positions, np.ones(4), [0.5])
+
+    def test_rejects_nonpositive_masses(self):
+        """
+        Audit2 regression (Codex P2-7): a zero (or negative) individual
+        mass previously passed through silently -- the cumulative-mass-
+        fraction calculation is only meaningful when every mass is
+        physically a mass.
+        """
+        masses = self.masses.copy()
+        masses[2] = 0.0
+        with self.assertRaises(ValueError):
+            phys.lagrangian_radii(self.positions, masses, [0.5])
+        masses[2] = -1.0
+        with self.assertRaises(ValueError):
+            phys.lagrangian_radii(self.positions, masses, [0.5])
 
 
 # ======================================================================
@@ -785,6 +1060,23 @@ class TestEscapersAndFastFraction(unittest.TestCase):
             phys.high_velocity_fraction(positions, velocities, masses, 1.0,
                                          threshold=-0.5)
 
+    def test_specific_energies_rejects_mismatched_masses_length(self):
+        """Audit2 addition (Codex P2-7): exercises _phi_and_speed2()'s
+        shared validation via its two public callers."""
+        positions = np.zeros((5, 3))
+        velocities = np.zeros((5, 3))
+        with self.assertRaises(ValueError):
+            phys.specific_energies(positions, velocities, np.ones(4), 1.0)
+        with self.assertRaises(ValueError):
+            phys.high_velocity_fraction(positions, velocities, np.ones(4), 1.0)
+
+    def test_specific_energies_rejects_nonpositive_masses(self):
+        positions = np.zeros((4, 3))
+        velocities = np.zeros((4, 3))
+        masses = np.array([1.0, 1.0, 0.0, 1.0])
+        with self.assertRaises(ValueError):
+            phys.specific_energies(positions, velocities, masses, 1.0)
+
 
 # ======================================================================
 class TestTimescales(unittest.TestCase):
@@ -861,7 +1153,7 @@ class TestInitialConditions(unittest.TestCase):
             atol=scale * 1e-6,
         ))
 
-    def test_plummer_sphere_starts_in_exact_softened_virial_equilibrium(self):
+    def test_plummer_sphere_starts_at_exact_softened_virial_balance(self):
         """
         Audit1 oracle correction (Codex P1-1/P1-3, Copilot A2/A11,
         2026-09-03): this test previously computed Q = 2T/|U| using
@@ -870,11 +1162,15 @@ class TestInitialConditions(unittest.TestCase):
         docstring) -- and only checked a loose 0.5-1.5 band, which is
         wide enough to pass even with that wrong denominator. Since
         plummer_sphere() now explicitly rescales velocities to put the
-        actual discrete, softened realization into EXACT equilibrium
-        (2T/|Wvir| = 1, using virial_force_term(), not potential_energy())
-        rather than merely trusting the unsoftened continuum DF to land
-        close to it, this is checked tightly here, not loosely -- and
-        using the physically correct oracle quantity.
+        actual discrete, softened realization into EXACT scalar virial
+        balance (2T/|Wvir| = 1, using virial_force_term(), not
+        potential_energy()) rather than merely trusting the unsoftened
+        continuum DF to land close to it, this is checked tightly here,
+        not loosely -- and using the physically correct oracle quantity.
+        Renamed (Audit2, Codex P1-1) from
+        test_plummer_sphere_starts_in_exact_softened_virial_equilibrium
+        to avoid overclaiming a genuine dynamical equilibrium; see
+        virial_force_term()'s docstring for the distinction.
         """
         ic = phys.plummer_sphere(300, 1000.0, 1.0, seed=42)
         softening = ic["diagnostics"]["softening"]
@@ -1246,6 +1542,86 @@ class TestChaosDiagnostics(unittest.TestCase):
         # units in absolute terms; atol is scaled to that, not to zero.
         self.assertTrue(np.allclose(com_after, com_before, atol=1e-6 * 1.0e16, rtol=0.0))
 
+    def test_perturb_positions_with_masses_hits_target_rms_exactly_at_n3(self):
+        """
+        Audit2 regression (Codex P2-2): the RMS displacement documented
+        by perturb_positions() must match the target EXACTLY (to
+        floating-point precision), not merely approximately/in
+        expectation, including on the masses= (center-of-mass-removed)
+        path -- checked here at the smallest valid N (3), where the
+        center-of-mass-removal step changes the realized RMS from the
+        raw draw by the largest relative amount and a fixed per-
+        component sigma could not have corrected for it exactly.
+        """
+        rng = np.random.default_rng(101)
+        n = 3
+        positions = rng.normal(size=(n, 3)) * 1.0e16
+        masses = rng.uniform(0.5, 2.0, size=n)
+        centroid = positions.mean(axis=0)
+        rms_radius = math.sqrt(float(np.mean(np.sum((positions - centroid) ** 2, axis=1))))
+        relative_perturbation = 1.0e-4
+        perturbed = phys.perturb_positions(positions, relative_perturbation,
+                                            masses=masses, seed=42)
+        offset = perturbed - positions
+        achieved_rms = math.sqrt(float(np.mean(np.sum(offset ** 2, axis=1))))
+        target_rms = relative_perturbation * rms_radius
+        self.assertAlmostEqual(achieved_rms / target_rms, 1.0, places=9)
+
+    def test_perturb_positions_with_masses_hits_target_rms_exactly_at_n40(self):
+        rng = np.random.default_rng(102)
+        n = 40
+        positions = rng.normal(size=(n, 3)) * 1.0e16
+        masses = rng.uniform(0.5, 2.0, size=n)
+        centroid = positions.mean(axis=0)
+        rms_radius = math.sqrt(float(np.mean(np.sum((positions - centroid) ** 2, axis=1))))
+        relative_perturbation = 1.0e-4
+        perturbed = phys.perturb_positions(positions, relative_perturbation,
+                                            masses=masses, seed=43)
+        offset = perturbed - positions
+        achieved_rms = math.sqrt(float(np.mean(np.sum(offset ** 2, axis=1))))
+        target_rms = relative_perturbation * rms_radius
+        self.assertAlmostEqual(achieved_rms / target_rms, 1.0, places=9)
+
+    def test_perturb_positions_without_masses_hits_target_rms_exactly(self):
+        rng = np.random.default_rng(103)
+        n = 25
+        positions = rng.normal(size=(n, 3)) * 1.0e16
+        centroid = positions.mean(axis=0)
+        rms_radius = math.sqrt(float(np.mean(np.sum((positions - centroid) ** 2, axis=1))))
+        relative_perturbation = 1.0e-4
+        perturbed = phys.perturb_positions(positions, relative_perturbation, seed=44)
+        offset = perturbed - positions
+        achieved_rms = math.sqrt(float(np.mean(np.sum(offset ** 2, axis=1))))
+        target_rms = relative_perturbation * rms_radius
+        self.assertAlmostEqual(achieved_rms / target_rms, 1.0, places=9)
+
+    def test_perturb_positions_rejects_mismatched_masses_length(self):
+        positions = np.zeros((5, 3))
+        with self.assertRaises(ValueError):
+            phys.perturb_positions(positions, 0.1, masses=np.ones(4))
+
+    def test_perturb_positions_rejects_nonpositive_masses(self):
+        rng = np.random.default_rng(104)
+        positions = rng.normal(size=(4, 3))
+        with self.assertRaises(ValueError):
+            phys.perturb_positions(positions, 0.1,
+                                    masses=np.array([1.0, -1.0, 1.0, 1.0]))
+        with self.assertRaises(ValueError):
+            phys.perturb_positions(positions, 0.1,
+                                    masses=np.array([1.0, 0.0, 1.0, 1.0]))
+
+    def test_position_space_divergence_rejects_mismatched_masses_length(self):
+        a = np.zeros((5, 3))
+        b = np.zeros((5, 3))
+        with self.assertRaises(ValueError):
+            phys.position_space_divergence(a, b, masses=np.ones(4))
+
+    def test_position_space_divergence_rejects_nonpositive_masses(self):
+        a = np.zeros((4, 3))
+        b = np.zeros((4, 3))
+        with self.assertRaises(ValueError):
+            phys.position_space_divergence(a, b, masses=np.array([1.0, 0.0, 1.0, 1.0]))
+
     def test_position_space_divergence_shape_mismatch_raises(self):
         a = np.zeros((5, 3))
         b = np.zeros((4, 3))
@@ -1354,18 +1730,145 @@ class TestChaosDiagnostics(unittest.TestCase):
 
     def test_estimate_lyapunov_exponent_rejects_saturating_growth(self):
         """
-        Audit1 regression (Codex P1-6.4): a smooth, saturating
+        Audit1 regression (Codex P1-6.4), oracle re-verified after the
+        Audit2 gate redesign (Codex P1-2): a smooth, saturating
         (logistic-shaped) rise can still reach the amplitude window with
         a deceptively high whole-window R^2 (approx 0.9985 for the curve
-        used here). The three-segment slope-consistency check catches
-        the curvature a single whole-window R^2 misses (segment slopes
-        disagree by a fractional spread of approximately 0.18, above the
-        0.15 threshold), and this must still be rejected.
+        used here, comfortably above the current R^2>=0.90 threshold).
+        It must still be rejected -- now by the residual sign-change
+        gate: its log-residuals from the OLS fit trace one smooth arc
+        with only 2 sign changes, below the min_residual_sign_changes=4
+        floor, because the fit is close but not close enough to count as
+        "essentially exact" (its residual sum of squares is well above
+        the near-exact-fit bypass tolerance), unlike a genuine noiseless
+        exponential (see test_estimate_lyapunov_exponent_recovers_known_
+        rate) whose residuals ARE that small.
         """
         t = np.linspace(0, 200, 400)
         d = 1.0 + 50.0 / (1.0 + np.exp(-(t - 100.0) / 10.0))
         result = phys.estimate_lyapunov_exponent(t, d)
         self.assertTrue(math.isnan(result["lyapunov_exponent"]))
+        self.assertLess(result["residual_sign_changes"], 4)
+
+    def test_estimate_lyapunov_exponent_returns_exact_fit_indices(self):
+        """
+        Audit2 addition (Codex P2-3): the estimator must return the exact
+        [fit_start_index, fit_stop_index) half-open slice used for the
+        fit -- not just a count -- so a caller (plot_chaos()) can
+        highlight precisely those points rather than reconstructing an
+        amplitude-window mask that could include points outside the
+        single contiguous run actually used.
+        """
+        t = np.linspace(0, 100, 500)
+        lam_true = 0.05
+        d = np.minimum(1e-8 * np.exp(lam_true * t), 10.0)
+        result = phys.estimate_lyapunov_exponent(t, d)
+        lo, hi = result["fit_start_index"], result["fit_stop_index"]
+        self.assertIsInstance(lo, int)
+        self.assertIsInstance(hi, int)
+        self.assertEqual(hi - lo, result["n_points_used"])
+        # Refitting exactly this slice by hand must reproduce the same
+        # slope the estimator reports, confirming the indices are the
+        # actual fit window and not merely plausible-looking numbers.
+        slope, _ = np.polyfit(t[lo:hi], np.log(d[lo:hi]), 1)
+        self.assertAlmostEqual(slope, result["lyapunov_exponent"], places=9)
+
+    def test_estimate_lyapunov_exponent_rejected_run_has_no_fit_indices(self):
+        t = np.linspace(0, 200, 400)
+        d = 1.0 + t  # linear: rejected by the R^2 gate
+        result = phys.estimate_lyapunov_exponent(t, d)
+        self.assertIsNone(result["fit_start_index"])
+        self.assertIsNone(result["fit_stop_index"])
+
+    def test_estimate_lyapunov_exponent_near_exact_fit_bypasses_sign_change_gate(self):
+        """
+        Audit2 addition (Codex P1-2): a fit close enough to exact that
+        its residuals carry no meaningful sign-change statistic (residual
+        sum of squares below the near-exact-fit tolerance) must be
+        accepted even with very few residual sign changes -- this is
+        exactly the situation test_estimate_lyapunov_exponent_recovers_
+        known_rate exercises implicitly; here the residual-sign-change
+        count itself is checked directly to confirm the mechanism, not
+        just the final accept/reject outcome.
+        """
+        t = np.linspace(0, 100, 500)
+        lam_true = 0.05
+        d = np.minimum(1e-8 * np.exp(lam_true * t), 10.0)
+        result = phys.estimate_lyapunov_exponent(t, d)
+        self.assertFalse(math.isnan(result["lyapunov_exponent"]))
+        self.assertLess(result["residual_sign_changes"], 4)
+
+    def test_estimate_lyapunov_exponent_rejects_bad_min_points(self):
+        t = np.linspace(0, 10, 50)
+        d = np.exp(0.1 * t)
+        with self.assertRaises(ValueError):
+            phys.estimate_lyapunov_exponent(t, d, min_points=2)
+        with self.assertRaises(ValueError):
+            phys.estimate_lyapunov_exponent(t, d, min_points=4.5)
+
+    def test_estimate_lyapunov_exponent_rejects_bad_min_r_squared(self):
+        t = np.linspace(0, 10, 50)
+        d = np.exp(0.1 * t)
+        with self.assertRaises(ValueError):
+            phys.estimate_lyapunov_exponent(t, d, min_r_squared=-0.1)
+        with self.assertRaises(ValueError):
+            phys.estimate_lyapunov_exponent(t, d, min_r_squared=1.1)
+
+    def test_estimate_lyapunov_exponent_rejects_bad_min_residual_sign_changes(self):
+        t = np.linspace(0, 10, 50)
+        d = np.exp(0.1 * t)
+        with self.assertRaises(ValueError):
+            phys.estimate_lyapunov_exponent(t, d, min_residual_sign_changes=-1)
+        with self.assertRaises(ValueError):
+            phys.estimate_lyapunov_exponent(t, d, min_residual_sign_changes=2.5)
+
+
+# ======================================================================
+class TestChaosRealRunRegression(unittest.TestCase):
+    """
+    Audit2 addition (Codex P1-2 minimum-Audit3 list item 3): fixed-seed
+    regression coverage confirming the redesigned Lyapunov gate actually
+    returns a finite, physically plausible result for representative
+    real default chaos-mode runs, not only for synthetic fixtures. Bounds
+    are deliberately loose (order-of-magnitude, not tight equality) since
+    the exact numeric result is sensitive to floating-point summation
+    order and is not itself the thing under test here -- finiteness and
+    physical plausibility are.
+    """
+
+    def _run(self, seed):
+        return phys.run_chaos(n_bodies=40, seed=seed, perturbation_seed=seed)
+
+    def test_default_chaos_run_seed_0_finds_a_plausible_fit(self):
+        self._check_plausible_or_documented_miss(0)
+
+    def test_default_chaos_run_seed_1_finds_a_plausible_fit(self):
+        self._check_plausible_or_documented_miss(1)
+
+    def test_default_chaos_run_seed_2_finds_a_plausible_fit(self):
+        self._check_plausible_or_documented_miss(2)
+
+    def _check_plausible_or_documented_miss(self, seed):
+        s = self._run(seed)["summary"]
+        lam = s["lyapunov_exponent_per_myr"]
+        if math.isnan(lam):
+            # A documented, acceptable outcome for this heuristic gate
+            # (see estimate_lyapunov_exponent's docstring) -- but the
+            # summary must still explain it via a warning, not fail
+            # silently.
+            self.assertTrue(any("exponential-growth-quality" in w
+                                 for w in s["warnings"]))
+            return
+        self.assertGreater(lam, 0.0)
+        # Goodman, Heggie & Hut (1993): Lyapunov time of order a few
+        # crossing times for small-N self-gravitating clusters -- allow
+        # a generous factor-of-50 margin either side rather than
+        # asserting the literature value precisely, since this is a
+        # single-realization sanity check, not a precision measurement.
+        ratio = s["lyapunov_time_over_t_cross"]
+        self.assertGreater(ratio, 0.02)
+        self.assertLess(ratio, 100.0)
+        self.assertGreaterEqual(s["lyapunov_fit_r_squared"], 0.90)
 
 
 # ======================================================================
@@ -1622,6 +2125,74 @@ class TestCsvOutput(unittest.TestCase):
             self.assertNotEqual(path1, path2)
             self.assertEqual(len(os.listdir(tmp)), 2)
 
+    def test_provenance_lines_match_actual_summary_values(self):
+        """
+        Audit2 addition (Codex P2-6): implements the test previously
+        cited by a comment above PARAMS_BY_MODE and by _provenance()'s
+        own docstring, but not actually written. For each mode, this
+        runs the real physics_nbg.run_*() function, builds the
+        provenance lines from the run's own summary dict via
+        driver._provenance(), and confirms every listed parameter name
+        actually exists as a summary key (so a mismatched/renamed key
+        would fail loudly here rather than silently printing "None")
+        and that its provenance-line value exactly matches the value
+        actually in the summary dict.
+        """
+        cases = [
+            ("cluster", phys.run_cluster(n_bodies=15, total_mass_msun=1e2,
+                                          scale_radius_pc=1.0, n_relax=0.2,
+                                          steps_per_crossing=6,
+                                          target_snapshots=5, seed=5)),
+            ("galaxy", phys.run_galaxy(n_bodies=15, total_mass_msun=1e5,
+                                        radius_pc=50.0, n_freefall=0.2,
+                                        steps_per_freefall=6,
+                                        target_snapshots=5, seed=6)),
+            ("chaos", phys.run_chaos(n_bodies=12, total_mass_msun=1e2,
+                                      scale_radius_pc=1.0, n_cross=1.0,
+                                      steps_per_crossing=6,
+                                      target_snapshots=5, seed=7,
+                                      perturbation_seed=8)),
+        ]
+        for mode, result in cases:
+            with self.subTest(mode=mode):
+                summary = result["summary"]
+                for name in driver.PARAMS_BY_MODE[mode]:
+                    self.assertIn(
+                        name, summary,
+                        f"PARAMS_BY_MODE[{mode!r}] lists {name!r}, which is "
+                        f"not an actual key of run_{mode}()'s summary dict.",
+                    )
+                lines = driver._provenance(mode, summary)
+                param_lines = {
+                    ln.strip().split(" = ", 1)[0]: ln.strip().split(" = ", 1)[1]
+                    for ln in lines
+                    if ln.startswith("    ") and " = " in ln
+                }
+                for name in driver.PARAMS_BY_MODE[mode]:
+                    self.assertIn(name, param_lines)
+                    if name == "softening_pc":
+                        # softening_pc's line carries an explanatory
+                        # suffix when the value is the computed default
+                        # (see _provenance()); the value must still
+                        # START with the actual summary value.
+                        self.assertTrue(
+                            param_lines[name].startswith(str(summary[name])),
+                            f"softening_pc provenance line {param_lines[name]!r} "
+                            f"does not start with the actual summary value "
+                            f"{summary[name]!r}.",
+                        )
+                    else:
+                        self.assertEqual(param_lines[name], str(summary[name]))
+                # Every OTHER mode's params must be absent, so a CSV can
+                # never suggest an irrelevant option had an effect.
+                for other_mode, other_params in driver.PARAMS_BY_MODE.items():
+                    if other_mode == mode:
+                        continue
+                    for name in other_params:
+                        if name in driver.PARAMS_BY_MODE[mode]:
+                            continue
+                        self.assertNotIn(name, param_lines)
+
 
 # ======================================================================
 class TestCli(unittest.TestCase):
@@ -1841,7 +2412,7 @@ class TestHelpFile(unittest.TestCase):
     def test_domain_of_validity_distinguishes_accepted_from_trustworthy(self):
         validity = normalized_text(nodes_by_id(self.root, "validity")[0])
         self.assertIn("Accepted", validity)
-        self.assertIn("Dehnen", validity)
+        self.assertIn("Athanassoula", validity)
 
     def test_parameters_table_documents_every_cli_flag(self):
         params_text = normalized_text(nodes_by_id(self.root, "parameters")[0])

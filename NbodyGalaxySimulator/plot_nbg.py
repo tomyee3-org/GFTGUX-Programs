@@ -6,8 +6,8 @@ Matplotlib visualisations for NbodyGalaxySimulator.
 One routine per mode:
 
     plot_cluster   star-cluster evaporation: projected positions, Lagrangian
-                   radii, virial ratio, escaped/near-escape fractions,
-                   energy conservation
+                   radii, virial ratio, instantaneous-unbound count and
+                   near-escape tail fraction, energy conservation
     plot_galaxy    cold-collapse galaxy formation: projected positions,
                    Lagrangian radii (the collapse-and-bounce signature),
                    virial ratio, energy conservation
@@ -206,9 +206,8 @@ def plot_cluster(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     ax2.plot(t, np.asarray(result["high_velocity_fraction"]) * 100.0,
              color=C_A, lw=lw, ls="--", label="near-escape tail")
     ax.set_xlabel("time  [Myr]")
-    # Audit1 fix (Codex P1-7, Copilot A13, 2026-09-03): labeled
-    # "instantaneously unbound", not "number escaped" -- this is a
-    # snapshot-by-snapshot positive-specific-energy count, not a
+    # Labeled "instantaneously unbound", not "number escaped" -- this is
+    # a snapshot-by-snapshot positive-specific-energy count, not a
     # cumulative, confirmed escape count (see identify_unbound()'s
     # docstring); it is not guaranteed to be monotonically increasing.
     ax.set_ylabel("instantaneously unbound", color=C_WARN)
@@ -259,7 +258,16 @@ def plot_galaxy(result, outdir=None, dpi=150, lw=1.6, provenance=None,
 
     _scatter_projection(axes[1, 0], result["positions"][-1], C_B, "final")
     _finalize_scatter_axes(axes[1, 0], [result["positions"][-1]], robust_zoom=True)
-    axes[1, 0].set_title("Final (quasi-equilibrium) positions")
+    # "quasi-equilibrium" describes the settled remnant this experiment
+    # usually produces, not a guaranteed outcome for every parameter
+    # choice -- label it that way only when the run's own final virial
+    # ratio actually landed near scalar balance (2T/|W| = 1); otherwise
+    # use a neutral title so the panel never claims a settled remnant it
+    # did not observe.
+    if abs(s["virial_ratio_final"] - 1.0) <= 0.3:
+        axes[1, 0].set_title("Final (quasi-equilibrium) positions")
+    else:
+        axes[1, 0].set_title("Final positions")
 
     ax = axes[1, 1]
     ax.plot(t, result["virial_ratio"], color=C_A, lw=lw)
@@ -306,16 +314,19 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     ax.semilogy(t, np.maximum(div, 1e-300), color=C_A, lw=lw)
     lam = s["lyapunov_exponent_per_myr"]
     has_fit_overlay = False
-    if np.isfinite(lam) and lam > 0:
+    fit_lo = s.get("lyapunov_fit_start_index")
+    fit_hi = s.get("lyapunov_fit_stop_index")
+    if np.isfinite(lam) and lam > 0 and fit_lo is not None and fit_hi is not None:
         n_used = s["n_points_used_in_fit"]
-        d0 = div[0]
-        d_max = div.max()
-        mask = (div >= 3.0 * d0) & (div <= 0.5 * d_max)
-        if np.any(mask):
-            ax.semilogy(t[mask], div[mask], color=C_FIT, lw=lw * 1.8,
-                        label=f"fit window ({n_used} pts, "
-                              f"$R^2$={s['lyapunov_fit_r_squared']:.4f})")
-            has_fit_overlay = True
+        # Highlight the EXACT contiguous slice the estimator fit, not a
+        # reconstructed amplitude-window mask -- the latter can include
+        # points outside the single contiguous run actually used, which
+        # would misrepresent what was fit whenever the divergence trace
+        # re-enters the amplitude window after leaving it.
+        ax.semilogy(t[fit_lo:fit_hi], div[fit_lo:fit_hi], color=C_FIT, lw=lw * 1.8,
+                    label=f"fit window ({n_used} pts, "
+                          f"$R^2$={s['lyapunov_fit_r_squared']:.4f})")
+        has_fit_overlay = True
         ax.set_title(f"Divergence (Lyapunov time = "
                      f"{s['lyapunov_time_myr']:.3g} Myr = "
                      f"{s['lyapunov_time_over_t_cross']:.2g} $t_\\mathrm{{cross}}$)")
@@ -323,12 +334,11 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
         ax.set_title("Divergence (no clean exponential window found)")
     ax.set_xlabel("time  [Myr]")
     ax.set_ylabel("RMS separation  [pc]")
-    # Audit1 fix (Codex P3-3, Copilot A17, 2026-09-03): legend() was
-    # called unconditionally, but the only labeled artist on this axis is
-    # the fit-window overlay above, which is added only when a fit was
-    # found. Calling legend() with nothing labeled raises matplotlib's
-    # "No artists with labels found to put in legend" UserWarning on
-    # every unsuccessful-fit run -- an unexpected warning by this
+    # The only labeled artist on this axis is the fit-window overlay
+    # above, which is added only when a fit was found. Calling legend()
+    # unconditionally would raise matplotlib's "No artists with labels
+    # found to put in legend" UserWarning on every unsuccessful-fit run
+    # whenever nothing is labeled -- an unexpected warning by this
     # project's own testing standard. Only call it when there is
     # something to show.
     if has_fit_overlay:

@@ -118,7 +118,8 @@ def parse_args():
                    help="initial sphere radius [pc] (default 200.0)")
     g.add_argument("--virial_ratio_init", type=_finite_float, default=None,
                    metavar="Q0", help="initial virial ratio 2T/|W_vir|; 0 = "
-                        "perfectly cold, 1.0 = virial equilibrium (default 0.0)")
+                        "perfectly cold, 1.0 = exact instantaneous scalar "
+                        "virial balance (default 0.0)")
     g.add_argument("--n_freefall", type=_finite_float, default=None, metavar="X",
                    help="run length as a multiple of the initial free-fall "
                         "time (default 8.0)")
@@ -142,8 +143,8 @@ def parse_args():
     g = p.add_argument_group("Gravity and integration (all modes)")
     g.add_argument("--softening_pc", type=_finite_float, default=None,
                    metavar="PC", help="Plummer softening length [pc] "
-                        "(default: Dehnen 2001 optimal-softening scaling, "
-                        "0.98 a N^-0.26)")
+                        "(default: Athanassoula et al. 2000 optimal-"
+                        "softening scaling, 0.98 a N^-0.26)")
     g.add_argument("--theta", type=_finite_float, default=None, metavar="THETA",
                    help="Barnes-Hut opening angle, "
                         f"{physics_nbg.MIN_THETA:g}-{physics_nbg.MAX_THETA:g} "
@@ -166,7 +167,8 @@ def parse_args():
                    help="also write a timestamped CSV diagnostics file in "
                         "PATH; this does not affect the screen display")
     g.add_argument("--no_plot", action="store_true",
-                   help="skip the figure entirely (requires --outdir or --csvdir)")
+                   help="skip the figure entirely (requires --csvdir, since "
+                        "--outdir alone controls only the figure this skips)")
     g.add_argument("--dpi", type=int, default=150, metavar="N",
                    help="PNG resolution")
     g.add_argument("--lw", type=float, default=1.6, metavar="PT",
