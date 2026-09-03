@@ -572,6 +572,44 @@ plot_photon.py docstrings or output):
         test_sidecar_status_matches_an_independent_rerun had their
         oracles tightened (substring match -> exact field parsing), which
         is strictly stronger than what they checked before.
+
+  2026-09-02  Claude (principal developer).  Response to Audit4's single
+    requested item (Codex A4-P2-1; the user asked specifically for this
+    P2 documentation issue ahead of a release-notes pass, not the
+    accompanying P3 items). No P1 or other P2 finding was reported by any
+    of the three Audit4 reviews.
+      * Codex A4-P2-1: plot_photon.py's plot_photon_orbit() public
+        parameter docstring still read "the run can be exactly reproduced
+        later" -- the same unqualified claim the Audit3 round had already
+        softened everywhere else it appeared (driver_photon.py's
+        commentary, _format_provenance()'s docstring, and two
+        PhotonOrbit.html Help rows), but missed here because that edit
+        searched by phrase rather than by re-scanning all four core files
+        afterward. Reworded to state that the exact physics inputs and
+        PhotonOrbit's own dpi/lw settings can be recovered, and that
+        ambient Matplotlib style/environment is not recorded, so a
+        regenerated PNG is not guaranteed byte-identical -- matching the
+        wording already used everywhere else. Re-searched all four core
+        files and the Help file for any other unqualified "exactly
+        reproduced"/"exact rendering" occurrence; found none. Added
+        test_docstring_does_not_overclaim_exact_reproduction
+        (TestPlotGuardrails), asserting the retracted phrase is gone and
+        the qualified replacement is present, per A4-P2-1's own stated
+        regression recommendation -- this is the fix's own regression,
+        not the broader A4-P3-2 documentation-test set, which was not
+        part of what was requested this round.
+      * MODEL_VERSION unchanged at 1.4.0: this is a docstring-only
+        correction with no change to any function's behavior, consistent
+        with Codex's own guidance (A4 Recommended Action Order item 6)
+        that documentation/test-only corrections do not warrant a version
+        bump. BUILD_ID recomputed automatically (it hashes the four core
+        files' actual content, docstrings included) and the Help file's
+        #version_build element updated to match.
+      * Test suite: 122 -> 123 tests (one new test, no removals or
+        weakenings). Per Codex A4-P3-4's guidance on report accuracy, the
+        canonical suite was run and reported exactly once this round
+        (MPLBACKEND=Agg python test_physics_photon.py -v from tests/),
+        not repeated across every invocation style.
 """
 
 import ast
@@ -1708,6 +1746,23 @@ class TestInputValidationAndErrorHandling(unittest.TestCase):
 class TestPlotGuardrails(unittest.TestCase):
     VALID_INFO = dict(r_s=2.0, r_photon=3.0, status="captured",
                        closest_approach=2.0, delta_phi=1.0)
+
+    def test_docstring_does_not_overclaim_exact_reproduction(self):
+        """Audit4 Codex A4-P2-1: plot_photon_orbit()'s own public parameter
+        docstring retained "the run can be exactly reproduced later" after
+        the Audit3 round had already softened this same claim everywhere
+        else it appeared (driver_photon.py's commentary, plot_photon.py's
+        _format_provenance() docstring, and two PhotonOrbit.html rows) --
+        a one-time textual edit missed the one place a student or caller
+        actually sees via help() or introspection. This asserts the
+        specific phrase Codex identified is gone and the qualified
+        replacement is present, so a similarly incomplete future edit
+        fails the suite immediately instead of only a manual re-search.
+        """
+        doc = plotting.plot_photon_orbit.__doc__
+        self.assertNotIn("run can be exactly reproduced", doc)
+        self.assertIn("exact physics inputs", doc)
+        self.assertIn("not guaranteed to be byte-identical", doc)
 
     def test_mismatched_array_lengths_rejected(self):
         with self.assertRaises(ValueError):

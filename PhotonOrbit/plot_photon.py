@@ -174,7 +174,10 @@ def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5,
         diagnostics can omit them -- but when given (as driver_photon.py
         always does) and outdir is also given, they are written losslessly
         into a ``.provenance.txt`` sidecar next to the saved PNG, so the
-        run can be exactly reproduced later.
+        exact physics inputs and PhotonOrbit's own dpi/lw settings can be
+        recovered later. Ambient Matplotlib style and environment (fonts,
+        colors, backend, version) are not recorded, so an independently
+        regenerated PNG is not guaranteed to be byte-identical.
     """
     if not x_values or len(x_values) != len(y_values):
         raise ValueError("x_values and y_values must be nonempty arrays of equal length.")
