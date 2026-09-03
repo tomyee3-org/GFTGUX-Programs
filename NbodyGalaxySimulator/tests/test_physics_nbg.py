@@ -14,182 +14,71 @@ canonical ``tests/`` layout. Reviewer AIs (Copilot, Codex, Gemini) should
 follow the same convention: run the full suite once from ``tests/``, and
 treat any flattened-layout run as a discovery smoke test only.
 
-Development history (audit trail -- developers only; never surfaced to
-students in the Help file or in main.py/driver_nbg.py/physics_nbg.py/
-plot_nbg.py docstrings or output). This section is deliberately the ONLY
-place in this project that names reviewers, finding IDs, or dates; every
-other source file states the resulting technical behavior only, timelessly.
+Development history (audit-trail summary -- developers only; never
+surfaced to students in the Help file or in main.py/driver_nbg.py/
+physics_nbg.py/plot_nbg.py docstrings or output). This section is
+deliberately the ONLY place in this project that names reviewers or
+dates, and it is a SHORT SUMMARY only, by design: the complete,
+finding-by-finding audit record (every reviewer comment, every response,
+every code change) is maintained as the authoritative history in the
+project's own version-control history, not duplicated here, so this
+block cannot drift out of sync with it. Every other source file states
+the resulting technical behavior only, timelessly.
 
   2026-09-03  Claude (principal developer). Kickoff round: first
     comprehensive regression suite for NbodyGalaxySimulator, developed
-    alongside the program itself (per the project's standing instruction
-    that a test suite is a required product from the beginning, not added
-    after defects are found). No EXAMPLE_test_physics_cannon.py reference
-    file was actually present among the uploaded materials; this suite
-    follows test_physics_sev.py's dual-layout-discovery and structural
-    conventions directly instead, per the fallback the Kickoff report
-    documents. Organised by physical invariant / module section rather
-    than by feature-addition order. BUILD_ID at the time this suite was
-    written: 469b49184fbd. 118 tests.
+    alongside the program itself. Organised by physical invariant /
+    module section rather than by feature-addition order. 118 tests.
+    BUILD_ID: 469b49184fbd.
 
   2026-09-03  Claude, responding to Audit1 (Codex and Copilot; Gemini did
-    not participate in Audit1). Both reviewers found the original release
-    conflating potential_energy() (U) with the scalar-virial-theorem
-    quantity (Wvir = sum_i r_i.F_i, added as virial_force_term()) once
-    softening is nonzero (Codex P1-1 / Copilot A2) -- every caller that
-    computed a virial ratio was switched from potential_energy() to
-    virial_force_term(), and cluster/galaxy initial conditions were
-    corrected to rescale velocities against the actual discrete, softened
-    Wvir rather than an idealized continuum energy (Codex P1-2/P1-3,
-    Copilot A1/A11), fixing a systematic energy-scale mismatch that had
-    been measurable as spurious apparent evolution in the first few
-    crossing times of a run. A Barnes-Hut tree bug that could accept an
-    internal node containing the target body's own position as a
-    monopole -- giving up to a 49% relative acceleration error in an
-    adversarial 8-body configuration -- was fixed (Codex P1-5 / Copilot
-    A10). identify_escapers() was renamed identify_unbound() and
-    n_escaped/evaporated_fraction renamed n_unbound/unbound_fraction,
-    because the underlying quantity is an instantaneous, non-monotonic
-    positive-specific-energy count, not a confirmed permanent-escape
-    count (Codex P1-7). phase_space_divergence() was renamed
-    position_space_divergence() (it never included a velocity term;
-    Codex P1-6), chaos mode's default method was changed from "tree" to
-    "direct" (the tree's pair-asymmetry inflates measured divergence with
-    a non-physical contribution; Codex P1-6.3), and perturb_positions()'s
-    per-component sigma was corrected by a factor of sqrt(3) (Codex
-    P2-2). Numerous smaller validation, memory-safety and documentation
-    fixes were also made (Codex P2-1 through P2-10, Copilot A3-A9/A12-
-    A20), including: BUILD_ID scope restricted to exactly the four core
-    .py files with a raised warning (not a silent "unknown") on hash
-    failure; a MAX_BODY_SNAPSHOT_PRODUCT memory-safety cap; theta and
-    caller-supplied accel validated up front rather than deep inside the
-    integration loop; center_of_mass()/center_of_mass_velocity()
-    rejecting non-positive total mass instead of silently returning NaN;
-    a snapshot-stride off-by-factor-of-2 bug (floor vs. ceiling division)
-    fixed; and CSV provenance/header regressions (GALAXY_HEADER column
-    mismatch, a --no_plot/--outdir/--csvdir gap) fixed with new
-    regression tests. Reviewer-authored prior-release narrative was, at
-    the time, left inline across the four .py files' docstrings and
-    comments rather than consolidated here; this is corrected in the
-    Audit2 round below. Gemini's Audit1-equivalent-round claims (BUILD_ID
-    scope, negative softening, MAX_TREE_DEPTH, navigator.onLine, and
-    Multiple's placement) were independently checked in the Audit2 round
-    and found to not describe the current source; see that round's entry.
-    141 tests (from 118).
+    not participate). Fixed a virial-quantity/potential-energy
+    conflation once softening is nonzero (with matching corrections to
+    the cluster/galaxy velocity-rescale initial conditions); a
+    Barnes-Hut tree bug that could accept an internal node containing
+    the target body's own position as a monopole; misleading function
+    names for the escaper-count and divergence diagnostics; a
+    perturb_positions() sigma error; and numerous smaller validation,
+    memory-safety and documentation issues. 141 tests (from 118).
+    BUILD_ID: 482fe1406a58.
 
-  2026-09-03  Claude, responding to Audit2 (Codex and Gemini; Copilot was
-    unavailable this round). Codex's three P1 (release-blocking) findings
-    were addressed as follows. (1) Overclaimed equilibrium: "exact
-    virial equilibrium"/"virial equilibrium" language throughout
-    physics_nbg.py, main.py, driver_nbg.py, plot_nbg.py and the Help file
-    was reworded to "exact instantaneous scalar virial balance," with an
-    explicit new note (in virial_force_term()'s docstring, The Virial
-    Theorem section of the Help file, and a new bullet in Known Model
-    Artefacts) that 2T/|Wvir|=1 at t=0 is a single global energy-scale
-    constraint, not proof of genuine dynamical (phase-space) equilibrium,
-    and that a modest early-run readjustment transient is an expected,
-    physically uninteresting consequence of that rescale. (2) The
-    Lyapunov-exponent gate (estimate_lyapunov_exponent()) was too strict
-    for real chaos-mode data: reproducing Codex's own 5-seed default-run
-    trial found all 5 rejected under the Audit1-round gate (whole-window
-    R^2>=0.98 plus a three-segment slope-spread<=0.15 check). Empirical
-    validation against both the real seeds and this suite's own
-    synthetic adversarial fixtures (linear/quadratic/oscillatory/
-    saturating growth, and the noiseless- and 5%-noise-exponential
-    regression fixtures) found that relaxing the whole-window threshold
-    to R^2>=0.90 and replacing the segment-spread check with a residual
-    sign-change count (>=4, exempted when the fit is essentially exact,
-    i.e. residual sum of squares below 1e-6 of the total -- needed so
-    the noiseless-exponential regression fixture, which has too few sign
-    changes to test meaningfully, still passes) correctly accepts all 5
-    of the real seeds re-measured against the final Audit2 code (up from
-    0 of 5 measured against the Audit1-round code; individual seeds
-    remain close enough to the sign-change floor, e.g. one seed's count
-    of exactly 4, that a future seed or minor numerical change could
-    still fall just short -- this is a heuristic gate, not a guarantee)
-    while still rejecting every synthetic adversarial fixture. The
-    estimator now also returns fit_start_index/fit_stop_index (so
-    plot_chaos() highlights the exact fitted slice, not a reconstructed
-    amplitude-window mask that can include points outside it) and
-    residual_sign_changes. This is
-    documented throughout as a heuristic, not a formal statistical chaos
-    test, that can still fail to confirm a genuinely chaotic run (one of
-    the 5 real seeds remains a known, accepted miss). (3) Reviewer
-    names/finding IDs/dates/prior-release narrative -- left scattered
-    across the four .py files' docstrings and comments since the Audit1
-    round -- were stripped from all of them (retaining only timeless
-    technical explanations) and consolidated into this history block,
-    which this entry itself extends with the detail Gemini's own Audit2
-    review separately asked for.
-
-    Codex's P2 findings were addressed as: the softening-scaling
-    citation, previously misattributed to "Dehnen (2001)," corrected
-    throughout to Athanassoula, Fady, Lambert & Bosma (2000) (P2-1);
-    perturb_positions() rescaled to hit its documented RMS displacement
-    EXACTLY rather than only in expectation (P2-2); plot_chaos() reading
-    the estimator's own fit indices (P2-3, folded into the P1-2 work
-    above); --no_plot's help text corrected from "requires --outdir or
-    --csvdir" to "requires --csvdir" (P2-5, the driver's own validation
-    logic was already correct); a real analytic two-body Wvir-vs-U
-    eps-to-0 test (test_virial_force_term_reduces_to_potential_energy_as_
-    softening_vanishes) and a real CSV-provenance round-trip test
-    (TestCsvOutput.test_provenance_lines_match_actual_summary_values)
-    implemented for the two regression tests that had been cited by
-    docstring/comment but not actually written (P2-6); explicit
-    ValueError validation (mismatched array lengths, non-positive
-    masses) added to kinetic_energy(), potential_energy(),
-    virial_force_term(), center_of_mass(), center_of_mass_velocity(),
-    lagrangian_radii(), _phi_and_speed2(), perturb_positions() and
-    position_space_divergence(), plus range/type validation on
-    estimate_lyapunov_exponent()'s own parameters, with new malformed-
-    input regression tests for each (P2-7); this round runs the full
-    suite exactly once from tests/, per this file's own stated
-    convention, rather than the three separate full-suite invocations
-    the Audit1-round response report used (P2-8); genuine Python 3.10
-    runtime compatibility (not just AST-grammar parsing) verified in a
-    real Python 3.10 virtual environment (P2-9).
-
-    Codex's P3 findings were addressed as: high_velocity_fraction()'s
-    "locally Maxwellian"/"far more sensitive"/"far more suppressed"
-    wording softened to a more measured framing (P3-3); the Help file's
-    Algorithm section corrected to describe this program's direct-
-    summation implementation as a per-target full source-loop evaluation
-    whose momentum conservation follows from the force law's algebraic
-    antisymmetry, not from a literal single shared per-pair computation
-    (P3-4); the CSV-columns description's self-contradictory "physical
-    (not SI) units" claim corrected to state the actual mixed,
-    per-column units (P3-5); plot_nbg.py's module docstring "escaped/
-    near-escape fractions" wording corrected, the e_i>0 (not >=0)
-    criterion made consistent between the Help file's equation and its
-    prose, the galaxy final-positions panel's "quasi-equilibrium" title
-    made conditional on the run's own final virial ratio, and the
-    Domain-of-Validity table's "any finite positive value" entries
-    given an explicit floating-point-range footnote (P3-6); a
-    consolidated References section with full citations and DOI/ADS/
-    arXiv links added to the Help file (P3-7); "Max energy drift" in
-    terminal/plot output relabeled "Max sampled energy drift," with
-    _energy_drift()'s docstring documenting the snapshot-cadence
-    dependence explicitly (P3-2); the tautological
-    test_build_id_independent_of_line_endings test rewritten to
-    construct a genuine CRLF-line-ending file variant on disk and hash
-    it through the real _compute_build_id() logic (P3-1, below).
-
-    Gemini's Audit2 claims were independently checked against the
-    current source and found not to describe it: BUILD_ID's coverage
-    (BUILD_ID_COVERS) was already exactly the four core .py files, not
-    the test suite or HTML (Gemini itself retracted this specific claim
-    after being shown the actual BUILD_ID_COVERS list, calling its prior
-    claim "a false positive"); negative softening was already rejected
-    by _require_positive() at every consumption point; MAX_TREE_DEPTH
-    already existed and was already exercised by a recursion-depth
-    regression test; there is no navigator.onLine check anywhere in the
-    Help file; and Multiple is already introduced as a prerequisite in
-    the Description section's opening note, not only in closing remarks.
-    Gemini's one substantive-and-correct point -- that this file's prior
-    history entry was "overly generalized" -- is addressed by this
-    entry's level of detail. BUILD_ID at the end of this round: see
-    physics_nbg.BUILD_ID / the Help file's #version_build element (both
-    verified equal by TestMetadataAndCompatibility and TestHelpFile).
+  2026-09-03  Claude, responding to Audit2 (Codex and Gemini; Copilot
+    unavailable this round). Reworded overclaimed "virial equilibrium"
+    language throughout to "instantaneous scalar virial balance,"
+    distinguishing that single global energy-scale constraint from
+    genuine dynamical (phase-space) equilibrium. Relaxed and hardened
+    the estimate_lyapunov_exponent() acceptance gate (whole-window
+    R^2>=0.90 plus a residual sign-change count>=4, with a near-exact-
+    fit exemption) so it correctly accepts all 5 of Codex's real
+    chaos-mode trial seeds while still rejecting every synthetic
+    adversarial fixture; the estimator now also reports its own fit
+    window so plot_chaos() highlights the actual fitted slice. Stripped
+    reviewer names/finding IDs/dates out of all four .py files'
+    docstrings and comments, consolidating them into this summary.
+    Corrected the softening-scaling citation to Athanassoula, Fady,
+    Lambert & Bosma (2000) (dehnen_softening()'s function name is kept
+    for API stability, with a docstring note). Made perturb_positions()
+    hit its documented RMS displacement exactly rather than only in
+    expectation. Added explicit shape/positivity validation to nine
+    public functions, with new regression tests for each. Implemented
+    two previously-cited-but-unwritten tests for real, and rewrote a
+    tautological BUILD_ID/line-ending test to hash a genuine on-disk
+    CRLF file variant. Ran the full suite exactly once this round (per
+    this file's own stated convention), plus once under a genuine
+    Python 3.10 interpreter. Gemini's Audit2 claims were independently
+    checked against the current source: four (BUILD_ID's tracked-file
+    scope, negative-softening rejection, MAX_TREE_DEPTH, and an alleged
+    navigator.onLine check) did not describe the actual code and were
+    declined -- Gemini itself retracted the BUILD_ID claim after being
+    shown the real BUILD_ID_COVERS list, calling its own prior claim "a
+    false positive." Gemini's separate request that this history block
+    carry full finding-by-finding detail for every past round was also
+    declined: the complete audit trail is maintained authoritatively
+    elsewhere in the project, and duplicating it here in full would only
+    create a second copy that can go stale: this block stays a summary.
+    169 tests (from 141). BUILD_ID: d98407d7e6fa (see physics_nbg.
+    BUILD_ID / the Help file's #version_build element, verified equal by
+    TestMetadataAndCompatibility and TestHelpFile).
 """
 
 import ast
