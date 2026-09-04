@@ -275,24 +275,47 @@ HELP_FILE = "NbodyGalaxySimulator.html"
 # HTML help file (TestHelpFile) and the four executable .py modules
 # (TestModuleDiscovery) -- a reviewer name, round marker, or reference to
 # this project's own test suite is exactly as much a leak in one as the
-# other. Audit5 regression (Codex P1-3, Grok P2-1): a literal phrase
-# blacklist alone is brittle -- "regression fixtures" (a novel two-word
-# phrase not on the Audit3-era list) and a bare test-method-name reference
-# with no "TestClass." prefix (evading the original TestClass.test_method
-# regex) both slipped past the Audit4-era version of this sweep. Broadened
-# here with additional phrases and two more general regexes: one for any
+# other. A literal phrase blacklist alone is brittle -- a novel two-word
+# phrase not yet on the list, or a bare test-method-name reference with no
+# "TestClass." prefix, can slip past an earlier version of this sweep.
+# Broadened with additional phrases and several general, case-insensitive
+# regexes: one for any round-numbered reviewer marker ("Audit7", "audit 12",
+# ...) so a future round number needs no update here; one for generic
+# "prior/previous/earlier/stale/older/former VERSION/revision/release/..."
+# revision-history language (deliberately scoped to that noun, not to the
+# word "previous" alone, since "the previous integration step" and similar
+# algorithmic phrasing are legitimate and must not be flagged); one for any
 # literal path under this project's own tests/ directory (a student-facing
-# file legitimately never needs to name that path at all, in any phrasing),
+# file legitimately never needs to name that path at all, in any phrasing);
 # and one for any long, multi-word test_-prefixed identifier (real unittest
 # method names in this project are verbose, multi-clause sentences -- at
 # least 4 underscore-separated words -- unlike any ordinary CLI flag or
-# variable name a student-facing file would plausibly contain).
+# variable name a student-facing file would plausibly contain). The
+# test-name-shaped checks are run against a whitespace-collapsed copy of
+# the source (see _collapse_wrapped_identifiers()) so that splitting an
+# identifier across a line break -- e.g. a trailing underscore ending one
+# line, continued as plain letters on the next -- cannot evade them.
 LEAK_PHRASES = (
     "Claude", "Copilot", "Gemini", "Codex", "Grok",
-    "Critique", "Audit1", "Audit2", "Audit3",
-    "ChatGPT", "GPT-5", "Kickoff", "prior release",
+    "Critique", "ChatGPT", "GPT-5", "Kickoff",
     "regression test", "test suite", "test fixtures", "test fixture",
     "regression fixture", "development sweep", "seed sweep", "audit trail",
+    "reviewer", "release round",
+)
+# Any reviewer-round marker such as "Audit1", "Audit 12", or "audit6" --
+# case-insensitive and tolerant of a space before the number, so a future
+# round's number needs no change here.
+LEAK_AUDIT_ROUND_PATTERN = re.compile(r"\baudit\s*\d+\b", re.IGNORECASE)
+# Generic "what an earlier revision did" language: "a prior version",
+# "the stale revision", "an older release", etc. -- scoped to a revision
+# noun specifically (version/revision/release/build/iteration/
+# implementation) so that ordinary, legitimate algorithmic language like
+# "the previous integration step" or "an earlier snapshot" is never
+# flagged.
+LEAK_REVISION_HISTORY_PATTERN = re.compile(
+    r"\b(?:prior|previous|earlier|stale|older|former)\s+"
+    r"(?:version|revision|release|build|iteration|implementation)\b",
+    re.IGNORECASE,
 )
 # A leaked test-name reference wrapped across a comment's line break (e.g.
 # "# TestFoo.\n    # test_bar") is just as much a leak as one on a single
@@ -311,17 +334,43 @@ LEAK_TEST_PATH_PATTERN = re.compile(r"tests[\\/]test_[A-Za-z_]+\.py")
 LEAK_BARE_TEST_NAME_PATTERN = re.compile(r"\btest_(?:[a-z0-9]+_){3,}[a-z0-9]+\b")
 
 
+def _collapse_wrapped_identifiers(source):
+    """
+    Collapse a `test_...`-shaped (or `TestFoo.test_...`-shaped) identifier
+    that has been split across a line break back into one unbroken token,
+    so the test-name-shaped leak regexes below cannot be evaded merely by
+    wrapping the identifier at an underscore -- e.g. a trailing underscore
+    ending one line, continued as plain lowercase letters (optionally
+    after a comment '#' marker, or inside a docstring with no '#' at all)
+    at the start of the next line.
+    """
+    return re.sub(r"_[ \t]*\n[ \t]*(?:#[ \t]*)?", "_", source)
+
+
 def _assert_no_leaked_history(testcase, source, label):
     """Run the full leak sweep (see LEAK_PHRASES et al. above) against one
     source string, reporting failures against ``label`` (a file name)."""
     for phrase in LEAK_PHRASES:
         with testcase.subTest(name=label, phrase=phrase):
             testcase.assertNotIn(phrase, source)
+    with testcase.subTest(name=label, phrase="Audit<N> round marker"):
+        match = LEAK_AUDIT_ROUND_PATTERN.search(source)
+        testcase.assertIsNone(
+            match, f"found a round marker {match.group(0)!r} in {label}" if match else None
+        )
+    with testcase.subTest(name=label, phrase="prior/previous/stale revision language"):
+        match = LEAK_REVISION_HISTORY_PATTERN.search(source)
+        testcase.assertIsNone(
+            match,
+            f"found revision-history language {match.group(0)!r} in {label}"
+            if match else None,
+        )
+    collapsed = _collapse_wrapped_identifiers(source)
     with testcase.subTest(name=label, phrase="TestClass.test_method"):
-        testcase.assertIsNone(LEAK_TEST_METHOD_PATTERN.search(source))
+        testcase.assertIsNone(LEAK_TEST_METHOD_PATTERN.search(collapsed))
     with testcase.subTest(name=label, phrase="tests/test_*.py path"):
         testcase.assertIsNone(LEAK_TEST_PATH_PATTERN.search(source))
-    match = LEAK_BARE_TEST_NAME_PATTERN.search(source)
+    match = LEAK_BARE_TEST_NAME_PATTERN.search(collapsed)
     with testcase.subTest(name=label, phrase="bare multi-word test_ identifier"):
         testcase.assertIsNone(
             match,
@@ -465,6 +514,21 @@ def has_class(node, class_name):
 
 def nodes_by_id(root, element_id):
     return descendants(root, lambda node: node.attrs.get("id") == element_id)
+
+
+# unittest's default `-v` output prints each test's ID followed by the
+# FIRST LINE of its docstring (TestCase.shortDescription()). With 252 test
+# methods, many carrying a deliberately detailed development-history first
+# line (this file's own permitted audit log -- see the module docstring
+# above), that makes a full, passing `-v` run's console output far longer
+# than it needs to be, and makes a genuinely new warning or an unexpected
+# line in the middle of it much easier to miss. This suppresses only what
+# the verbose runner PRINTS next to each test name; it does not remove,
+# shorten, or move a single docstring in the source below, so the full
+# audit history stays exactly where a developer reading this file would
+# expect to find it, and a FAILURE/ERROR block's own traceback (the actual
+# diagnostic that matters when something breaks) is unaffected.
+unittest.TestCase.shortDescription = lambda self: None
 
 
 # ======================================================================
@@ -904,18 +968,36 @@ class TestDirectAcceleration(unittest.TestCase):
         """
         Audit4 regression (Codex P1-3): the companion overflow direction
         to the softening case above -- a sufficiently large (but finite)
-        PAIR SEPARATION can overflow (r^2+eps^2)^1.5 to inf for just that
-        pair while the rest of a run's pairs stay numerically normal, so
-        checking only the FINAL summed virial force term would miss a
-        silently-dropped pair. Must raise a clear ValueError, with no
-        RuntimeWarning escaping first.
+        PAIR SEPARATION can overflow (r^2+eps^2)^1.5 (or even r^2 itself)
+        to inf for just that pair while the rest of a run's pairs stay
+        numerically normal.
+
+        Updated for Codex Audit6 P1-2 (additional evidence): this exact
+        case's true Wvir (~-6.6743e-111, since r >> eps here) is itself
+        comfortably representable, and virial_force_term() now computes
+        it directly (see its own comment on the scale-safe per-pair
+        ratio fallback) rather than raising -- raising here was itself
+        the defect Audit6 identified, not the correct behavior. A
+        genuinely non-representable pair (masses large enough that even
+        the true G*m1*m2/r term overflows) still raises a clean
+        ValueError, with no RuntimeWarning escaping first, which is what
+        this regression actually guards against.
         """
         positions = np.array([[0.0, 0.0, 0.0], [1.0e160, 0.0, 0.0]])
         masses = np.array([1.0e30, 1.0e30])
         with warnings.catch_warnings():
             warnings.simplefilter("error")
+            w = phys.virial_force_term(positions, masses, 1.0)
+        expected = -phys.G * 1.0e30 * 1.0e30 / 1.0e160
+        self.assertTrue(math.isfinite(w))
+        self.assertAlmostEqual(w / expected, 1.0, places=6)
+
+        positions_huge = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        masses_huge = np.array([1.0e300, 1.0e300])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             with self.assertRaises(ValueError):
-                phys.virial_force_term(positions, masses, 1.0)
+                phys.virial_force_term(positions_huge, masses_huge, 1.0)
 
     def test_extreme_radius_raises_clean_valueerror_not_raw_overflowerror(self):
         """
@@ -927,9 +1009,23 @@ class TestDirectAcceleration(unittest.TestCase):
         convention (and main.py's CLI boundary) does not expect, which
         would otherwise surface as a bare traceback instead of the clean,
         explanatory message every other invalid-input case gets.
+
+        Updated for Codex Audit6 P1-2 (additional evidence):
+        crossing_time(1e130, 1e30) is no longer one of the "clean
+        rejection" cases below -- its true value (~1.224e185) is itself
+        comfortably representable, and crossing_time() now computes it
+        directly (see crossing_time()'s own docstring/comment for the
+        r*sqrt(r/(G*M)) reordering that avoids ever forming the
+        non-representable intermediate r**3) rather than raising. A
+        genuinely non-representable radius (1e300) still raises a clean
+        ValueError, never a raw OverflowError, which is what this
+        regression actually guards against.
         """
+        t = phys.crossing_time(1.0e130, 1.0e30)
+        self.assertTrue(math.isfinite(t))
+        self.assertAlmostEqual(t / 1.2240443065e185, 1.0, places=8)
         with self.assertRaises(ValueError):
-            phys.crossing_time(1.0e130, 1.0e30)
+            phys.crossing_time(1.0e300, 1.0e30)
         with self.assertRaises(ValueError):
             phys.run_galaxy(n_bodies=10, total_mass_msun=1.0e5,
                              radius_pc=1.0e150, n_freefall=1.0,
@@ -986,6 +1082,34 @@ class TestDirectAcceleration(unittest.TestCase):
         self.assertAlmostEqual(acc[1, 0] / -expected, 1.0, places=6)
         self.assertEqual(acc[0, 1], 0.0)
         self.assertEqual(acc[0, 2], 0.0)
+
+    def test_tiny_separation_tiny_mass_tiny_softening_computes_correct_force(self):
+        """
+        Audit6 regression (Codex P1-2, case 6): positions [[0,0,0],
+        [1e-160,0,0]], masses [nextafter(0,1), nextafter(0,1)],
+        softening=1e-160 has a true, ordinary-sized (not subnormal)
+        acceleration magnitude of about 1.165857274945395e-14 m/s^2 --
+        but direct summation previously raised ValueError (r2 stays a
+        tiny, representable denormal, yet r2**-1.5 itself overflows to
+        inf) and the tree method leaked a raw, uncaught OverflowError
+        (Python's float ** goes through C's pow(), which signals ERANGE
+        rather than saturating to inf the way plain multiplication
+        does). Both methods must now agree and compute the true value.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e-160, 0.0, 0.0]])
+        masses = np.array([np.nextafter(0.0, 1.0), np.nextafter(0.0, 1.0)])
+        softening = 1.0e-160
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc_direct = phys.compute_accelerations_direct(positions, masses,
+                                                             softening)
+            acc_tree = phys.compute_accelerations_tree(positions, masses, 0.5,
+                                                         softening)
+        mag_direct = math.sqrt(float(np.sum(acc_direct[0] ** 2)))
+        mag_tree = math.sqrt(float(np.sum(acc_tree[0] ** 2)))
+        self.assertAlmostEqual(mag_direct / 1.165857274945395e-14, 1.0, places=8)
+        self.assertAlmostEqual(mag_tree / 1.165857274945395e-14, 1.0, places=8)
+        np.testing.assert_allclose(acc_tree, acc_direct, rtol=1e-8, atol=0.0)
 
     def test_partial_pair_overflow_no_longer_raises_partial_answers_are_correct(self):
         """
@@ -1121,7 +1245,8 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
         pos_list = [tuple(p) for p in positions]
         mass_list = list(masses)
         acc_tree = np.array([
-            phys._node_acceleration(leaf, i, pos_list, mass_list, 0.5, eps2)
+            phys._node_acceleration(leaf, i, pos_list, mass_list, 0.5, eps2,
+                                     softening)
             for i in range(4)
         ])
         acc_direct = phys.compute_accelerations_direct(positions, masses,
@@ -1522,6 +1647,108 @@ class TestEnergyMomentumAndVirial(unittest.TestCase):
         np.testing.assert_allclose(com, expected, rtol=1e-12)
         np.testing.assert_allclose(com_v, expected, rtol=1e-12)
 
+    def test_smallest_representable_mass_kinetic_energy_stays_representable(self):
+        """
+        Audit6 regression (Codex P1-2, case 1): velocities
+        [[1e160,0,0],[0,0,0]] with masses [nextafter(0,1), 1] used to
+        silently return 0.0 J instead of the true, representable
+        2.4703282292062327e-4 J, because 0.5*mass alone underflows to
+        exactly 0.0 for a mass at the smallest representable positive
+        float64 -- before the enormous velocity ever gets a chance to
+        rescale it back into range. This is a stricter case than the
+        Audit5 case-E companion test above (mass=1e-100): here the mass
+        is at the actual representable floor, so no sequential
+        reordering of the multiplication can save it -- only combining
+        every factor (0.5, mass, v, v) before any intermediate is
+        rounded can (see kinetic_energy()'s own comment).
+        """
+        velocities = np.array([[1.0e160, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        masses = np.array([np.nextafter(0.0, 1.0), 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            ke = phys.kinetic_energy(velocities, masses)
+        self.assertTrue(math.isfinite(ke))
+        self.assertAlmostEqual(ke / 2.4703282292062327e-4, 1.0, places=10)
+
+    def test_extreme_mass_ratio_center_of_mass_keeps_small_representable_term(self):
+        """
+        Audit6 regression (Codex P1-2, case 2): masses [1e308, 1e-100]
+        at positions [[0,0,0],[1e308,0,0]] used to return [0,0,0]
+        instead of the true, representable approximately-[1e-100,0,0]:
+        normalizing masses by their maximum (center_of_mass()'s existing
+        fix for the Audit5 case-F sum-of-masses overflow) makes the
+        SECOND body's weight (1e-100/1e308 = 1e-408) underflow to
+        exactly 0.0 on its own, discarding its contribution even though
+        weight * position is representable once the compensating large
+        position is folded in before any intermediate is rounded.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e308, 0.0, 0.0]])
+        masses = np.array([1.0e308, 1.0e-100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            com = phys.center_of_mass(positions, masses)
+        self.assertTrue(np.all(np.isfinite(com)))
+        self.assertAlmostEqual(com[0] / 1.0e-100, 1.0, places=6)
+        self.assertEqual(com[1], 0.0)
+        self.assertEqual(com[2], 0.0)
+
+    def test_virial_ratio_of_extreme_equal_magnitude_terms_is_exact(self):
+        """
+        Audit6 regression (Codex P1-2, case 7): virial_ratio(1e308,
+        -1e308) has an exact true value of 2 (kinetic and |work_term|
+        are equal), but multiplying kinetic by 2 BEFORE dividing by
+        |work_term| overflows 2*1e308 to +inf first, silently returning
+        inf instead of 2. Dividing first keeps the intermediate near 1.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            q = phys.virial_ratio(1.0e308, -1.0e308)
+        self.assertEqual(q, 2.0)
+
+    def test_specific_energies_raises_instead_of_returning_inf(self):
+        """
+        Audit6 regression (Codex P1-2, case 5): a squared speed of order
+        1e400 (from a velocity of order 1e200) genuinely overflows
+        float64 -- the true specific energy is NOT representable here,
+        unlike several of the other cases in this section -- but
+        specific_energies()/_phi_and_speed2() previously had no
+        finiteness check on speed2 at all, silently returning inf
+        instead of raising the same clean ValueError every other
+        non-representable case in this module gets.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        velocities = np.array([[1.0e200, 0.0, 0.0], [-1.0e200, 0.0, 0.0]])
+        masses = np.array([1.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with self.assertRaises(ValueError):
+                phys.specific_energies(positions, velocities, masses, 0.1)
+            with self.assertRaises(ValueError):
+                phys.high_velocity_fraction(positions, velocities, masses, 0.1)
+            with self.assertRaises(ValueError):
+                phys.identify_unbound(positions, velocities, masses, 0.1)
+
+    def test_theta_zero_octree_extreme_masses_emit_no_warning_and_match_direct(self):
+        """
+        Audit6 regression (Codex P1-2, case 8): building an octree over
+        positions x=[0, 1e307, -1e308] with masses [8e307, 8e307, 1e-100]
+        used to emit repeated RuntimeWarnings from forming mass*position
+        directly during octree center-of-mass construction, even though
+        every individual acceleration here is finite and representable.
+        theta=0 forces a full descent to the leaves (see
+        compute_accelerations_tree's docstring), so it must match direct
+        summation exactly, with no warning escaping first.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e307, 0.0, 0.0],
+                               [-1.0e308, 0.0, 0.0]])
+        masses = np.array([8.0e307, 8.0e307, 1.0e-100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc_direct = phys.compute_accelerations_direct(positions, masses, 1.0)
+            acc_tree0 = phys.compute_accelerations_tree(positions, masses, 0.0, 1.0)
+        self.assertTrue(np.all(np.isfinite(acc_direct)))
+        np.testing.assert_allclose(acc_tree0, acc_direct, rtol=1e-9, atol=0.0)
+
 
 # ======================================================================
 class TestLagrangianRadii(unittest.TestCase):
@@ -1589,6 +1816,40 @@ class TestLagrangianRadii(unittest.TestCase):
             r50 = phys.half_mass_radius(positions, masses, center=[0.0, 0.0, 0.0])
         self.assertTrue(math.isfinite(r50))
         self.assertAlmostEqual(r50 / 1.0e200, 1.0, places=10)
+
+    def test_extreme_masses_do_not_overflow_the_cumulative_mass_fraction(self):
+        """
+        Audit6 regression (Codex P1-2, case 3): center_of_mass() already
+        normalizes by the largest mass before summing (see its own
+        docstring) to avoid overflowing sum(masses), but lagrangian_radii()
+        summed the SAME kind of extreme masses via a raw np.cumsum(masses)
+        for its cumulative-fraction calculation, which is exactly as
+        prone to overflow. For positions x=[0, 10, 100] with every mass
+        equal to 1e308, np.cumsum(masses) overflows to inf at the second
+        element (2e308 > double-precision max), corrupting every
+        downstream fraction -- every requested radius came back as
+        36.6666667 regardless of which fraction was asked for, with
+        RuntimeWarnings for overflow-in-accumulate and invalid-value-in-
+        divide. cum_frac is a RATIO of cumulative sums, so scaling every
+        mass by the same positive constant first (mirroring
+        center_of_mass()'s pattern) leaves it mathematically unchanged
+        while keeping every partial sum representable.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [100.0, 0.0, 0.0]])
+        masses = np.array([1.0e308, 1.0e308, 1.0e308])
+        fractions = [0.2, 0.34, 0.5, 0.67, 1.0]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            # Default (mass-weighted) center, not an explicit origin -- with
+            # equal extreme masses that center sits at x=36.6667, which is
+            # what produces Codex's exact expected radii below.
+            radii = phys.lagrangian_radii(positions, masses, fractions)
+        expected = dict(zip(fractions,
+                             [26.6666667, 36.6666667, 36.6666667,
+                              63.3333333, 63.3333333]))
+        for frac, exp in expected.items():
+            self.assertTrue(math.isfinite(radii[frac]))
+            self.assertAlmostEqual(radii[frac], exp, places=5)
 
 
 # ======================================================================
@@ -2467,6 +2728,32 @@ class TestChaosDiagnostics(unittest.TestCase):
         a = rng.normal(size=(20, 3))
         self.assertAlmostEqual(float(phys.position_space_divergence(a, a)), 0.0)
 
+    def test_position_space_divergence_extreme_separation_stays_representable(self):
+        """
+        Audit6 regression (Codex P1-2, case 4): two centered
+        configurations whose true RMS per-body separation is exactly
+        1e200 used to return inf (equal masses / no masses) or nan (two
+        extreme masses), because diff2 = sum((a-b)**2) squares each
+        component before ever normalizing by scale -- (2e200)**2 alone
+        overflows float64 even though the true RMS is comfortably
+        representable. Both the no-masses and extreme-mass-ratio paths
+        must now compute a finite, correctly-scaled result.
+        """
+        a = np.array([[1.0e200, 0.0, 0.0], [-1.0e200, 0.0, 0.0]])
+        b = np.array([[-1.0e200, 0.0, 0.0], [1.0e200, 0.0, 0.0]])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            d_no_mass = phys.position_space_divergence(a, b)
+            d_equal_mass = phys.position_space_divergence(a, b, masses=np.array([1.0, 1.0]))
+            d_extreme_mass = phys.position_space_divergence(
+                a, b, masses=np.array([1.0e300, 1.0e-300])
+            )
+        self.assertTrue(math.isfinite(d_no_mass))
+        self.assertTrue(math.isfinite(d_equal_mass))
+        self.assertTrue(math.isfinite(d_extreme_mass))
+        self.assertAlmostEqual(d_no_mass / 2.0e200, 1.0, places=8)
+        self.assertAlmostEqual(d_equal_mass / 2.0e200, 1.0, places=8)
+
     def test_position_space_divergence_removes_coherent_com_translation(self):
         """
         Audit1 regression (Codex P1-6.2, Copilot A12, 2026-09-03): with
@@ -3161,31 +3448,43 @@ class TestMetamorphicProperties(unittest.TestCase):
     def test_late_time_window_stats_ignore_history_before_the_window(self):
         """
         Metamorphic property for the galaxy quasi-equilibrium classifier
-        (see run_galaxy() / _late_time_window_stats()): the late window is
-        defined purely by elapsed time relative to the run's own start and
-        end, so any snapshot strictly BEFORE the window's start time is
-        free to take on any value whatsoever -- however noisy, however far
-        from equilibrium -- without moving the verdict at all, as long as
-        the run's overall start/end times and the window's own contents
-        are unchanged. This is the precise sense in which "settled" means
-        a property of the tail alone, not of the run's full history --
-        distinct from (and complementary to) the target_snapshots
-        sampling-density invariance already tested elsewhere.
+        (see run_galaxy() / _late_time_window_stats()): the late window's
+        OWN range/drift/mean-Q statistics are defined purely by elapsed
+        time relative to the run's own start and end, so any snapshot
+        strictly BEFORE the window's start time is free to take on any
+        value whatsoever -- however noisy -- WITHOUT moving those window
+        statistics at all, as long as the window's own contents and the
+        run's overall start/end times are unchanged.
+
+        This is deliberately NOT full history-independence any more
+        (Codex Audit6 P1-1): whether the run is settled ALSO depends on
+        whether a genuine collapse-to-a-global-minimum occurred before the
+        window, with a material rebound -- so both cases below are built
+        to share the same global minimum (2.0, well below the window's own
+        ~10 plateau), reached before the window starts, so that fact is
+        held fixed across the metamorphic variation and only its
+        surrounding presentation (a single point vs. a densely sampled,
+        noisy trajectory reaching the same minimum) differs.
         """
         late_t = np.linspace(80.0, 100.0, 20)
         rng = np.random.default_rng(600)
         late_r50 = 10.0 + rng.normal(scale=0.05, size=late_t.size)
         late_q = 1.0 + rng.normal(scale=0.02, size=late_t.size)
 
-        # Case A: minimal early history -- a single wildly different point.
-        t_a = np.concatenate([[0.0], late_t])
-        r50_a = np.concatenate([[500.0], late_r50])
-        q_a = np.concatenate([[9.0], late_q])
+        # Case A: minimal early history -- one point establishing a large
+        # starting radius, and one establishing the collapse minimum.
+        t_a = np.concatenate([[0.0, 40.0], late_t])
+        r50_a = np.concatenate([[500.0, 2.0], late_r50])
+        q_a = np.concatenate([[9.0, 0.3], late_q])
 
-        # Case B: a densely sampled, extremely noisy early history spanning
-        # the SAME [t[0], window_start) interval.
+        # Case B: a densely sampled, noisy early history spanning the SAME
+        # [t[0], window_start) interval, bounded strictly above the same
+        # collapse minimum except for one point forced to hit it exactly,
+        # so both cases share an identical global minimum value and both
+        # reach it before the window starts.
         early_t = np.linspace(0.0, 79.0, 200)
-        early_r50 = rng.uniform(1.0, 5000.0, size=early_t.size)
+        early_r50 = rng.uniform(2.5, 5000.0, size=early_t.size)
+        early_r50[100] = 2.0
         early_q = rng.uniform(-50.0, 50.0, size=early_t.size)
         t_b = np.concatenate([early_t, late_t])
         r50_b = np.concatenate([early_r50, late_r50])
@@ -3196,12 +3495,18 @@ class TestMetamorphicProperties(unittest.TestCase):
 
         self.assertEqual(out_a["n_samples"], late_t.size)
         self.assertEqual(out_b["n_samples"], late_t.size)
+        self.assertTrue(out_a["collapse_before_window"])
+        self.assertTrue(out_b["collapse_before_window"])
         self.assertTrue(out_a["is_settled"])
         self.assertTrue(out_b["is_settled"])
         self.assertAlmostEqual(out_a["r50_fractional_range"],
                                 out_b["r50_fractional_range"])
         self.assertAlmostEqual(out_a["virial_ratio_range"],
                                 out_b["virial_ratio_range"])
+        self.assertAlmostEqual(out_a["r50_rebound_ratio"],
+                                out_b["r50_rebound_ratio"])
+        self.assertAlmostEqual(out_a["r50_relative_drift"],
+                                out_b["r50_relative_drift"])
 
     def test_late_time_window_stats_calm_history_does_not_rescue_an_unsettled_tail(self):
         """The symmetric case: a genuinely unsettled late window (large r50
@@ -3229,6 +3534,84 @@ class TestMetamorphicProperties(unittest.TestCase):
         self.assertGreater(out["virial_ratio_range"],
                             phys.LATE_WINDOW_Q_RANGE_THRESHOLD)
 
+    def test_late_time_window_stats_rejects_monotonic_expansion_despite_narrow_range(self):
+        """
+        Audit6 regression (Codex P1-1, synthetic isolation A): a half-mass
+        radius that increases MONOTONICALLY by about 28% over the late
+        window (a fitted relative drift of ~0.2456) while Q sits exactly
+        at 1 throughout used to report is_settled=True, because the old
+        rule only checked r50_fractional_range (0.2456, under its own 0.30
+        threshold) and virial_ratio_range (0 for a constant Q) -- neither
+        of which detects a sustained one-way trend. This drift value is
+        deliberately chosen to fall UNDER the old range threshold but OVER
+        LATE_WINDOW_DRIFT_THRESHOLD, so only an explicit drift gate (not a
+        tighter range threshold) can catch it.
+        """
+        late_t = np.linspace(80.0, 100.0, 20)
+        late_r50 = np.linspace(10.0, 12.8, 20)  # +28% over the window
+        late_q = np.full(20, 1.0)               # Q sits exactly at the virial condition
+
+        # A genuine collapse to a global minimum well before the window,
+        # so this case isolates the drift gate specifically -- the run
+        # would otherwise pass every other criterion.
+        early_t = np.linspace(0.0, 79.0, 50)
+        early_r50 = np.concatenate([
+            np.linspace(50.0, 5.0, 25), np.linspace(5.0, 9.9, 25)
+        ])
+        early_q = np.full(50, 1.0)
+
+        t = np.concatenate([early_t, late_t])
+        r50 = np.concatenate([early_r50, late_r50])
+        q = np.concatenate([early_q, late_q])
+
+        out = phys._late_time_window_stats(t, r50, q)
+        self.assertTrue(out["collapse_before_window"])
+        self.assertAlmostEqual(out["r50_relative_drift"], 0.245614, places=5)
+        self.assertLessEqual(out["r50_fractional_range"],
+                              phys.LATE_WINDOW_R50_RANGE_THRESHOLD)
+        self.assertGreater(abs(out["r50_relative_drift"]),
+                            phys.LATE_WINDOW_DRIFT_THRESHOLD)
+        self.assertFalse(
+            out["is_settled"],
+            "a monotonically-expanding half-mass radius must not be "
+            "reported as settled merely because its range-to-mean ratio "
+            "is narrow"
+        )
+
+    def test_late_time_window_stats_rejects_constant_q_far_from_virial_balance(self):
+        """
+        Audit6 regression (Codex P1-1, synthetic isolation B): r50 exactly
+        constant and Q exactly 5 (not 1) throughout the late window used
+        to report is_settled=True, because both range statistics are
+        zero. The scalar virial condition is Q=1, not "Q holds still at
+        any level" -- a quiet series around Q=5 is not a virialized
+        equilibrium, and only an explicit Q-centering gate catches this.
+        """
+        late_t = np.linspace(80.0, 100.0, 20)
+        late_r50 = np.full(20, 10.0)
+        late_q = np.full(20, 5.0)
+
+        early_t = np.linspace(0.0, 79.0, 50)
+        early_r50 = np.linspace(50.0, 10.0, 50)  # genuine prior collapse
+        early_q = np.full(50, 5.0)
+
+        t = np.concatenate([early_t, late_t])
+        r50 = np.concatenate([early_r50, late_r50])
+        q = np.concatenate([early_q, late_q])
+
+        out = phys._late_time_window_stats(t, r50, q)
+        self.assertEqual(out["virial_ratio_range"], 0.0)
+        self.assertEqual(out["r50_fractional_range"], 0.0)
+        self.assertAlmostEqual(out["virial_ratio_mean_deviation"], 4.0)
+        self.assertGreater(out["virial_ratio_mean_deviation"],
+                            phys.LATE_WINDOW_Q_CENTER_TOLERANCE)
+        self.assertFalse(
+            out["is_settled"],
+            "Q=5 constant is not a virialized equilibrium (the virial "
+            "condition is Q=1); a narrow range around the wrong level "
+            "must not be reported as settled"
+        )
+
 
 # ======================================================================
 class TestRunModes(unittest.TestCase):
@@ -3241,18 +3624,29 @@ class TestRunModes(unittest.TestCase):
         command produces 1-3 instantaneously-unbound bodies (out of 60)
         "across seeds 0-4" -- and the prior (Audit4) regression here
         tested only the two favorable endpoint seeds (0 and 4), both of
-        which happen to give a nonzero count. Codex Audit5 found seed=1
-        gives exactly 0, contradicting that promise outright; this
-        program's own docs and this test have since been reworded to a
-        stochastic tendency ("some seeds show none at all") rather than a
-        guaranteed range for every named seed. This regression checks
-        that reworded claim against real integrations of three of the
-        named seeds -- 0 and 4 (nonzero) and 1 (the zero counterexample)
-        -- confirming genuine seed-to-seed variance exists rather than
-        asserting a fixed outcome for any one seed. Deliberately slower
-        than the rest of this class (three real N=60, ~11,000-step
-        integrations) because a fast toy-sized substitute would not
-        actually validate the command students are told to run.
+        which happened to give a nonzero count at the time. Codex Audit5
+        found a seed giving exactly 0, contradicting that promise
+        outright; this program's own docs and this test have since been
+        reworded to a stochastic tendency ("some seeds show none at
+        all") rather than a guaranteed range for every named seed.
+
+        This regression checks that reworded claim by real integration
+        of three named seeds and asserting the PROPERTY the docs now
+        claim -- at least one of them shows zero instantaneously-unbound
+        bodies and at least one shows a nonzero count -- rather than
+        pinning any one seed to a specific outcome. Deliberately not
+        pinned to which seed lands on which side: this is a chaotic,
+        long (~11,000-step) integration, so a legitimate, purely
+        numerical change elsewhere in the force calculation (a bugfix
+        that alters rounding in the last bit or two of an ordinary,
+        non-extreme intermediate value, say) can and does flip which
+        of these three seeds ends up on which side of zero, without
+        the underlying claim -- genuine seed-to-seed variance exists,
+        and it is not always zero -- ever becoming false. Deliberately
+        slower than the rest of this class (three real N=60,
+        ~11,000-step integrations) because a fast toy-sized substitute
+        would not actually validate the command students are told to
+        run.
         """
         counts = {}
         for seed in (0, 1, 4):
@@ -3262,17 +3656,51 @@ class TestRunModes(unittest.TestCase):
                 target_snapshots=30, seed=seed,
             )
             counts[seed] = r["summary"]["n_unbound_final"]
-        self.assertEqual(
-            counts.get(1), 0,
-            f"expected seed=1 to reproduce Codex Audit5's zero-unbound "
-            f"counterexample for this exact command; got {counts!r}."
+        self.assertTrue(
+            any(c == 0 for c in counts.values()),
+            f"expected at least one of seeds 0/1/4 to show zero "
+            f"instantaneously-unbound bodies, demonstrating that a "
+            f"nonzero count is not guaranteed for every seed; "
+            f"got {counts!r}."
         )
         self.assertTrue(
-            any(c >= 1 for seed, c in counts.items() if seed != 1),
-            f"expected at least one of seeds 0/4 to show a nonzero "
+            any(c >= 1 for c in counts.values()),
+            f"expected at least one of seeds 0/1/4 to show a nonzero "
             f"instantaneously-unbound count, demonstrating this is a "
             f"seed-dependent tendency, not always zero either; got {counts!r}."
         )
+
+    def test_exp11_radius_and_radial_velocity_formula_matches_hand_calculation(self):
+        """
+        Companion to the seed-dependent-outcome regression above: EXP-11's
+        Python-API snippet in the Help file extends the original
+        specific_energies() check with a center-relative radius and a
+        radial velocity v_r = (r . v) / |r|, computed from
+        phys.center_of_mass() plus a plain dot product and norm, so a
+        student can tell a persistently outward-moving escaper from a
+        body that is only instantaneously flagged positive-energy. This
+        checks that exact formula against a hand-computable three-body
+        example rather than only exercising it inside the slow, real
+        N=60 cluster run above.
+        """
+        positions = np.array([[1.0, 0.0, 0.0], [10.0, 0.0, 0.0], [-10.0, 0.0, 0.0]])
+        velocities = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [-3.0, 0.0, 4.0]])
+        masses = np.array([1.0, 1.0, 1.0])
+        com = phys.center_of_mass(positions, masses)
+        np.testing.assert_allclose(com, [1.0 / 3.0, 0.0, 0.0], atol=1e-12)
+        rel_pos = positions - com
+        radius = np.linalg.norm(rel_pos, axis=1)
+        v_radial = np.einsum("ij,ij->i", rel_pos, velocities) / radius
+        # com = (1/3, 0, 0). Body 1: rel=(29/3,0,0), |rel|=29/3,
+        # v=(1,2,0) -> v_r = (rel . v)/|rel| = (29/3*1)/(29/3) = 1.0 (only
+        # the x component survives the dot product, and rel_x and |rel|
+        # share a sign, so v_r reduces to v_x exactly). Body 2:
+        # rel=(-31/3,0,0), |rel|=31/3, v=(-3,0,4) ->
+        # v_r = ((-31/3)*(-3))/(31/3) = 3.0, by the same reasoning.
+        self.assertAlmostEqual(radius[1], 29.0 / 3.0)
+        self.assertAlmostEqual(radius[2], 31.0 / 3.0)
+        self.assertAlmostEqual(v_radial[1], 1.0)
+        self.assertAlmostEqual(v_radial[2], 3.0)
 
     def test_run_cluster_summary_and_reproducibility(self):
         kwargs = dict(n_bodies=30, total_mass_msun=1e2, scale_radius_pc=1.0,
@@ -3374,10 +3802,86 @@ class TestRunModes(unittest.TestCase):
         self.assertLessEqual(s["r50_minimum_pc"], s["r50_initial_pc"])
         for key in ("late_window_fraction", "late_window_start_myr",
                     "late_window_n_snapshots", "late_window_has_enough_snapshots",
+                    "late_window_collapse_before_window", "late_r50_rebound_ratio",
                     "late_r50_fractional_range", "late_r50_relative_drift",
                     "late_r50_linear_slope_pc_per_myr", "late_virial_ratio_range",
+                    "late_virial_ratio_mean", "late_virial_ratio_mean_deviation",
                     "late_window_is_settled"):
             self.assertIn(key, s)
+
+    def test_run_galaxy_still_collapsing_run_is_not_reported_settled(self):
+        """
+        Audit6 regression (Codex P1-1, exact real-integration
+        counterexample): run_galaxy(n_bodies=20, total_mass_msun=1e5,
+        radius_pc=50, n_freefall=0.75, steps_per_freefall=40,
+        method="direct", target_snapshots=150, seed=0) has not even
+        reached one free-fall time -- its smallest half-mass radius over
+        the WHOLE run occurs at the final integration step (still
+        collapsing, no overshoot or rebound at all) and its final virial
+        ratio (~0.518) sits far below the Q=1 balance condition. The old
+        classifier reported late_window_is_settled=True for this run
+        (and driver_nbg.py's terminal narrative printed "the sphere
+        collapses, overshoots, and rebounds" despite every one of those
+        three things being false of this trajectory). This is the exact
+        parameter set Codex used to demonstrate the defect; the
+        redesigned classifier must reject it on at least the
+        collapse-before-window gate.
+        """
+        r = phys.run_galaxy(n_bodies=20, total_mass_msun=1.0e5, radius_pc=50.0,
+                             n_freefall=0.75, steps_per_freefall=40,
+                             method="direct", target_snapshots=150, seed=0)
+        s = r["summary"]
+        # Reproduce Codex's own reported diagnostics for this exact command
+        # (confirms this test is exercising the same counterexample, not a
+        # drifted approximation of it).
+        self.assertAlmostEqual(s["r50_minimum_pc"], s["r50_final_pc"], places=4)
+        self.assertAlmostEqual(s["time_of_deepest_collapse_myr"],
+                                s["total_time_myr"], places=4)
+        self.assertLess(s["virial_ratio_final"], 0.6)
+        # The actual fix under test: this must no longer be "settled."
+        self.assertFalse(s["late_window_collapse_before_window"])
+        self.assertFalse(s["late_window_is_settled"])
+        # And driver_nbg's terminal narrative must not print the classic
+        # scenario language for it.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            driver._print_galaxy_summary(s)
+        text = buf.getvalue()
+        self.assertNotIn("collapses, overshoots", text)
+        self.assertNotIn("consistent with the classic cold-collapse", text)
+
+    def test_run_galaxy_settling_verdict_and_fields_invariant_to_target_snapshots_30_vs_50(self):
+        """
+        Audit6 regression (Codex P1-1, exact real-integration
+        counterexample): the same physical parameters (N=20, M=1e5 Msun,
+        R=50 pc, n_freefall=1, steps_per_freefall=80, method="direct",
+        seed=1) at target_snapshots=30 and target_snapshots=50 integrate
+        BIT-FOR-BIT IDENTICAL trajectories (confirmed below) but, under
+        the old sparse-snapshot-driven classifier, gave opposite
+        late_window_is_settled verdicts (True at 30, False at 50) purely
+        from how many diagnostic snapshots happened to be stored. Since
+        the late-time verdict is now computed from the dense,
+        every-integration-step series (independent of target_snapshots),
+        both runs below must agree on every late-window field, not just
+        happen to agree on the final is_settled boolean.
+        """
+        kwargs = dict(n_bodies=20, total_mass_msun=1.0e5, radius_pc=50.0,
+                      n_freefall=1.0, steps_per_freefall=80, method="direct",
+                      seed=1)
+        r30 = phys.run_galaxy(target_snapshots=30, **kwargs)
+        r50 = phys.run_galaxy(target_snapshots=50, **kwargs)
+        self.assertTrue(np.array_equal(r30["positions"][-1], r50["positions"][-1]))
+        self.assertTrue(np.array_equal(r30["velocities"][-1], r50["velocities"][-1]))
+        s30, s50 = r30["summary"], r50["summary"]
+        for key in ("late_window_is_settled", "late_window_collapse_before_window",
+                    "late_r50_rebound_ratio", "late_r50_fractional_range",
+                    "late_r50_relative_drift", "late_virial_ratio_range",
+                    "late_virial_ratio_mean", "late_virial_ratio_mean_deviation"):
+            va, vb = s30[key], s50[key]
+            if isinstance(va, bool):
+                self.assertEqual(va, vb, msg=f"{key} must be target_snapshots-invariant")
+            else:
+                self.assertAlmostEqual(va, vb, msg=f"{key} must be target_snapshots-invariant")
 
     def test_run_chaos_summary_fields(self):
         r = phys.run_chaos(n_bodies=15, total_mass_msun=1e2, scale_radius_pc=1.0,
@@ -3782,6 +4286,64 @@ class TestCli(unittest.TestCase):
         self.assertIn("galaxy", result.stdout)
         self.assertIn("chaos", result.stdout)
 
+    def test_no_plot_csv_only_run_succeeds_with_matplotlib_and_plot_nbg_blocked(self):
+        """
+        The lazy-import design (driver_nbg.py imports plot_nbg, and
+        through it matplotlib, only inside the code path that actually
+        draws a figure) makes a plot-free, CSV-only run
+        (`--no_plot --csvdir`) usable with NumPy alone. That guarantee
+        had only been checked by a manual, one-off probe, not by an
+        automated regression -- so a future top-level `import
+        matplotlib` or `import plot_nbg` added anywhere on this code
+        path (main.py, driver_nbg.py, or physics_nbg.py) could silently
+        reintroduce the dependency with nothing here to catch it.
+
+        This installs a sys.meta_path finder that raises ImportError for
+        `matplotlib` (and any submodule) and for `plot_nbg`, in a real
+        subprocess, BEFORE main.py is even loaded -- so it blocks the
+        import unconditionally, regardless of whether Matplotlib happens
+        to already be installed in this environment (which merely
+        checking for its absence would not exercise). The documented
+        no-plot CLI path must still complete successfully and write its
+        CSV, with neither module ever appearing in sys.modules.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            script = (
+                "import sys\n"
+                "class _Blocker:\n"
+                "    def find_spec(self, name, path, target=None):\n"
+                "        if name == 'matplotlib' or name.startswith('matplotlib.') "
+                "or name == 'plot_nbg':\n"
+                "            raise ImportError(f'blocked for this test: {name}')\n"
+                "        return None\n"
+                "sys.meta_path.insert(0, _Blocker())\n"
+                "sys.argv = ['main.py', '--mode', 'cluster', '--n_bodies', '20', "
+                "'--n_relax', '0.1', '--steps_per_crossing', '8', "
+                "'--target_snapshots', '10', '--seed', '1', "
+                "'--no_plot', '--csvdir', " + repr(tmp) + "]\n"
+                "import runpy\n"
+                "runpy.run_path('main.py', run_name='__main__')\n"
+                "assert 'matplotlib' not in sys.modules, "
+                "'matplotlib was imported despite the blocker'\n"
+                "assert 'plot_nbg' not in sys.modules, "
+                "'plot_nbg was imported despite the blocker'\n"
+                "print('IMPORT_BLOCK_OK')\n"
+            )
+            environment = os.environ.copy()
+            environment["MPLBACKEND"] = "Agg"
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=MODULE_DIR, env=environment,
+                capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("IMPORT_BLOCK_OK", result.stdout)
+            csv_files = list(Path(tmp).glob("*.csv"))
+            self.assertEqual(
+                len(csv_files), 1,
+                f"expected exactly one CSV written to {tmp}; found {csv_files!r}"
+            )
+
     def test_galaxy_summary_narrative_is_conditional_on_actual_run(self):
         """
         Audit3 regression (Codex P2-4): the terminal narrative for
@@ -3839,8 +4401,10 @@ class TestCli(unittest.TestCase):
             virial_ratio_at_deepest_collapse=3.0,
             late_window_fraction=0.2, late_window_start_myr=0.8,
             late_window_n_snapshots=6, late_window_has_enough_snapshots=True,
+            late_window_collapse_before_window=True, late_r50_rebound_ratio=4.0,
             late_r50_fractional_range=0.05, late_r50_relative_drift=0.01,
             late_r50_linear_slope_pc_per_myr=0.02, late_virial_ratio_range=0.1,
+            late_virial_ratio_mean=1.02, late_virial_ratio_mean_deviation=0.02,
             late_window_is_settled=True,
             max_fractional_energy_drift=0.001, warnings=[],
         )
@@ -3921,23 +4485,24 @@ class TestCli(unittest.TestCase):
 
     def test_galaxy_quasi_equilibrium_verdict_is_invariant_to_target_snapshots(self):
         """
-        Audit5 regression (Codex P1-2): Codex's own reproduction ran the
-        SAME physical parameters (N=20, M=1e5 Msun, R=50pc, n_freefall=1.9,
+        Audit5 regression (Codex P1-2), re-verified and extended for
+        Codex Audit6 P1-1: Codex's own reproduction ran the SAME physical
+        parameters (N=20, M=1e5 Msun, R=50pc, n_freefall=1.9,
         steps_per_freefall=80, method=direct, seed=1) at target_snapshots=2
         and target_snapshots=150 and got bit-for-bit identical final
         positions/velocities but a DIFFERENT printed quasi-equilibrium
-        verdict, purely because the sparser run's stored snapshots missed
-        the true r50 minimum. The redesigned criterion cannot make the
-        sparse run's has_enough_snapshots flag come out True (it genuinely
-        stored only one late-window snapshot here, and reporting "too few
-        to assess" for that is the CORRECT, honest answer -- not a defect
-        to paper over) -- what it must fix is that neither snapshot
-        density ever asserts sustained quasi-equilibrium (is_settled) for
-        a trajectory that, per the densely-sampled run, plainly has not
-        settled (r50 more than doubles and Q swings by more than 4 over
-        the late window): the sparse run must decline to classify rather
-        than default to the opposite, equally wrong, "yes it's settled"
-        answer the old three-condition rule could produce.
+        verdict, purely because the sparser run's STORED snapshots missed
+        the true r50 minimum. Audit6 went further: even the Audit5 fix's
+        own "too few late snapshots to assess" fallback was itself still
+        snapshot-density dependent (a sparse run could report "too few"
+        while a dense run of the identical trajectory reported a real
+        verdict, which is a different kind of target_snapshots-dependent
+        OUTCOME even though neither one claims settled). The late-time
+        verdict is now computed entirely from the dense, every-integration
+        -step diagnostic series (see integrate_nbody()'s track_dense
+        option), which does not depend on target_snapshots at all -- so
+        both runs below must reach the IDENTICAL verdict on every late-
+        window field, not just agree that neither is settled.
         """
         kwargs = dict(n_bodies=20, total_mass_msun=1.0e5, radius_pc=50.0,
                       n_freefall=1.9, steps_per_freefall=80, method="direct",
@@ -3947,16 +4512,35 @@ class TestCli(unittest.TestCase):
         self.assertEqual(sparse["r50_final_pc"], dense["r50_final_pc"])
         self.assertFalse(dense["late_window_is_settled"])
         self.assertFalse(sparse["late_window_is_settled"])
-        self.assertFalse(sparse["late_window_has_enough_snapshots"])
+        self.assertTrue(sparse["late_window_has_enough_snapshots"])
+        self.assertTrue(dense["late_window_has_enough_snapshots"])
+        for key in ("late_window_collapse_before_window", "late_r50_rebound_ratio",
+                    "late_r50_fractional_range", "late_r50_relative_drift",
+                    "late_virial_ratio_range", "late_virial_ratio_mean",
+                    "late_virial_ratio_mean_deviation"):
+            self.assertAlmostEqual(
+                sparse[key] if isinstance(sparse[key], float) else float(sparse[key]),
+                dense[key] if isinstance(dense[key], float) else float(dense[key]),
+                msg=f"{key} must be target_snapshots-invariant"
+            )
 
     def test_galaxy_narrative_declines_on_real_short_run_with_sparse_snapshots(self):
         """
         Real-integration regression (not a hand-built summary dict, per
         Audit5's requirement to validate this scientific decision against
-        an actual run rather than only synthetic dictionaries): a short,
-        sparsely-sampled cold-collapse run must not have its terminal
-        narrative claim (or deny) sustained quasi-equilibrium -- it must
-        say plainly that too few late-time snapshots were stored.
+        an actual run rather than only synthetic dictionaries), updated
+        for Codex Audit6 P1-1: this exact command (N=20, n_freefall=2.0,
+        method=direct, seed=0) at target_snapshots=2 is the still-mid-
+        relaxation case used to calibrate this classifier -- its dense,
+        every-step diagnostics show it has NOT settled (see
+        test_galaxy_quasi_equilibrium_verdict_is_invariant_to_target_
+        snapshots below for the full numeric picture), so the terminal
+        narrative must decline the "collapses, overshoots" claim. Unlike
+        the Audit5 version of this test, it must NOT say "too few to"
+        (that branch now only fires when the dense diagnostic series
+        itself is too short to populate the window, which storing only 2
+        snapshots no longer causes -- the late-time verdict is computed
+        from every integration step, not from what was stored).
         """
         with tempfile.TemporaryDirectory() as tmp:
             result = run_cli(["--mode", "galaxy", "--n_bodies", "20",
@@ -3967,7 +4551,8 @@ class TestCli(unittest.TestCase):
                                "--seed", "0", "--no_plot", "--csvdir", tmp])
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("collapses, overshoots", result.stdout)
-        self.assertIn("too few to", result.stdout)
+        self.assertNotIn("too few to", result.stdout)
+        self.assertIn("too much drift and/or oscillation", result.stdout)
 
     def _cluster_summary(self, **overrides):
         """A minimal, valid cluster-mode summary dict for exercising

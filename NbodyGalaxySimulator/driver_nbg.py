@@ -24,11 +24,9 @@ import physics_nbg as phys
 
 # plot_nbg.py (and, through it, matplotlib.pyplot) is imported lazily,
 # inside run_mode() itself, only on the code path that actually draws a
-# figure -- NOT unconditionally at module load. A prior version imported
-# it here unconditionally, which meant Matplotlib had to be installed and
-# importable even for a plot-free, CSV-only run (`--no_plot --csvdir`):
-# NumPy alone is genuinely sufficient for that case, and this program
-# should not demand a plotting library it never calls into.
+# figure -- NOT unconditionally at module load. This keeps a plot-free,
+# CSV-only run (`--no_plot --csvdir`) usable with NumPy alone: this
+# program should not demand a plotting library it never calls into.
 
 MODES = ("cluster", "galaxy", "chaos")
 
@@ -389,18 +387,26 @@ def _print_galaxy_summary(s):
     # The quasi-equilibrium CLAIM itself (as opposed to the purely factual
     # "reached a sampled minimum, then expanded" statement above) is
     # decided ONLY by whether the run's own LATE-TIME window (the final
-    # late_window_fraction of its elapsed time, by time -- not by snapshot
-    # count) has actually settled: bounded fractional variation in the
-    # half-mass radius, a small secular trend in it, and a bounded range in
-    # the virial ratio over that same window -- never from a single final
-    # value, a single earlier sampled minimum, or the sample count used to
-    # store the run's diagnostics. Two runs with bit-for-bit identical
-    # integrated trajectories that differ only in target_snapshots reach
-    # the same verdict here, because the late window is defined by ELAPSED
-    # TIME and requires a minimum number of stored samples in it before any
-    # claim is made at all (see _late_time_window_stats()'s docstring) --
-    # a run whose diagnostics were stored too sparsely to populate that
-    # window is reported as such, not silently classified either way.
+    # late_window_fraction of its elapsed time, by time, computed from a
+    # dense every-integration-step diagnostic series -- not from however
+    # many snapshots happened to be stored for plotting/CSV output) has
+    # actually settled: a genuine collapse-then-material-rebound (the
+    # run's global half-mass-radius minimum must fall before this window
+    # and the window's own mean radius must sit measurably above it, not
+    # merely be a flat tail parked at its deepest point), a virial ratio
+    # centered near the Q=1 balance condition (not merely quiet at some
+    # other level), a bounded secular trend, and bounded fractional/range
+    # variation in both the half-mass radius and the virial ratio over
+    # that window -- never from a single final value, a single earlier
+    # sampled minimum, or the sample count used to store the run's
+    # diagnostics. Two runs with bit-for-bit identical integrated
+    # trajectories that differ only in target_snapshots reach the same
+    # verdict here, because every one of these criteria is computed from
+    # the dense per-step series, which does not depend on target_snapshots
+    # at all (see _late_time_window_stats()'s docstring) -- a run whose
+    # dense diagnostics do not even populate the window with enough points
+    # (only possible for a very short run) is reported as such, not
+    # silently classified either way.
     started_cold = s["virial_ratio_initial"] <= 0.3
     late_ok = s["late_window_has_enough_snapshots"]
     late_settled = s["late_window_is_settled"]
@@ -435,7 +441,13 @@ def _print_galaxy_summary(s):
               f"{s['late_window_start_myr']:.3g} Myr onward), the half-mass radius")
         print(f"  varied by only {s['late_r50_fractional_range']:.1%} of its own mean "
               f"value and the virial ratio's range was {s['late_virial_ratio_range']:.3f}")
-        print("  -- both within this program's documented 'modest' bounds. This is")
+        print("  -- both within this program's documented 'modest' bounds. The window's")
+        print(f"  own mean half-mass radius is {s['late_r50_rebound_ratio']:.2g}x the "
+              f"run's global minimum -- a genuine, material rebound, not a flat tail")
+        print(f"  sitting at its deepest point -- and its mean virial ratio is "
+              f"{s['late_virial_ratio_mean']:.3f}, within "
+              f"{s['late_virial_ratio_mean_deviation']:.3f} of the Q=1 virial-balance")
+        print("  condition, not merely quiet at some other level. This is")
         print("  consistent with the classic cold-collapse scenario having settled")
         print("  into a quasi-equilibrium remnant through 'violent relaxation'")
         print("  (Lynden-Bell 1967): the sphere collapses, overshoots, and rebounds,")
@@ -454,6 +466,12 @@ def _print_galaxy_summary(s):
               "of its own mean value")
         print(f"  (linear trend {s['late_r50_linear_slope_pc_per_myr']:+.4g} pc/Myr) "
               f"and a virial-ratio range of {s['late_virial_ratio_range']:.3f}.")
+        print(f"  Collapse-before-window: {s['late_window_collapse_before_window']}  "
+              f"(rebound ratio {s['late_r50_rebound_ratio']:.2g}x the sampled global "
+              "minimum,")
+        print(f"  needs >= {phys.LATE_WINDOW_REBOUND_RATIO:.2g}x); mean virial ratio "
+              f"{s['late_virial_ratio_mean']:.3f} (needs within "
+              f"{phys.LATE_WINDOW_Q_CENTER_TOLERANCE:.2f} of Q=1).")
         print("  This is too much drift and/or oscillation to call this run settled:")
         print("  it has NOT yet shown a genuine, sustained quasi-equilibrium remnant --")
         print("  it may still be mid-collapse, mid-rebound, or ringing through a")
@@ -545,11 +563,11 @@ def run(mode="cluster",
     if not isinstance(no_plot, bool):
         raise TypeError(f"no_plot must be a bool; got {type(no_plot).__name__}.")
     # --outdir controls only the figure that no_plot skips, so accepting
-    # no_plot=True with outdir set but csvdir unset let a run "succeed"
-    # while producing no artifact at all (a confirmed CLI run printed
-    # "skipping figure generation despite --outdir being set" and left
-    # the directory empty). csvdir is the only artifact no_plot leaves
-    # available, so it is what is now required.
+    # no_plot=True with outdir set but csvdir unset would let a run
+    # "succeed" while producing no artifact at all: no figure (skipped by
+    # no_plot) and no CSV (csvdir unset) leaves nothing written to disk.
+    # csvdir is the only artifact no_plot leaves available, so it is
+    # required whenever no_plot is set.
     if no_plot and csvdir is None:
         raise ValueError("no_plot requires --csvdir: --outdir alone controls "
                           "only the plot that no_plot skips, so a run with "

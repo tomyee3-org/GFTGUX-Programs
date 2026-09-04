@@ -12,7 +12,9 @@ Three calculations share one program, chosen with --mode:
              remnant -- a toy galaxy-formation experiment
     chaos    two indistinguishably close realizations of the same cluster,
              integrated identically, whose separation is tracked to
-             measure the Lyapunov time of gravitational N-body motion
+             produce a finite-time ESTIMATE of the e-folding (Lyapunov)
+             growth rate of gravitational N-body motion, not a certified
+             asymptotic value
 
 All three share one engine: a Barnes-Hut octree (Barnes & Hut 1986) or,
 for comparison, direct O(N^2) summation, with Plummer-softened gravity and
@@ -86,7 +88,8 @@ def parse_args():
         description=(
             "Barnes-Hut tree-code N-body gravity with Plummer softening: "
             "star-cluster evaporation, cold-collapse galaxy formation, and "
-            "the Lyapunov-time sensitivity of gravitational N-body motion. "
+            "a finite-time estimate of the Lyapunov (exponential-"
+            "divergence) sensitivity of gravitational N-body motion. "
             "Assumes Multiple (direct-summation few-body gravity) as a "
             "prerequisite."
         ),
@@ -202,14 +205,13 @@ def main():
             dpi=args.dpi, lw=args.lw,
         )
     except (ValueError, RuntimeError, OSError, OverflowError) as exc:
-        # physics_nbg.py validates the
-        # specific extreme-input overflow paths that were found to raise
-        # a raw OverflowError (see crossing_time() and run_galaxy()) by
-        # converting them into ValueError with an explanatory message
-        # before they can propagate this far. OverflowError is caught
-        # here too, as a last-resort safety net, so that a parameter
-        # combination not covered by one of those specific checks still
-        # exits cleanly with a message instead of a raw traceback.
+        # physics_nbg.py converts the numerical-overflow conditions it
+        # anticipates (see crossing_time() and run_galaxy()) into
+        # ValueError with an explanatory message before they can
+        # propagate this far. OverflowError is caught here too, as a
+        # last-resort safety net, so that a parameter combination not
+        # covered by one of those specific checks still exits cleanly
+        # with a message instead of a raw traceback.
         raise SystemExit(f"NbodyGalaxySimulator: {exc}") from exc
 
 

@@ -341,7 +341,7 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
                     color=C_FIT, lw=lw, linestyle="--", alpha=0.9,
                     label="fitted line")
         has_fit_overlay = True
-        ax.set_title(f"Divergence (Lyapunov time = "
+        ax.set_title(f"Divergence (estimated Lyapunov time = "
                      f"{s['lyapunov_time_myr']:.3g} Myr = "
                      f"{s['lyapunov_time_over_t_cross']:.2g} $t_\\mathrm{{cross}}$)")
     else:
