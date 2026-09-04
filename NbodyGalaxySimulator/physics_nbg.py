@@ -45,16 +45,18 @@ approximation (so cost grows as N log N rather than N^2).
 """
 
 import math
+import warnings
+
 import numpy as np
 
 MODEL_VERSION = "1.0.0"
 
 
-#: The exact source files this build identifier covers: a documentation-only
-#: change, a sample-output file, or an edit to the test suite does not change
-#: this value -- only the four core program modules listed here do.  Exposed
-#: so callers can determine precisely what BUILD_ID covers without
-#: duplicating this list.
+#: The exact source files this build identifier covers: only the four core
+#: program modules listed here change this value -- a change to any other
+#: file in the project (documentation, a sample-output file, or anything
+#: else outside this list) leaves it unchanged.  Exposed so callers can
+#: determine precisely what BUILD_ID covers without duplicating this list.
 BUILD_ID_COVERS = (
     "physics_nbg.py",
     "driver_nbg.py",
@@ -134,8 +136,7 @@ MAX_SNAPSHOTS = 4_000
 # MAX_BODIES=5000 combined with MAX_SNAPSHOTS=4000 could allocate about
 # 5000*4000*3*8*2 bytes (position + velocity) = 960 MB for a single run,
 # which is not a practical memory-safety guard for a teaching tool on its
-# own. This caps the product directly; see integrate_nbody() and
-# TestLeapfrogAndIntegration.test_integrate_nbody_rejects_excessive_body_snapshot_product.
+# own. This caps the product directly; see integrate_nbody().
 MAX_BODY_SNAPSHOT_PRODUCT = 2_000_000
 MIN_THETA = 0.0
 MAX_THETA = 2.0
@@ -247,27 +248,78 @@ def _as_finite_array(values, name, shape=None):
     return array
 
 
+def _require_snapshot(values, name, n_bodies=None):
+    """
+    Validate a single (n_bodies, 3) position/velocity snapshot array.
+
+    Every public helper that takes one physical snapshot (as opposed to a
+    whole (n_snapshot, n_bodies, 3) history -- position_space_divergence()
+    is the one function that intentionally supports both, and validates
+    its own shape separately) must reject anything that is not exactly
+    two-dimensional with a trailing axis of 3, not merely check the
+    leading axis against ``masses``. Without this, a caller could pass a
+    2-D array meant to hold N one-component or two-component "vectors"
+    (e.g. an (N, 2) array) and have it silently broadcast or index against
+    the wrong axis, producing a normal-looking but physically meaningless
+    number instead of an error.
+    """
+    array = _as_finite_array(values, name)
+    if array.ndim != 2 or array.shape[1] != 3:
+        raise ValueError(
+            f"{name} must have shape (n_bodies, 3); got {array.shape}."
+        )
+    if n_bodies is not None and array.shape[0] != n_bodies:
+        raise ValueError(
+            f"{name} must have one row per body ({n_bodies}); got shape "
+            f"{array.shape}."
+        )
+    return array
+
+
+def _require_masses(masses, n_bodies=None, allow_nonpositive=False):
+    """
+    Validate a masses array: exactly one-dimensional, non-empty, and (by
+    default) strictly positive in every entry. Every public helper that
+    takes a ``masses`` argument shares this one check, so a two-
+    dimensional masses array (which would otherwise silently broadcast
+    into a wrong-shaped intermediate result) or a bare scalar mass raises
+    a clear ValueError here rather than a confusing failure deep inside
+    whichever helper happened to be called. ``allow_nonpositive`` exists
+    for callers that need shape/dtype validation on a masses-like array
+    whose entries are not required to be strictly positive masses.
+    """
+    array = _as_finite_array(masses, "masses")
+    if array.ndim != 1:
+        raise ValueError(f"masses must be one-dimensional; got shape {array.shape}.")
+    if array.size == 0:
+        raise ValueError("masses must contain at least one body; got an empty array.")
+    if n_bodies is not None and array.shape[0] != n_bodies:
+        raise ValueError(
+            f"masses must have one entry per body ({n_bodies}); got shape "
+            f"{array.shape}."
+        )
+    if not allow_nonpositive and np.any(array <= 0.0):
+        raise ValueError("all masses must be strictly positive.")
+    return array
+
+
 def _validate_state(positions, velocities, masses):
     """Validate a full N-body state; return (positions, velocities, masses)."""
-    masses = _as_finite_array(masses, "masses")
-    if masses.ndim != 1:
-        raise ValueError("masses must be one-dimensional.")
+    masses = _require_masses(masses)
     n = masses.size
     if n < MIN_BODIES:
         raise ValueError(f"at least {MIN_BODIES} bodies are required; got {n}.")
     if n > MAX_BODIES:
         raise ValueError(f"at most {MAX_BODIES:,} bodies are supported; got {n:,}.")
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
-    positions = _as_finite_array(positions, "positions", shape=(n, 3))
-    velocities = _as_finite_array(velocities, "velocities", shape=(n, 3))
+    positions = _require_snapshot(positions, "positions", n_bodies=n)
+    velocities = _require_snapshot(velocities, "velocities", n_bodies=n)
     return positions, velocities, masses
 
 
 # ======================================================================
 # Softened Newtonian gravity
 # ======================================================================
-def dehnen_softening(n_bodies, scale_radius):
+def athanassoula_softening(n_bodies, scale_radius):
     """
     Approximately optimal Plummer-softening length for an N-body
     realization of a smooth density profile with characteristic radius
@@ -284,9 +336,8 @@ def dehnen_softening(n_bodies, scale_radius):
     roughly-uniform mass distributions, not only the exact Plummer
     profile it was fit to; treat it as a well-motivated starting point to
     experiment around, not a precise result for every initial condition
-    this program can generate. The function is named ``dehnen_softening``
-    for API stability across this program's revisions; the name predates
-    this citation correction and does not reflect a claim of authorship.
+    this program can generate. The function is named after the citation
+    above.
     """
     n_bodies = _require_int("n_bodies", n_bodies, lo=1)
     scale_radius = _require_positive("scale_radius", scale_radius)
@@ -310,24 +361,46 @@ def compute_accelerations_direct(positions, masses, softening):
     excessive memory footprint; it is still O(N^2) in time; see
     DIRECT_METHOD_WARN_BODIES.
     """
-    positions = _as_finite_array(positions, "positions")
-    masses = _as_finite_array(masses, "masses")
+    masses = _require_masses(masses)
     n = masses.size
-    if positions.shape != (n, 3):
-        raise ValueError(
-            f"positions must have shape ({n}, 3) to match masses; got "
-            f"{positions.shape}."
-        )
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
+    positions = _require_snapshot(positions, "positions", n_bodies=n)
     softening = _require_positive("softening", softening)
-    eps2 = softening * softening
+    # For a sufficiently large (but individually
+    # finite) softening_pc, softening*softening can silently overflow to
+    # inf. Unchecked, that makes every (r^2 + eps^2)^(-3/2) term evaluate
+    # to exactly 0.0 -- finite, not nan or inf, so it would NOT be caught
+    # by a downstream np.isfinite() postcondition check on the resulting
+    # accelerations -- silently zeroing out all gravity while still
+    # reporting a "successful" run. Caught explicitly here instead, at
+    # the one place the overflow actually originates.
+    eps2 = _require_positive("softening**2", softening * softening)
 
     acc = np.zeros_like(positions)
     for i in range(n):
         d = positions - positions[i]              # (n, 3), points i -> all
         r2 = np.einsum("ij,ij->i", d, d) + eps2
-        inv_r3 = r2 ** (-1.5)
+        # Same silent-corruption risk as eps2
+        # above, from the position-separation side instead -- a
+        # sufficiently large (but individually finite) separation can
+        # overflow r2 to inf, making that one source's inv_r3 exactly
+        # 0.0 rather than nan/inf, which the isfinite(acc) postcondition
+        # below would not catch if other sources for body i stayed
+        # normal (their finite contributions would still sum to
+        # something finite, just silently missing this one source's
+        # force). Checked per-source here instead.
+        if not np.all(np.isfinite(r2)):
+            raise ValueError(
+                "the direct-summation force denominator overflowed; "
+                "check that positions are physically reasonable."
+            )
+        # r2 is finite here (just checked above), but for an extremely
+        # small (though still positive and finite) softening, r2**(-1.5)
+        # can itself overflow to inf for a near-coincident pair -- a
+        # genuine overflow, but one the isfinite(acc) postcondition below
+        # already catches; over='ignore' only silences numpy's redundant
+        # RuntimeWarning for that same, already-handled case.
+        with np.errstate(over="ignore"):
+            inv_r3 = r2 ** (-1.5)
         inv_r3[i] = 0.0                            # exclude self term
         acc[i] = G * np.sum((masses * inv_r3)[:, None] * d, axis=0)
 
@@ -369,6 +442,36 @@ def _build_octree(positions, masses, indices, center, half_size, depth):
     node.mass = total_mass
     com = (sub_mass[:, None] * sub_pos).sum(axis=0) / total_mass
     node.comx, node.comy, node.comz = float(com[0]), float(com[1]), float(com[2])
+
+    if depth >= MAX_TREE_DEPTH and len(indices) > 1:
+        # This branch is reached only when MAX_TREE_DEPTH levels of octant
+        # subdivision still could not separate every body into its own
+        # cell -- i.e. two or more bodies are so close together (often
+        # exactly or near-exactly coincident) that floating-point-precision
+        # subdivision has run out of resolution, forcing this multi-body
+        # "bucket" leaf. This is a warning, not an error: _node_acceleration()
+        # still evaluates every body in a leaf INDIVIDUALLY (looping over
+        # node.indices and summing each one's own softened pairwise force,
+        # exactly as compute_accelerations_direct() would for the same
+        # bodies -- see below), so no force detail is actually lost; what
+        # is lost is the octree's usual O(log N) traversal benefit for
+        # these particular bodies, and the warning exists so that a
+        # genuine severe coordinate overlap does not otherwise pass with
+        # no visible signal to a student debugging an extreme-parameter
+        # run.
+        warnings.warn(
+            f"build_octree: {len(indices)} bodies could not be separated "
+            f"after {MAX_TREE_DEPTH} levels of octree subdivision (they are "
+            "at or extremely near the same position) and were placed "
+            "together in one 'bucket' leaf node; the tree walk still "
+            "evaluates each of their forces individually and exactly "
+            "(the same softened pairwise force direct summation would "
+            "give), not as a combined monopole, so no force accuracy is "
+            "lost -- only the usual octree traversal speedup for these "
+            "particular bodies.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
     if len(indices) <= 1 or depth >= MAX_TREE_DEPTH:
         node.is_leaf = True
@@ -414,14 +517,9 @@ def build_octree(positions, masses):
     the softened numerator (x_j - x_i) also vanishes between coincident
     bodies (see compute_accelerations_direct).
     """
-    positions = _as_finite_array(positions, "positions")
-    masses = _as_finite_array(masses, "masses")
+    masses = _require_masses(masses)
     n = masses.size
-    if positions.shape != (n, 3):
-        raise ValueError(
-            f"positions must have shape ({n}, 3) to match masses; got "
-            f"{positions.shape}."
-        )
+    positions = _require_snapshot(positions, "positions", n_bodies=n)
     lo = positions.min(axis=0)
     hi = positions.max(axis=0)
     center = tuple((0.5 * (lo + hi)).tolist())
@@ -466,21 +564,23 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2):
         dx, dy, dz = node.comx - xi, node.comy - yi, node.comz - zi
         dist2 = dx * dx + dy * dy + dz * dz
         size = 2.0 * node.half_size
-        # An internal node containing body i's own position must never be
-        # accepted as a monopole, however small its opening angle appears
-        # -- accepting it would fold body i's own mass and position into
-        # the node's mass/center-of-mass and apply a spurious self-force.
-        # Node bounds are exact octree-construction cubes (see
-        # _build_octree), so a simple axis-aligned containment test
-        # against this node's own GEOMETRIC center (cx, cy, cz -- NOT its
-        # mass-weighted comx/comy/comz, which need not lie inside the cube
-        # at all) and half_size is exact, not approximate; a contained
-        # body forces descent into the children regardless of theta. See
-        # TestOctreeAndTreeAcceleration.
-        # test_target_containing_node_is_never_accepted_as_monopole for a
-        # regression case (an 8-body adversarial configuration) that
-        # would otherwise produce a large, spurious relative acceleration
-        # error at theta in [0.7, 1.0].
+        # Self-force containment: an internal node containing body i's own
+        # position must never be accepted as a monopole, however small its
+        # opening angle appears -- accepting it would fold body i's own
+        # mass and position into the node's mass/center-of-mass and apply
+        # a spurious self-force (in the direct-summation path, the
+        # equivalent i==j term is excluded explicitly by index instead;
+        # see compute_accelerations_direct()). Node bounds are exact
+        # octree-construction cubes (see _build_octree), so a simple
+        # axis-aligned containment test against this node's own GEOMETRIC
+        # center (cx, cy, cz -- NOT its mass-weighted comx/comy/comz,
+        # which need not lie inside the cube at all) and half_size is
+        # exact, not approximate; a contained body forces descent into the
+        # children regardless of theta -- an adversarial configuration
+        # that relies on this (a body placed so a naive opening-angle-only
+        # check would otherwise accept a node containing it) would
+        # otherwise produce a large, spurious relative acceleration error
+        # at theta in [0.7, 1.0].
         contains_i = (abs(node.cx - xi) <= node.half_size
                       and abs(node.cy - yi) <= node.half_size
                       and abs(node.cz - zi) <= node.half_size)
@@ -524,7 +624,15 @@ def compute_accelerations_tree(positions, masses, theta, softening):
         raise ValueError("all masses must be strictly positive.")
     theta = _require_theta(theta)
     softening = _require_positive("softening", softening)
-    eps2 = softening * softening
+    # For a sufficiently large (but individually
+    # finite) softening_pc, softening*softening can silently overflow to
+    # inf. Unchecked, that makes every (r^2 + eps^2)^(-3/2) term evaluate
+    # to exactly 0.0 -- finite, not nan or inf, so it would NOT be caught
+    # by a downstream np.isfinite() postcondition check on the resulting
+    # accelerations -- silently zeroing out all gravity while still
+    # reporting a "successful" run. Caught explicitly here instead, at
+    # the one place the overflow actually originates.
+    eps2 = _require_positive("softening**2", softening * softening)
 
     root = build_octree(positions, masses)
     n = masses.size
@@ -563,16 +671,8 @@ def compute_accelerations(positions, masses, softening, method="tree", theta=0.5
 # diagnostics -- never the other way around.
 # ======================================================================
 def kinetic_energy(velocities, masses):
-    velocities = _as_finite_array(velocities, "velocities")
-    masses = _as_finite_array(masses, "masses")
-    if masses.shape[0] != velocities.shape[0]:
-        raise ValueError(
-            "masses must have one entry per body, matching "
-            f"velocities.shape[0] = {velocities.shape[0]}; got shape "
-            f"{masses.shape}."
-        )
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
+    masses = _require_masses(masses)
+    velocities = _require_snapshot(velocities, "velocities", n_bodies=masses.size)
     return float(0.5 * np.sum(masses * np.einsum("ij,ij->i", velocities, velocities)))
 
 
@@ -588,18 +688,18 @@ def potential_energy(positions, masses, softening):
     It is NOT, by itself, the virial-theorem quantity once softening is
     nonzero -- see virial_force_term().
     """
-    positions = _as_finite_array(positions, "positions")
-    masses = _as_finite_array(masses, "masses")
-    if masses.shape[0] != positions.shape[0]:
-        raise ValueError(
-            "masses must have one entry per body, matching "
-            f"positions.shape[0] = {positions.shape[0]}; got shape "
-            f"{masses.shape}."
-        )
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
+    masses = _require_masses(masses)
+    positions = _require_snapshot(positions, "positions", n_bodies=masses.size)
     softening = _require_positive("softening", softening)
-    eps2 = softening * softening
+    # For a sufficiently large (but individually
+    # finite) softening_pc, softening*softening can silently overflow to
+    # inf. Unchecked, that makes every (r^2 + eps^2)^(-3/2) term evaluate
+    # to exactly 0.0 -- finite, not nan or inf, so it would NOT be caught
+    # by a downstream np.isfinite() postcondition check on the resulting
+    # accelerations -- silently zeroing out all gravity while still
+    # reporting a "successful" run. Caught explicitly here instead, at
+    # the one place the overflow actually originates.
+    eps2 = _require_positive("softening**2", softening * softening)
     n = masses.size
     u = 0.0
     for i in range(n - 1):
@@ -653,24 +753,44 @@ def virial_force_term(positions, masses, softening):
     plummer_sphere(), uniform_sphere() and run_cluster() for where this
     distinction matters to how their results should be described.
     """
-    positions = _as_finite_array(positions, "positions")
-    masses = _as_finite_array(masses, "masses")
-    if masses.shape[0] != positions.shape[0]:
-        raise ValueError(
-            "masses must have one entry per body, matching "
-            f"positions.shape[0] = {positions.shape[0]}; got shape "
-            f"{masses.shape}."
-        )
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
+    masses = _require_masses(masses)
+    positions = _require_snapshot(positions, "positions", n_bodies=masses.size)
     softening = _require_positive("softening", softening)
-    eps2 = softening * softening
+    # For a sufficiently large (but individually
+    # finite) softening_pc, softening*softening can silently overflow to
+    # inf. Unchecked, that makes every (r^2 + eps^2)^(-3/2) term evaluate
+    # to exactly 0.0 -- finite, not nan or inf, so it would NOT be caught
+    # by a downstream np.isfinite() postcondition check on the resulting
+    # accelerations -- silently zeroing out all gravity while still
+    # reporting a "successful" run. Caught explicitly here instead, at
+    # the one place the overflow actually originates.
+    eps2 = _require_positive("softening**2", softening * softening)
     n = masses.size
     w = 0.0
     for i in range(n - 1):
         d = positions[i + 1:] - positions[i]
         r2 = np.einsum("ij,ij->i", d, d)
-        denom = (r2 + eps2) ** 1.5
+        # over='ignore' silences numpy's RuntimeWarning for an r2
+        # extreme enough to overflow (r2+eps2)**1.5 to inf -- an
+        # expected, already-handled case: the finiteness check
+        # immediately below raises a clear ValueError for exactly this.
+        with np.errstate(over="ignore"):
+            denom = (r2 + eps2) ** 1.5
+        # For sufficiently extreme (but each
+        # individually finite) position magnitudes, denom can overflow to
+        # inf for one pair while the rest of the sum stays normal --
+        # silently contributing exactly 0.0 (not nan) for that pair's
+        # r2/denom term rather than raising. Checking only the FINAL
+        # summed w (below) would miss this: a run with enough well-
+        # behaved pairs could still sum to something finite despite one
+        # or more pairs being silently dropped. Checked per-pair here
+        # instead, at the value that actually overflows.
+        if not np.all(np.isfinite(denom)):
+            raise ValueError(
+                "virial force term overflowed (a pair separation was too "
+                "large for the softened force-law denominator to remain "
+                "finite); check that positions are physically reasonable."
+            )
         w -= G * masses[i] * np.sum(masses[i + 1:] * r2 / denom)
     if not math.isfinite(w):
         raise ValueError("virial force term overflowed.")
@@ -702,48 +822,24 @@ def center_of_mass(positions, masses):
     """
     Mass-weighted mean position, sum_i m_i x_i / sum_i m_i.
 
-    A non-positive total mass would otherwise fall through to a silent
-    0/0 division, returning [nan, nan, nan] together with a
-    RuntimeWarning rather than an actionable error -- masses are not
-    required to be positive by this function's signature alone (unlike,
-    e.g., kinetic_energy(), which does enforce it), so this checks the
-    one thing that would otherwise make the division ill-defined.
+    ``masses`` must have one strictly positive entry per body, the same
+    contract every other physical helper in this module enforces (a
+    negative individual mass is not a meaningful input for a *mass*-
+    weighted mean, even when it happens not to make the total mass
+    non-positive; see _require_masses()).
     """
-    positions = _as_finite_array(positions, "positions")
-    masses = _as_finite_array(masses, "masses")
-    if masses.shape[0] != positions.shape[0]:
-        raise ValueError(
-            "masses must have one entry per body, matching "
-            f"positions.shape[0] = {positions.shape[0]}; got shape "
-            f"{masses.shape}."
-        )
+    masses = _require_masses(masses)
+    positions = _require_snapshot(positions, "positions", n_bodies=masses.size)
     total_mass = np.sum(masses)
-    if total_mass <= 0.0:
-        raise ValueError(
-            f"total mass must be strictly positive to define a center of "
-            f"mass; got {total_mass:g}."
-        )
     return np.sum(masses[:, None] * positions, axis=0) / total_mass
 
 
 def center_of_mass_velocity(velocities, masses):
     """Mass-weighted mean velocity; see center_of_mass()'s docstring for
-    why a non-positive total mass is rejected rather than silently
-    producing NaN."""
-    velocities = _as_finite_array(velocities, "velocities")
-    masses = _as_finite_array(masses, "masses")
-    if masses.shape[0] != velocities.shape[0]:
-        raise ValueError(
-            "masses must have one entry per body, matching "
-            f"velocities.shape[0] = {velocities.shape[0]}; got shape "
-            f"{masses.shape}."
-        )
+    the masses contract this shares."""
+    masses = _require_masses(masses)
+    velocities = _require_snapshot(velocities, "velocities", n_bodies=masses.size)
     total_mass = np.sum(masses)
-    if total_mass <= 0.0:
-        raise ValueError(
-            f"total mass must be strictly positive to define a "
-            f"center-of-mass velocity; got {total_mass:g}."
-        )
     return np.sum(masses[:, None] * velocities, axis=0) / total_mass
 
 
@@ -761,16 +857,8 @@ def lagrangian_radii(positions, masses, fractions, center=None):
 
     Returns a dict {fraction: radius}. Fractions must lie in (0, 1].
     """
-    positions = _as_finite_array(positions, "positions")
-    masses = _as_finite_array(masses, "masses")
-    if masses.shape[0] != positions.shape[0]:
-        raise ValueError(
-            "masses must have one entry per body, matching "
-            f"positions.shape[0] = {positions.shape[0]}; got shape "
-            f"{masses.shape}."
-        )
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
+    masses = _require_masses(masses)
+    positions = _require_snapshot(positions, "positions", n_bodies=masses.size)
     fractions = [_require_finite("fraction", f) for f in fractions]
     for f in fractions:
         if not (0.0 < f <= 1.0):
@@ -800,20 +888,19 @@ def half_mass_radius(positions, masses, center=None):
 
 def _phi_and_speed2(positions, velocities, masses, softening):
     """Shared O(N^2) core of specific_energies() and high_velocity_fraction()."""
-    positions = _as_finite_array(positions, "positions")
-    velocities = _as_finite_array(velocities, "velocities")
-    masses = _as_finite_array(masses, "masses")
-    if masses.shape[0] != positions.shape[0] or masses.shape[0] != velocities.shape[0]:
-        raise ValueError(
-            "masses must have one entry per body, matching both "
-            f"positions.shape[0] = {positions.shape[0]} and "
-            f"velocities.shape[0] = {velocities.shape[0]}; got shape "
-            f"{masses.shape}."
-        )
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
+    masses = _require_masses(masses)
+    positions = _require_snapshot(positions, "positions", n_bodies=masses.size)
+    velocities = _require_snapshot(velocities, "velocities", n_bodies=masses.size)
     softening = _require_positive("softening", softening)
-    eps2 = softening * softening
+    # For a sufficiently large (but individually
+    # finite) softening_pc, softening*softening can silently overflow to
+    # inf. Unchecked, that makes every (r^2 + eps^2)^(-3/2) term evaluate
+    # to exactly 0.0 -- finite, not nan or inf, so it would NOT be caught
+    # by a downstream np.isfinite() postcondition check on the resulting
+    # accelerations -- silently zeroing out all gravity while still
+    # reporting a "successful" run. Caught explicitly here instead, at
+    # the one place the overflow actually originates.
+    eps2 = _require_positive("softening**2", softening * softening)
     n = masses.size
 
     pos_cm, vel_cm = recenter(positions, velocities, masses)
@@ -852,12 +939,19 @@ def high_velocity_fraction(positions, velocities, masses, softening, threshold=0
     speed distribution until individual stars cross their local escape
     speed. With the force softening this program uses to keep the
     tree/direct force evaluation numerically well-behaved (see Domain of
-    Validity in the Help file), that final crossing is suppressed more
-    than the gradual growth of this near-escape tail is, so this
-    fraction is offered as a continuously varying, more sensitive
-    diagnostic of relaxation than waiting for identify_unbound() to
-    register a positive-energy body -- not a claim that it tracks a
-    precise physical distribution, only that it responds sooner.
+    Validity in the Help file), that final crossing is suppressed --
+    and, at default parameters, this near-escape fraction is typically
+    ALSO flat at zero for the whole run, not merely a smaller but still
+    growing signal. This fraction is offered as a finer-grained, more
+    sensitive diagnostic of relaxation than waiting for
+    identify_unbound() to register a positive-energy body -- not a
+    claim that it tracks a precise physical distribution, or that it
+    grows smoothly or monotonically over a run: at finite N it is
+    itself a count divided by N, so it only takes values in steps of
+    1/N and, like n_unbound, can rise and fall from one snapshot to the
+    next as the potential evolves. Its advantage over identify_unbound()
+    is a lower detection threshold (a body approaching its escape speed
+    rather than only one that has already crossed it), not continuity.
 
     ``threshold`` must be strictly positive but is not required to be
     below 1: a value at or above 1 is not unsafe -- it always returns
@@ -893,10 +987,10 @@ def identify_unbound(positions, velocities, masses, softening):
     negative energy as the potential changes; this count is therefore
     NOT necessarily monotonically increasing over a run, and a body
     counted here is "instantaneously unbound," not a confirmed,
-    permanent escaper. Downstream summary fields (n_unbound,
-    unbound_fraction_final) and documentation are named accordingly; see
-    TestEscapersAndFastFraction.test_unbound_count_is_not_guaranteed_monotonic
-    and .test_inward_moving_positive_energy_body_is_still_flagged_unbound.
+    permanent escaper -- the count can rise and fall over the course of a
+    run rather than only accumulating. Downstream summary fields
+    (n_unbound, unbound_fraction_final) and documentation are named
+    accordingly.
     """
     return specific_energies(positions, velocities, masses, softening) > 0.0
 
@@ -914,7 +1008,17 @@ def crossing_time(half_mass_radius_m, total_mass_kg):
     """
     half_mass_radius_m = _require_positive("half_mass_radius_m", half_mass_radius_m)
     total_mass_kg = _require_positive("total_mass_kg", total_mass_kg)
-    return math.sqrt(half_mass_radius_m ** 3 / (G * total_mass_kg))
+    # Cubing via the ** operator can raise a raw,
+    # uncaught OverflowError for a sufficiently large but otherwise valid
+    # radius (Python's float.__pow__ goes through C's pow(), which signals
+    # ERANGE as OverflowError, unlike plain multiplication, which silently
+    # saturates to inf) -- multiplying out by hand never raises, so the
+    # extreme-input case is instead caught, with a clear message, by the
+    # explicit finiteness check that follows.
+    r_cubed = half_mass_radius_m * half_mass_radius_m * half_mass_radius_m
+    t_cross_squared = r_cubed / (G * total_mass_kg)
+    t_cross_squared = _require_positive("t_cross_squared", t_cross_squared)
+    return math.sqrt(t_cross_squared)
 
 
 def free_fall_time(mean_density_kg_m3):
@@ -932,12 +1036,20 @@ def relaxation_time(n_bodies, half_mass_radius_m, total_mass_kg):
     following Binney & Tremaine, "Galactic Dynamics" (2nd ed., eq. 1.38).
     The Coulomb logarithm is approximated here as ln(N); real N-body
     codes commonly use ln(0.4 N) or ln(N/2) instead, which changes the
-    result by an order-unity factor, not a scaling. Treat this as an
-    order-of-magnitude estimate: it correctly captures how relaxation
-    accelerates as N shrinks (which is why a 200-body cluster relaxes,
-    visibly, within a simulation a student can actually run, while a
-    200,000-body one for all practical purposes does not), not a precise
-    prediction for any specific realization.
+    result by an order-unity factor, not a scaling. Treat this as a
+    NOMINAL, UNSOFTENED order-of-magnitude estimate: the closed form
+    above assumes point-mass two-body encounters at arbitrarily close
+    range, exactly what this program's force softening (see
+    athanassoula_softening()) exists to suppress. It correctly captures how
+    relaxation accelerates as N shrinks (which is why a 200-body cluster
+    relaxes, visibly, within a simulation a student can actually run,
+    while a 200,000-body one for all practical purposes does not), but it
+    is not a prediction of how fast THIS program's own softened,
+    discrete realization will actually relax -- the true softened rate is
+    suppressed below this nominal value, sometimes to the point of no
+    measurable relaxation at all within a practical run length at default
+    softening (see run_cluster()'s docstring and Suggested Experiment
+    EXP-11 for the measured consequence).
     """
     n_bodies = _require_int("n_bodies", n_bodies, lo=2)
     t_cross = crossing_time(half_mass_radius_m, total_mass_kg)
@@ -999,8 +1111,7 @@ def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc, softening=None,
     readjustment transient on the order of a few crossing times can
     still remain (see run_cluster()'s docstring for how this program
     tries to separate that initial readjustment from genuine two-body
-    relaxation) -- see
-    TestInitialConditions.test_plummer_sphere_starts_at_exact_softened_virial_balance.
+    relaxation).
 
     Velocities are drawn from the exact isotropic Plummer distribution
     function f(E) ~ (-E)^(7/2) by rejection sampling q = v/v_esc(r)
@@ -1009,8 +1120,7 @@ def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc, softening=None,
     with true maximum value g(0.4714) approx 0.09221. The envelope
     constant 0.1 used below is comfortably above this true maximum
     (0.1 > 0.09221). The overall per-attempt acceptance probability is
-    integral_0^1 g(q) dq / 0.1 approx 0.4295 / 0.1 approx 43% (see
-    TestInitialConditions.test_plummer_velocity_envelope_is_a_valid_upper_bound).
+    integral_0^1 g(q) dq / 0.1 approx 0.04295 / 0.1 approx 43%.
 
     The Plummer profile's mass distribution formally extends to infinite
     radius, which is impractical to realize with a finite N-body sample
@@ -1030,7 +1140,7 @@ def plummer_sphere(n_bodies, total_mass_msun, scale_radius_pc, softening=None,
     max_radius_factor = _require_positive("max_radius_factor", max_radius_factor)
 
     a = scale_radius_pc * PC
-    softening = softening if softening is not None else dehnen_softening(n_bodies, a)
+    softening = softening if softening is not None else athanassoula_softening(n_bodies, a)
     softening = _require_positive("softening", softening)
     total_mass = total_mass_msun * M_sun
     m_body = total_mass / n_bodies
@@ -1130,7 +1240,8 @@ def uniform_sphere(n_bodies, total_mass_msun, radius_pc, virial_ratio_init=0.0,
     Q0), where Wvir0 = virial_force_term(positions, masses, softening) is
     computed from the ACTUAL discrete, Plummer-softened realization that
     will be integrated -- not the idealized continuum, unsoftened
-    self-energy W0 = -3 G M^2 / (5 R) a prior release used instead.
+    self-energy W0 = -3 G M^2 / (5 R), which differs from Wvir0 once
+    softening is nonzero (see virial_force_term()'s docstring).
 
     Two design choices, documented together because they touch the same
     few lines:
@@ -1176,7 +1287,7 @@ def uniform_sphere(n_bodies, total_mass_msun, radius_pc, virial_ratio_init=0.0,
         )
 
     r_sphere = radius_pc * PC
-    softening = softening if softening is not None else dehnen_softening(n_bodies, r_sphere)
+    softening = softening if softening is not None else athanassoula_softening(n_bodies, r_sphere)
     softening = _require_positive("softening", softening)
     total_mass = total_mass_msun * M_sun
     m_body = total_mass / n_bodies
@@ -1275,6 +1386,24 @@ def leapfrog_step(positions, velocities, masses, dt, softening,
     negate the returned velocities and re-run forward, which is
     mathematically equivalent for this reversible integrator.
     """
+    # Validate the full input state up front, via the same shape/dtype
+    # checks every other public per-snapshot helper uses (but not the
+    # MIN_BODIES/MAX_BODIES range, which is a whole-simulation policy
+    # from _validate_state()/run_*() -- this lower-level stepping
+    # function is also exercised directly, e.g. with a 2-body state, so
+    # it must not impose that stricter range), rather than relying on
+    # compute_accelerations() to catch a bad positions/velocities/masses
+    # only when accel is omitted. When a caller supplies accel (the whole
+    # point of this parameter, for a caller stepping in a loop),
+    # compute_accelerations() is never called here at all, so a wrong-
+    # shaped velocities array (silently broadcasting against a correctly-
+    # shaped accel) or a plain list (raising a raw AttributeError deep in
+    # the arithmetic below) would otherwise go uncaught until some later,
+    # more confusing failure.
+    masses = _require_masses(masses)
+    n = masses.size
+    positions = _require_snapshot(positions, "positions", n_bodies=n)
+    velocities = _require_snapshot(velocities, "velocities", n_bodies=n)
     dt = _require_positive("dt", dt)
     if accel is None:
         accel = compute_accelerations(positions, masses, softening, method, theta)
@@ -1406,6 +1535,23 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
 # ======================================================================
 # Chaos / sensitivity-to-initial-conditions diagnostics
 # ======================================================================
+#: How far the ACTUAL realized RMS displacement (after floating-point
+#: addition to the position array) is allowed to drift, as a fraction of
+#: the requested target RMS, before perturb_positions() raises rather than
+#: silently returning a degraded perturbation. Chosen empirically, sampled
+#: across 100 perturbation-offset seeds for a representative N=40, 1-pc
+#: Plummer realization: relative_perturbation=1e-16 realizes within this
+#: 10% tolerance on every sampled seed (ratio range 0.953-1.090); 1e-17 is
+#: right at the representability boundary and is only reliably (87% of
+#: seeds) rejected, not reliably accepted, at this tolerance; 3e-18 and
+#: smaller are rejected on every sampled seed. This boundary is inherently
+#: seed-dependent (the specific random offset draw interacts with each
+#: position coordinate's own floating-point resolution), so treat "roughly
+#: 1e-16 to 1e-17" as an order-of-magnitude guide to where representability
+#: starts to fail, not a guaranteed per-seed cutoff.
+_PERTURBATION_REPRESENTABILITY_TOLERANCE = 0.10
+
+
 def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
     """
     Return a copy of ``positions`` with every body's position displaced by
@@ -1424,14 +1570,31 @@ def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
     translation rather than the system's internal chaotic divergence
     (see position_space_divergence()). The whole offset array (after any
     such recentering) is then rescaled by a single overall constant so
-    that its realized RMS vector magnitude equals
+    that ITS OWN realized RMS vector magnitude equals
     ``relative_perturbation`` times the RMS radius of the configuration
     EXACTLY, not merely in expectation over the random draw -- this
     matters because the recentering step for the masses= path changes the
     realized RMS relative to the raw, uncentered draw by an amount that
     depends on N and the mass distribution, which a fixed per-component
-    sigma alone cannot correct for; see
-    TestChaosDiagnostics.test_perturbation_rms_vector_magnitude_matches_documented_value.
+    sigma alone cannot correct for.
+
+    That exact-rescale guarantee is about the offset array in isolation.
+    The value actually returned is ``positions + offset``, and floating-
+    point addition can round away part or all of a sufficiently small
+    offset once it is added to a much larger position coordinate (a
+    ``relative_perturbation`` pushed toward the position array's own
+    double-precision resolution, exactly what EXP-12 asks students to
+    explore, can do this). This function therefore RE-MEASURES the
+    achieved RMS from ``(positions + offset) - positions`` -- the actual
+    representable displacement -- rather than trusting the pre-addition
+    offset array, and raises a clear, actionable ValueError before
+    returning if that representable displacement has drifted more than
+    ``_PERTURBATION_REPRESENTABILITY_TOLERANCE`` (a fixed fraction, see
+    below) from the requested target, rather than silently returning an
+    almost-unperturbed (or exactly unperturbed) copy that a caller such as
+    run_chaos() would otherwise integrate and only fail on much later,
+    deep inside estimate_lyapunov_exponent(), with no indication that the
+    real cause was an unrepresentable perturbation request.
 
     This follows the classic gravitational N-body sensitivity experiment
     (Miller 1964, ApJ 140, 250): two realizations that start indistinguishably
@@ -1439,7 +1602,17 @@ def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
     force method, separate exponentially -- the N-body problem is chaotic
     even though the underlying dynamics are entirely deterministic.
     """
-    positions = _as_finite_array(positions, "positions")
+    # _require_snapshot(), not the generic finite-array check, so that a
+    # wrong-shaped positions array (an (N, 2) array of "vectors" that
+    # aren't 3-component, or a 1-D array with no per-body axis at all --
+    # which np.einsum's "ij,ij->i" reduction below would otherwise raise
+    # a raw, unhelpful AxisError for) is rejected here with a clear
+    # message instead.
+    positions = _require_snapshot(positions, "positions")
+    if positions.shape[0] == 0:
+        raise ValueError(
+            "positions must contain at least one body; got an empty array."
+        )
     relative_perturbation = _require_positive(
         "relative_perturbation", relative_perturbation
     )
@@ -1450,15 +1623,7 @@ def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
     rng = np.random.default_rng(seed)
     offset = rng.normal(size=positions.shape)
     if masses is not None:
-        masses = _as_finite_array(masses, "masses")
-        if masses.shape[0] != positions.shape[0]:
-            raise ValueError(
-                "masses must have one entry per body, matching "
-                f"positions.shape[0] = {positions.shape[0]}; got shape "
-                f"{masses.shape}."
-            )
-        if np.any(masses <= 0.0):
-            raise ValueError("all masses must be strictly positive.")
+        masses = _require_masses(masses, n_bodies=positions.shape[0])
         offset = offset - center_of_mass(offset, masses)
     achieved_rms = math.sqrt(float(np.mean(np.sum(offset ** 2, axis=1))))
     if achieved_rms == 0.0:
@@ -1470,7 +1635,28 @@ def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
         )
     target_rms = relative_perturbation * rms_radius
     offset = offset * (target_rms / achieved_rms)
-    return positions + offset
+
+    new_positions = positions + offset
+    realized_displacement = new_positions - positions
+    realized_rms = math.sqrt(float(np.mean(np.sum(realized_displacement ** 2, axis=1))))
+    relative_error = (
+        abs(realized_rms - target_rms) / target_rms if target_rms > 0.0 else float("inf")
+    )
+    if realized_rms == 0.0 or relative_error > _PERTURBATION_REPRESENTABILITY_TOLERANCE:
+        raise ValueError(
+            "relative_perturbation is too small to survive floating-point "
+            f"addition at this position scale: the requested RMS "
+            f"displacement is {target_rms:.6e} (position units), but "
+            f"positions + offset only realized {realized_rms:.6e} once "
+            "rounded to double precision -- more than "
+            f"{_PERTURBATION_REPRESENTABILITY_TOLERANCE:.0%} off target "
+            "(realized_rms == 0 means it vanished completely). Use a "
+            "larger relative_perturbation; this is expected once the "
+            "requested displacement approaches the position array's own "
+            "double-precision resolution (typically relative_perturbation "
+            "below roughly 1e-16 to 1e-17 for pc-to-kpc-scale coordinates)."
+        )
+    return new_positions
 
 
 def position_space_divergence(positions_a, positions_b, masses=None):
@@ -1499,6 +1685,13 @@ def position_space_divergence(positions_a, positions_b, masses=None):
             "positions_a/positions_b must have shape (..., n_bodies, 3); "
             f"got {positions_a.shape}."
         )
+    if positions_a.shape[-2] == 0:
+        raise ValueError(
+            "positions_a/positions_b must contain at least one body; got "
+            f"shape {positions_a.shape} (an empty body axis would otherwise "
+            "silently produce nan from a 0/0 mean, with a RuntimeWarning, "
+            "rather than this explicit error)."
+        )
     if masses is not None:
         # Recenter per snapshot without assuming positions_a/positions_b
         # are a single (n_bodies, 3) snapshot rather than a whole
@@ -1524,26 +1717,32 @@ def position_space_divergence(positions_a, positions_b, masses=None):
     return np.sqrt(np.mean(diff2, axis=-1))
 
 
-_LYAPUNOV_NEAR_EXACT_FIT_TOLERANCE = 1.0e-6  # dimensionless, see below
-
-
 def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.90,
-                                min_residual_sign_changes=4):
+                                min_window_efolds=math.log(10.0),
+                                max_curvature_t_statistic=10.0,
+                                curvature_n_bins=20):
     """
     Estimate an exponential growth rate lambda from a divergence time
     series by an ordinary least-squares fit of ln(divergence) against t,
     restricted to a single CONTIGUOUS window where growth is plausibly
-    exponential, and only accepted if that fit is actually good.
+    exponential, and only accepted if that window spans enough dynamic
+    range, fits well enough in log space, and does not show excessive
+    quadratic curvature, to trust as a genuine exponential-growth
+    measurement rather than a short, coincidentally log-linear-looking
+    stretch of some other curve.
 
-    This is a heuristic gate, not a hypothesis test with a p-value: it is
-    tuned to discriminate genuine (possibly noisy) exponential growth
-    from smooth non-exponential curves and oscillatory series, using the
-    checks below, but a sufficiently pathological adversarial input could
-    still slip through, and a genuinely chaotic but short or unusually
-    smooth divergence trace can still fail every check and be reported as
-    "no fit" even though the underlying dynamics are chaotic (KNOWN
-    LIMITATION -- documented rather than silently claimed solved, per
-    this project's testing requirements).
+    This is a heuristic gate, not a hypothesis test with a rigorously
+    calibrated p-value: it is tuned to discriminate genuine (possibly
+    noisy) exponential growth from several specific, measured families of
+    smooth non-exponential curves (see check 6 below for exactly which
+    ones, and which one it is NOT reliably able to reject), but a
+    sufficiently pathological adversarial input could still slip through,
+    and a genuinely chaotic but short or unusually smooth divergence
+    trace can still fail every check and be reported as "no fit" even
+    though the underlying dynamics are chaotic -- a known limitation of
+    this heuristic, not a bug (see check 6 below for the specific shape
+    this does and does not catch, and the measured rate at which it is
+    fooled by an ordinary logistic curve).
 
     1. Amplitude window: only points with divergence in [3*d0, 0.5*d_max]
        (where d0 is the initial divergence and d_max the run's maximum)
@@ -1557,64 +1756,145 @@ def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.90,
        contiguous run through a monotonically-defined amplitude window.
     3. Minimum size: at least ``min_points`` points (default 5) must fall
        in that run, since fewer are too few to assess fit quality at all.
-    4. Whole-window fit quality: the OLS fit of ln(divergence) against t
+    4. Minimum dynamic range: the window's own log-amplitude span,
+       max(ln divergence) - min(ln divergence) over the window, must
+       reach at least ``min_window_efolds`` (default ln(10) approx 2.303,
+       i.e. the window must cover at least one order of magnitude of
+       growth). This is a standard requirement in estimating exponential
+       (Lyapunov) growth rates from finite data (see the logistic
+       discussion above for why it is needed at all). Unlike a
+       significance test, this is a plain ratio in log space, not a
+       statistic whose apparent strength grows with the sample size, so
+       it does not develop the same false-rejection problem at large
+       n_used that a pure significance test does. Measured on this
+       project's own data: representative real chaos-mode runs span
+       roughly 16-17 e-folds within their selected window, the logistic
+       fixture spans only about 2.1, and this project's own (deliberately
+       modest) positive-control fixture spans about 3.2 -- all with
+       comfortable margin from the default threshold.
+    5. Whole-window fit quality: the OLS fit of ln(divergence) against t
        over that window must reach R^2 >= ``min_r_squared`` (default
-       0.90) -- this rejects smooth polynomial growth (e.g. divergence =
-       1+t or 1+t^2) whose R^2 over the corresponding amplitude window is
-       well below this threshold. 0.90 (rather than a stricter value
-       closer to 1) is deliberately permissive enough to admit real,
-       moderately noisy N-body divergence data, which this gate must not
-       reject outright; check 5 below carries the burden of catching
-       smooth non-exponential curvature that a lenient R^2 alone would
-       miss.
-    5. Residual sign changes: a genuine (possibly noisy) exponential's
-       log-residuals from the OLS fit cross zero often, because the
-       deviations are dominated by noise scattered on both sides of the
-       fit line; a smoothly curving but non-exponential series (e.g. a
-       saturating/logistic rise) can still reach a deceptively high
-       whole-window R^2, but its log-residuals trace a single smooth arc
-       with very few sign changes, because the curvature is systematic,
-       not noise. This gate requires at least
-       ``min_residual_sign_changes`` (default 4) sign changes in the
-       fit's residuals, UNLESS the fit is essentially exact (sum of
-       squared residuals below a tiny fraction,
-       ``_LYAPUNOV_NEAR_EXACT_FIT_TOLERANCE`` = 1e-6, of the total sum of
-       squares) -- a fit that close to perfect leaves no meaningful
-       residual pattern to test for sign changes at all (this exempts
-       noiseless synthetic exponentials, used in this codebase's own
-       regression tests, from a check that is meaningless for them
-       without weakening the check for any real, noisy data or for
-       smooth non-exponential curves, whose residuals are never that
-       small).
+       0.90) -- a basic sanity floor that rejects a window with no clear
+       overall log-linear trend at all (e.g. divergence dominated by
+       noise with no net growth, or a strongly curved trend such as
+       linear or quadratic growth in divergence itself rather than in its
+       logarithm).
+    6. Curvature significance: a SEPARATE quadratic-in-t regression,
+       ln(divergence) = c0 + c1*t + c2*t^2, is fit and the window is
+       rejected if the quadratic coefficient's OLS t statistic exceeds
+       ``max_curvature_t_statistic`` (default 10.0) in magnitude -- this
+       catches a genuinely different growth LAW throughout the window
+       (e.g. a stretched/compressed exponential, d(t) = exp(A*(t/T)^p)
+       for p far from 1), which check 4 does not, since such a curve can
+       accumulate more than min_window_efolds of dynamic range while
+       still clearing R^2 >= min_r_squared.
+
+       The fit is NOT done on the window's raw points. They are first
+       averaged into ``curvature_n_bins`` (default 20) equal-sized,
+       time-ordered groups (or ``n_used`` bins, whichever is fewer, for a
+       short window), and the quadratic regression (t centered and
+       scaled for numerical conditioning) is fit to those bin means
+       instead. This binning step exists because an OLS t statistic's
+       magnitude grows with its number of independent data points, but
+       the raw points of a divergence trace are NOT independent draws --
+       they are dense, serially-correlated samples of one smooth
+       underlying curve -- so fitting the raw points made this
+       statistic's apparent strength grow mechanically with how densely
+       a run happened to be recorded (``target_snapshots``), flagging an
+       UNCHANGED physical trajectory as more "curved" purely because more
+       of it was stored, with no genuine shape information behind the
+       increase. Averaging down to a fixed number of representative bins
+       removes that spurious sample-count dependence (the real physical
+       curve's shape converges to the same ~20 bin means regardless of
+       how many raw points were stored), while a synthetic fixture's
+       genuine systematic curvature survives bin-averaging just as well
+       as, or better than, it survives a raw-point fit, since binning
+       averages down within-bin noise without averaging away a
+       consistent trend.
+
+       A numerically degenerate quadratic fit (essentially zero residual
+       variance) is treated as showing no significant curvature rather
+       than raising a division-by-zero, since a fit that close to perfect
+       is, if anything, stronger evidence of a clean exponential, not
+       weaker.
+
+       Measured behavior of this binned statistic (curvature_n_bins=20):
+       this project's own real chaos-mode output (n_bodies=40, default
+       parameters, seeds 0-19) scores at most about 8.4 in magnitude
+       (seed 5); a family of stretched/compressed-exponential negative
+       controls, d(t) = exp(A*(t/T)^p) for p in {0.6, 0.8, 1.2, 1.4} with
+       1-5% multiplicative noise, scores at least about 12 in magnitude
+       across 200 seeds per (p, noise) cell -- comfortable, non-
+       overlapping margin on both sides of the default threshold. A
+       noisy quadratic, d(t) = (1+t^2)*(1 + 5% noise), t in [0, 10], 200
+       samples, is rejected in every one of 300 sampled seeds by this
+       binned design.
+
+       KNOWN REMAINING LIMITATION: a logistic curve is, by construction,
+       asymptotically exponential during its early growth, so no shape
+       statistic computed purely within a narrow amplitude window --
+       binned or not -- can in principle always distinguish a logistic's
+       early-growth window from a true exponential; only requiring more
+       dynamic range than a logistic's early phase can sustain (check 4)
+       can do that in general, and check 4 only rejects a logistic whose
+       selected window fails to reach min_window_efolds. A logistic whose
+       selected window happens to clear that floor by a moderate margin
+       can still show too little quadratic curvature, within that
+       specific narrow window, for this check to catch: measured on an
+       ordinary (not the named official fixture) taller logistic,
+       d(t) = (1 + 99/(1+exp(-(t-5))))*(1 + 5% noise), t in [0, 10], 400
+       samples, across 300 sampled seeds, 208/300 (about 69%) clear the
+       e-folds floor at all, and of THOSE, 191/208 (about 92%) are then
+       also accepted by the curvature check -- i.e. once this logistic's
+       window clears the dynamic-range gate, the curvature check catches
+       it only rarely. Overall, that is 191/300 (about 64%) of all
+       sampled seeds accepted end to end. This is a real, measured gap,
+       not "occasional" in the sense of a low percentage -- see
+       NbodyGalaxySimulator.html's Known Model Artefacts section for the
+       same caveat stated for students, and
+       test_estimate_lyapunov_exponent_does_not_reliably_reject_a_taller_
+       logistic in tests/test_physics_nbg.py for the regression that
+       keeps this honest.
 
     Returns a dict with 'lyapunov_exponent' (1/s), 'lyapunov_time' (s,
-    = 1/lambda), 'n_points_used', 'r_squared' (whole-window fit quality),
-    'residual_sign_changes' (count used by check 5, or nan if rejected
-    before that check runs), and 'fit_start_index' / 'fit_stop_index'
-    (the half-open [start, stop) slice of the input arrays actually used
-    for the fit, or None if no window passed every gate). All numeric
-    fields are nan (and lyapunov_time is left nan, not inf) when no
-    window passes every gate.
+    = 1/lambda), 'n_points_used', 'window_log_amplitude_span' (the
+    log-amplitude span measured in check 4, or nan if rejected before
+    that check runs), 'r_squared' (whole-window linear fit quality, check
+    5, or nan if rejected before it runs), 'curvature_t_statistic' (the
+    signed t statistic from check 6, or nan if rejected before it runs),
+    and 'fit_start_index' / 'fit_stop_index' (the half-open [start, stop)
+    slice of the input arrays actually used for the fit, or None if no
+    window passed every gate). All numeric fields are nan (and
+    lyapunov_time is left nan, not inf) when no window passes every gate.
     """
     t = _as_finite_array(t, "t")
     divergence = _as_finite_array(divergence, "divergence")
+    if t.ndim != 1 or divergence.ndim != 1:
+        raise ValueError(
+            f"t and divergence must both be one-dimensional; got shapes "
+            f"{t.shape} and {divergence.shape}."
+        )
     if t.shape != divergence.shape:
         raise ValueError("t and divergence must have the same shape.")
     if np.any(divergence < 0.0):
         raise ValueError("divergence must be non-negative.")
     if t.size < 2 or np.any(np.diff(t) <= 0.0):
         raise ValueError("t must be strictly increasing with at least two points.")
-    min_points = _require_int("min_points", min_points, lo=3)
+    min_points = _require_int("min_points", min_points, lo=4)
+    min_r_squared = _require_finite("min_r_squared", min_r_squared)
     if not (0.0 <= min_r_squared <= 1.0):
         raise ValueError("min_r_squared must be in [0, 1].")
-    min_residual_sign_changes = _require_int(
-        "min_residual_sign_changes", min_residual_sign_changes, lo=0
+    min_window_efolds = _require_positive("min_window_efolds", min_window_efolds)
+    max_curvature_t_statistic = _require_positive(
+        "max_curvature_t_statistic", max_curvature_t_statistic
     )
+    curvature_n_bins = _require_int("curvature_n_bins", curvature_n_bins, lo=4)
 
-    def _rejected(n_used, r_squared=float("nan"), sign_changes=float("nan")):
+    def _rejected(n_used, window_efolds=float("nan"), r_squared=float("nan"),
+                  curvature_t=float("nan")):
         return dict(lyapunov_exponent=float("nan"), lyapunov_time=float("nan"),
-                    n_points_used=n_used, r_squared=r_squared,
-                    residual_sign_changes=sign_changes,
+                    n_points_used=n_used, window_log_amplitude_span=window_efolds,
+                    r_squared=r_squared, curvature_t_statistic=curvature_t,
                     fit_start_index=None, fit_stop_index=None)
 
     d0 = divergence[0]
@@ -1643,27 +1923,86 @@ def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.90,
 
     tw, dw = t[lo:hi], divergence[lo:hi]
     logd = np.log(dw)
+
+    window_efolds = float(np.max(logd) - np.min(logd))
+    if window_efolds < min_window_efolds:
+        return _rejected(n_used, window_efolds=window_efolds)
+
     slope, intercept = np.polyfit(tw, logd, 1)
-    fit = slope * tw + intercept
-    resid = logd - fit
-    ss_res = float(np.sum(resid ** 2))
+    lin_fit = slope * tw + intercept
+    lin_resid = logd - lin_fit
+    ss_res = float(np.sum(lin_resid ** 2))
     ss_tot = float(np.sum((logd - np.mean(logd)) ** 2))
     r_squared = 1.0 - ss_res / ss_tot if ss_tot > 0.0 else 0.0
     if r_squared < min_r_squared:
-        return _rejected(n_used, r_squared=r_squared)
+        return _rejected(n_used, window_efolds=window_efolds, r_squared=r_squared)
 
-    near_exact = ss_tot > 0.0 and (ss_res / ss_tot) < _LYAPUNOV_NEAR_EXACT_FIT_TOLERANCE
-    sign_changes = int(np.sum(np.diff(np.sign(resid)) != 0))
-    if not near_exact and sign_changes < min_residual_sign_changes:
-        return _rejected(n_used, r_squared=r_squared, sign_changes=sign_changes)
+    # Curvature significance (check 6, see docstring): a quadratic-in-t
+    # regression fit over BINNED window means, gating the fit alongside
+    # check 4 (minimum dynamic range) rather than replacing it -- each
+    # catches a negative-control family the other does not.
+    #
+    # Binning first: the raw
+    # window points tw/logd are dense, serially-correlated samples of one
+    # smooth underlying curve, not independent draws, so an OLS t
+    # statistic fit directly to them grows mechanically with n_used --
+    # i.e. with how densely a run happened to be recorded
+    # (target_snapshots) -- even for an UNCHANGED physical trajectory.
+    # Averaging the window down to a fixed number of time-ordered,
+    # equal-sized bins before fitting removes that spurious sample-count
+    # dependence (see docstring for the measured before/after numbers).
+    n_bins = min(n_used, curvature_n_bins)
+    bin_edges = np.array_split(np.arange(n_used), n_bins)
+    t_bin = np.array([tw[idx].mean() for idx in bin_edges])
+    logd_bin = np.array([logd[idx].mean() for idx in bin_edges])
+
+    # t is centered and scaled before building the design matrix purely
+    # for numerical conditioning -- this project's real time arrays are in
+    # raw seconds (order 1e14-1e15), and fitting t and t^2 directly at
+    # that scale makes the design matrix so ill-conditioned that
+    # ``numpy.linalg.lstsq`` silently returns a rank-deficient (and
+    # therefore meaningless) result. Centering/scaling t by an invertible
+    # affine map leaves the quadratic term's t statistic mathematically
+    # unchanged (it is invariant under such a reparametrization) while
+    # keeping the fit numerically well-posed.
+    t_center = float(np.mean(t_bin))
+    t_scale = float(np.std(t_bin))
+    if t_scale <= 0.0 or not math.isfinite(t_scale):
+        t_scale = 1.0
+    t_bin_scaled = (t_bin - t_center) / t_scale
+    design = np.column_stack([np.ones(n_bins), t_bin_scaled, t_bin_scaled ** 2])
+    quad_coef, _, quad_rank, _ = np.linalg.lstsq(design, logd_bin, rcond=None)
+    quad_resid = logd_bin - design @ quad_coef
+    quad_dof = n_bins - 3
+    quad_rss = float(np.sum(quad_resid ** 2))
+    curvature_t = 0.0
+    if quad_rank == 3 and quad_dof > 0 and quad_rss > 0.0:
+        sigma2 = quad_rss / quad_dof
+        try:
+            xtx_inv = np.linalg.inv(design.T @ design)
+        except np.linalg.LinAlgError:
+            xtx_inv = None
+        if xtx_inv is not None:
+            se_c2 = math.sqrt(sigma2 * xtx_inv[2, 2])
+            if se_c2 > 0.0 and math.isfinite(se_c2):
+                curvature_t = float(quad_coef[2] / se_c2)
+    # A numerically degenerate or as-good-as-exact quadratic fit (rss <= 0,
+    # or a singular design matrix) leaves curvature_t at its 0.0 default,
+    # which is correctly treated as "no significant curvature detected"
+    # below (a fit that close to perfect is, if anything, stronger evidence
+    # of a clean exponential, not weaker).
+    if abs(curvature_t) > max_curvature_t_statistic:
+        return _rejected(n_used, window_efolds=window_efolds, r_squared=r_squared,
+                          curvature_t=curvature_t)
 
     if slope <= 0.0:
-        return _rejected(n_used, r_squared=r_squared, sign_changes=sign_changes)
+        return _rejected(n_used, window_efolds=window_efolds, r_squared=r_squared,
+                          curvature_t=curvature_t)
 
     lam = float(slope)
     return dict(lyapunov_exponent=lam, lyapunov_time=1.0 / lam,
-                n_points_used=n_used, r_squared=r_squared,
-                residual_sign_changes=sign_changes,
+                n_points_used=n_used, window_log_amplitude_span=window_efolds,
+                r_squared=r_squared, curvature_t_statistic=curvature_t,
                 fit_start_index=int(lo), fit_stop_index=int(hi))
 
 
@@ -1735,8 +2074,8 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
                  theta=0.5, method="tree", target_snapshots=150, seed=None,
                  lagrangian_fractions=LAGRANGIAN_FRACTIONS_DEFAULT):
     """
-    Star-cluster mode: a Plummer sphere evolved under mutual gravity long
-    enough to show two-body-relaxation-driven evaporation.
+    Star-cluster mode: a Plummer sphere evolved under mutual gravity for a
+    chosen multiple of its own nominal two-body relaxation time.
 
     The run length is set as a multiple, ``n_relax``, of the cluster's own
     initial two-body relaxation time (relaxation_time()), and the
@@ -1745,29 +2084,46 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     scale radius, so a run is numerically well resolved without the
     student having to already know what a sound dt looks like. Because
     t_relax ~ (N / 8 ln N) t_cross, a modest N (order 100-500, the range
-    this teaching tool targets) relaxes within a run length a laptop can
-    actually complete; a realistic star cluster (N ~ 10^5-10^6) would
-    not, which is itself one of the lessons here.
+    this teaching tool targets) reaches that many relaxation times within
+    a run length a laptop can actually complete; a realistic star cluster
+    (N ~ 10^5-10^6) would not, which is itself one of the lessons here.
+    NOTE: relaxation_time() is a NOMINAL, unsoftened order-of-magnitude
+    estimate (see its own docstring) -- with this program's default
+    softening, the true relaxation rate of the actual, softened system
+    being integrated is suppressed well below that nominal estimate, so
+    ``n_relax`` nominal relaxation times of run length does not promise
+    that many relaxation times' worth of ACTUAL relaxation have occurred.
 
     Two different diagnostics track the same underlying process at two
-    different sensitivities. ``n_unbound`` (identify_unbound) counts
-    bodies that are INSTANTANEOUSLY unbound (positive specific energy)
-    right now -- not a confirmed, permanent escape count: a body counted
-    here can return to negative energy at a later snapshot as the
-    system's own potential evolves, so n_unbound is not guaranteed to be
-    monotonically increasing over a run. It can also stay at zero for the
-    default run length AND the default softening, because that softening
-    is chosen to minimize the force error against the smooth mass
-    distribution, which necessarily also damps the close, hard two-body
-    encounters that physically drive relaxation and evaporation in the
-    first place. ``high_velocity_fraction`` (the fraction of bodies
-    already above 90% of their local escape speed) grows continuously
-    and is visible with the default settings; it is the leading
-    indicator of the same process. Seeing n_unbound > 0 within a
-    practical run generally requires lowering ``softening_pc`` below its
-    default AND raising ``steps_per_crossing`` to compensate (a smaller
-    softening length demands a smaller timestep) -- an explicit exercise
-    in the Help file, not a change made silently here.
+    different sensitivities, and BOTH are frequently flat or exactly zero
+    for the ENTIRE default-parameter run, not only briefly: ``n_unbound``
+    (identify_unbound) counts bodies that are INSTANTANEOUSLY unbound
+    (positive specific energy) right now -- not a confirmed, permanent
+    escape count: a body counted here can return to negative energy at a
+    later snapshot as the system's own potential evolves, so n_unbound is
+    not guaranteed to be monotonically increasing over a run. It commonly
+    stays at zero for the whole default run length AND the default
+    softening, because that softening is chosen to minimize the force
+    error against the smooth mass distribution, which necessarily also
+    damps the close, hard two-body encounters that physically drive
+    relaxation and evaporation in the first place.
+    ``high_velocity_fraction`` (the fraction of bodies already above 90%
+    of their local escape speed) is intended as a more sensitive leading
+    indicator of the same process, but at default parameters it too is
+    frequently zero at every snapshot of a run, for the same
+    softening-suppression reason -- it is not something a default run is
+    guaranteed to show growing. Seeing either diagnostic move away from
+    zero within a practical run generally requires lowering
+    ``softening_pc`` well below its default AND raising
+    ``steps_per_crossing`` to compensate (a smaller softening length
+    demands a smaller timestep) -- an explicit exercise in the Help file,
+    not a change made silently here. A short default-parameter run
+    therefore mainly demonstrates the ABSENCE of strong two-body
+    relaxation at this program's default softening, not its presence;
+    treat any Lagrangian-radius or density-profile change over such a run
+    as a candidate for readjustment or sampling noise (see the caveat
+    below) until a lowered-softening run shows the diagnostics above
+    actually respond.
 
     CAVEAT ON THE EARLY PART OF A RUN: this mode's initial condition
     (plummer_sphere) is put into exact instantaneous scalar virial
@@ -1793,11 +2149,11 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     # Softening is computed here, before the initial conditions, because
     # plummer_sphere() needs it to rescale velocities to the ACTUAL
     # discrete, softened realization's scalar virial balance, not an
-    # idealized unsoftened one -- dehnen_softening() depends only on
+    # idealized unsoftened one -- athanassoula_softening() depends only on
     # n_bodies and scale_radius_pc, not on the sampled realization, so
     # this ordering changes nothing about what softening value is chosen.
     softening = (softening_pc * PC if softening_pc is not None
-                 else dehnen_softening(n_bodies, scale_radius_pc * PC))
+                 else athanassoula_softening(n_bodies, scale_radius_pc * PC))
     softening = _require_positive("softening", softening)
     softening_explicit = softening_pc is not None
 
@@ -1918,10 +2274,10 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
 
     r_sphere = radius_pc * PC
     # Computed before the initial conditions, as in run_cluster(): see the
-    # comment there -- dehnen_softening() does not depend on the sampled
+    # comment there -- athanassoula_softening() does not depend on the sampled
     # realization, only on n_bodies and radius_pc.
     softening = (softening_pc * PC if softening_pc is not None
-                 else dehnen_softening(n_bodies, r_sphere))
+                 else athanassoula_softening(n_bodies, r_sphere))
     softening = _require_positive("softening", softening)
     softening_explicit = softening_pc is not None
 
@@ -1931,7 +2287,12 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
     pos0, vel0, masses = ic["positions"], ic["velocities"], ic["masses"]
     total_mass_kg = float(masses.sum())
 
-    mean_density = total_mass_kg / (4.0 / 3.0 * math.pi * r_sphere ** 3)
+    # See crossing_time() for why r_sphere**3 is
+    # computed by hand rather than via **, and why the result is then
+    # explicitly validated finite rather than trusted.
+    r_sphere_cubed = r_sphere * r_sphere * r_sphere
+    mean_density = total_mass_kg / (4.0 / 3.0 * math.pi * r_sphere_cubed)
+    mean_density = _require_positive("mean_density", mean_density)
     t_ff = free_fall_time(mean_density)
 
     dt = t_ff / steps_per_freefall
@@ -2059,7 +2420,7 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     # plummer_sphere() needs it to rescale to the actual discrete,
     # softened realization's scalar virial balance.
     softening = (softening_pc * PC if softening_pc is not None
-                 else dehnen_softening(n_bodies, scale_radius_pc * PC))
+                 else athanassoula_softening(n_bodies, scale_radius_pc * PC))
     softening = _require_positive("softening", softening)
     softening_explicit = softening_pc is not None
 
@@ -2110,13 +2471,15 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     if not math.isfinite(lyap["lyapunov_exponent"]):
         warnings.append(
             "no single contiguous stretch of the measured divergence passed "
-            "this program's exponential-growth-quality heuristic (whole-"
-            "window r_squared >= 0.90 and, unless the fit is essentially "
-            "exact, at least 4 residual sign changes) -- this is a "
-            "heuristic finite-time fit, not a formal chaos test, and it can "
-            "and does miss some genuinely chaotic runs; the divergence may "
-            "still be too small, may have already saturated at the system "
-            "size, or may simply be noisier than this heuristic tolerates. "
+            "this program's exponential-growth-quality heuristic (a window "
+            "spanning at least one order of magnitude of growth, ln(10) "
+            "approx 2.303 in log-amplitude, with a whole-window r_squared "
+            ">= 0.90, and without excessive quadratic curvature in log space) "
+            "-- this is a heuristic finite-time fit, not a formal "
+            "chaos test, and it can and does miss some genuinely chaotic "
+            "runs; the divergence may still be too small, may have already "
+            "saturated at the system size, or may simply not have grown "
+            "over enough dynamic range yet for this heuristic to trust it. "
             "Raise n_cross or relative_perturbation and re-run, or inspect "
             "the plotted divergence curve directly -- a real (if noisy) "
             "exponential stretch may still be visible even when this "
@@ -2143,7 +2506,8 @@ def run_chaos(n_bodies=40, total_mass_msun=1.0e3, scale_radius_pc=1.0,
         lyapunov_time_over_t_cross=(lyap["lyapunov_time"] / t_cross0
                                      if math.isfinite(lyap["lyapunov_time"]) else float("nan")),
         lyapunov_fit_r_squared=lyap["r_squared"],
-        lyapunov_fit_residual_sign_changes=lyap["residual_sign_changes"],
+        lyapunov_fit_window_efolds=lyap["window_log_amplitude_span"],
+        lyapunov_fit_curvature_t_statistic=lyap["curvature_t_statistic"],
         n_points_used_in_fit=lyap["n_points_used"],
         lyapunov_fit_start_index=lyap["fit_start_index"],
         lyapunov_fit_stop_index=lyap["fit_stop_index"],

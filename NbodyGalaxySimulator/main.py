@@ -32,9 +32,12 @@ Examples
   # A 200-star Plummer cluster, watching two-body relaxation
   python main.py --mode cluster
 
-  # The same cluster with softening lowered so real unbound bodies appear
-  # (needs a smaller timestep to stay accurate -- see the Help file)
-  python main.py --mode cluster --softening_pc 0.03 --steps_per_crossing 300 --n_relax 100
+  # A smaller cluster with softening lowered so real unbound bodies appear
+  # (needs a smaller timestep to stay accurate -- see the Help file); this
+  # exact command was measured, across seeds 0-4, to produce 1-3
+  # instantaneously-unbound bodies out of 60 by the end of the run
+  python main.py --mode cluster --n_bodies 60 --softening_pc 0.0338 \
+    --steps_per_crossing 150 --n_relax 40
 
   # A cold protogalactic sphere collapsing and violently relaxing
   python main.py --mode galaxy
@@ -194,7 +197,15 @@ def main():
             outdir=args.outdir, csvdir=args.csvdir, no_plot=args.no_plot,
             dpi=args.dpi, lw=args.lw,
         )
-    except (ValueError, RuntimeError, OSError) as exc:
+    except (ValueError, RuntimeError, OSError, OverflowError) as exc:
+        # physics_nbg.py validates the
+        # specific extreme-input overflow paths that were found to raise
+        # a raw OverflowError (see crossing_time() and run_galaxy()) by
+        # converting them into ValueError with an explanatory message
+        # before they can propagate this far. OverflowError is caught
+        # here too, as a last-resort safety net, so that a parameter
+        # combination not covered by one of those specific checks still
+        # exits cleanly with a message instead of a raw traceback.
         raise SystemExit(f"NbodyGalaxySimulator: {exc}") from exc
 
 

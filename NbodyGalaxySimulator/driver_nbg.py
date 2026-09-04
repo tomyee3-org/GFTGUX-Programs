@@ -70,12 +70,11 @@ def _validate_output(outdir, csvdir, dpi, lw):
 # summary dicts do not store the raw argument names verbatim). A
 # mismatched or omitted name here would silently write "None" into the
 # CSV provenance comments and the printed run header instead of failing
-# loudly, so every key below is checked against each run_*() summary
-# dict's actual keys by
-# TestCsvOutput.test_provenance_lines_match_actual_summary_values.
+# loudly, so every key below must be an actual key of each run_*()
+# summary dict.
 # softening_explicit is listed alongside softening_pc so the comment
 # records whether the value was chosen by the student or computed by
-# dehnen_softening() -- a bare resolved number cannot be told apart from
+# athanassoula_softening() -- a bare resolved number cannot be told apart from
 # an explicit override otherwise, defeating the reproducibility contract.
 PARAMS_BY_MODE = {
     "cluster": ("n_bodies", "total_mass_msun", "scale_radius_pc",
@@ -152,11 +151,11 @@ def _provenance(mode, kw):
             # resolved numeric softening actually used (never None) --
             # softening_explicit (recorded separately, right below this
             # line) is what distinguishes a student-supplied override
-            # from the default computed by dehnen_softening() from
+            # from the default computed by athanassoula_softening() from
             # n_bodies and the scale radius (Athanassoula et al. 2000
             # optimal-softening scaling; see that function's docstring).
             suffix = "" if kw.get("softening_explicit") else \
-                " (default: computed by dehnen_softening(), the " \
+                " (default: computed by athanassoula_softening(), the " \
                 "Athanassoula et al. 2000 optimal-softening scaling)"
             lines.append(f"    {name} = {value}{suffix}")
             continue
@@ -198,8 +197,7 @@ CLUSTER_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
 # GALAXY_HEADER is built to match _galaxy_rows() exactly, column for
 # column, rather than derived from CLUSTER_HEADER by slicing -- galaxy
 # mode has no escaper tracking, so it must not carry "n_unbound" or
-# "high_velocity_fraction" columns that _galaxy_rows() never populates;
-# see TestCsvOutput.test_galaxy_csv_header_matches_row_length.
+# "high_velocity_fraction" columns that _galaxy_rows() never populates.
 GALAXY_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
                   "virial_ratio", "kinetic_J", "potential_J", "virial_work_J",
                   "energy_J"]
@@ -287,7 +285,7 @@ def _print_warnings(s):
 
 
 def _print_cluster_summary(s):
-    _head("star-cluster evaporation")
+    _head("star-cluster relaxation")
     print(f"  Bodies              : {s['n_bodies']}  (each {s['m_body_msun']:.3f} Msun)")
     print(f"  Total mass          : {s['total_mass_msun']:.4g}  Msun")
     print(f"  Plummer scale a     : {s['scale_radius_pc']:.4g}  pc")
@@ -315,15 +313,37 @@ def _print_cluster_summary(s):
     print(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
     print(SEP)
     if s["n_unbound_final"] == 0:
-        print("  No body was instantaneously unbound at the end of this run.  This")
-        print("  is expected at the default softening and run length: two-body")
-        print("  evaporation is a slow process (order 10^2 relaxation times for an")
-        print("  isolated cluster), and force softening chosen for accuracy also")
-        print("  suppresses the hard encounters that physically drive it.  Watch")
-        print("  the near-escape tail and half-mass radius above for the same")
-        print("  process at an earlier stage; see the Help file for the reduced-")
-        print("  softening exercise that produces instantaneously-unbound bodies")
-        print("  within a practical run.")
+        # Checked against the ACTUAL parameters used, not just the
+        # outcome: "expected at default settings" is only true when this
+        # run actually used the default softening and n_relax -- a run
+        # with explicit, nondefault softening/n_relax that still shows
+        # zero instantaneous escapers is a genuinely different situation
+        # (those settings did not produce the effect either, which is
+        # worth saying plainly, not attributing to "the defaults").
+        used_default_settings = (
+            not s["softening_explicit"] and s["n_relax_requested"] == 5.0
+        )
+        print("  No body was instantaneously unbound at the end of this run.")
+        if used_default_settings:
+            print("  This is expected at the default softening and run length:")
+            print("  two-body evaporation is a slow process (order 10^2 relaxation")
+            print("  times for an isolated cluster), and force softening chosen")
+            print("  for accuracy also suppresses the hard encounters that")
+            print("  physically drive it.  The near-escape tail above is often")
+            print("  ALSO zero throughout a default run for the same reason, not")
+            print("  only near the very end -- a flat Lagrangian-radius/virial-")
+            print("  ratio history at these defaults is not by itself evidence of")
+            print("  strong two-body relaxation. See the Help file for the")
+            print("  reduced-softening exercise that lets these diagnostics")
+            print("  actually respond within a practical run.")
+        else:
+            print("  This run used explicit, nondefault softening and/or run")
+            print("  length, so this is NOT automatically explained by the")
+            print("  default settings' known suppression of two-body relaxation")
+            print("  -- these particular settings simply did not produce a")
+            print("  measurable escape signal either. See the Help file's")
+            print("  reduced-softening exercise for parameter choices measured")
+            print("  to actually respond within a practical run.")
     print(SEP)
     _print_warnings(s)
 
@@ -353,17 +373,70 @@ def _print_galaxy_summary(s):
           f"(at deepest collapse: {s['virial_ratio_at_deepest_collapse']:.4f})")
     print(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
     print(SEP)
-    print("  A perfectly cold sphere collapses, overshoots, and rebounds into a")
-    print("  quasi-equilibrium remnant through 'violent relaxation' (Lynden-Bell")
-    print("  1967).  The virial ratio above typically settles into a modest")
-    print("  oscillation close to Q = 1 rather than converging to it exactly --")
-    print("  watch for that oscillation, not a single settled number, as the")
-    print("  signature of a properly virialized remnant.  A run ending far from")
-    print("  Q = 1 (well below or above) more often means the run has not yet")
-    print("  had time to virialize, or dt/softening need tightening, than it")
-    print("  means genuine incomplete relaxation -- see the Help file's Domain")
-    print("  of Validity section before drawing physical conclusions from Q")
-    print("  alone.")
+    # Conditional on what THIS run's own inputs and outputs actually were,
+    # not a fixed narrative printed regardless of them: a run that did not
+    # start cold, or whose final virial ratio never approached 1, did not
+    # exhibit the classic cold-collapse-into-quasi-equilibrium scenario,
+    # and saying so unconditionally would misdescribe it.
+    #
+    # Checking only the INITIAL and FINAL
+    # virial ratio is not enough to claim a "rebound" -- Q_final can sit
+    # near 1 by coincidence while r50 is still AT its minimum (the run is
+    # still mid-collapse, not past it), since Q and r50 are not the same
+    # quantity and can cross their respective landmarks at different
+    # times. "Rebounded" now requires actual time-series evidence: the
+    # half-mass radius's own minimum must occur strictly before the final
+    # recorded time (not simultaneous with it, i.e. not still sitting at
+    # its own deepest point), AND the final radius must be a MATERIAL
+    # (>=15%) fraction above that minimum, not merely a small fluctuation
+    # off the bottom.
+    started_cold = s["virial_ratio_initial"] <= 0.3
+    ended_near_virial_balance = abs(s["virial_ratio_final"] - 1.0) <= 0.3
+    collapsed_before_end = s["time_of_deepest_collapse_myr"] < s["total_time_myr"]
+    if s["r50_minimum_pc"] > 0.0:
+        rebound_fraction = (
+            (s["r50_final_pc"] - s["r50_minimum_pc"]) / s["r50_minimum_pc"]
+        )
+    else:
+        rebound_fraction = 0.0
+    has_rebounded = collapsed_before_end and rebound_fraction >= 0.15
+    if started_cold and has_rebounded and ended_near_virial_balance:
+        print("  This run started close to cold (Q_initial near 0), its half-mass")
+        print("  radius reached its deepest collapse before the end of the run and")
+        print("  has since expanded back out by a material amount, and its final")
+        print("  virial ratio above is close to 1 -- consistent with the classic")
+        print("  cold-collapse scenario: the sphere collapses, overshoots, and")
+        print("  rebounds into a quasi-equilibrium remnant through 'violent")
+        print("  relaxation' (Lynden-Bell 1967). The virial ratio typically")
+        print("  settles into a modest oscillation close to Q = 1 rather than")
+        print("  converging to it exactly -- watch for that oscillation, not a")
+        print("  single settled number, as the signature of a properly")
+        print("  virialized remnant.")
+    elif started_cold and has_rebounded:
+        print("  This run started close to cold (Q_initial near 0) and its half-mass")
+        print("  radius reached its deepest collapse before the end of the run and")
+        print("  has since expanded back out by a material amount -- it has passed")
+        print("  through the classic collapse-and-rebound stage -- but its final")
+        print("  virial ratio above has NOT settled close to 1: it may still be")
+        print("  oscillating through a later contraction, or may not yet have had")
+        print("  time to fully virialize.")
+    elif started_cold:
+        print("  This run started close to cold (Q_initial near 0), the classic")
+        print("  setup for violent relaxation (Lynden-Bell 1967), but its half-mass")
+        print("  radius above is still at, or has not materially recovered from,")
+        print("  its own deepest collapse as of the final recorded time -- this")
+        print("  run has not yet shown a genuine rebound. A final virial ratio near")
+        print("  1 by itself does NOT mean otherwise: Q and r50 can each cross")
+        print("  their own landmark at a different time, so run longer (raise")
+        print("  n_freefall) before concluding this run has virialized.")
+    else:
+        print("  This run did not start close to cold (Q_initial above 0.3), so")
+        print("  it is not an instance of the classic cold-collapse-into-")
+        print("  quasi-equilibrium scenario -- interpret its virial ratio history")
+        print("  on its own terms, not against that specific benchmark.")
+    print("  Q near 1 alone is necessary but not sufficient for genuine")
+    print("  dynamical equilibrium; see the Help file's Domain of Validity")
+    print("  section before drawing physical conclusions from Q alone.")
     print(SEP)
     _print_warnings(s)
 
@@ -392,8 +465,9 @@ def _print_chaos_summary(s):
               f"({s['lyapunov_time_over_t_cross']:.3g} x crossing times)")
         print(f"  Fit used            : {s['n_points_used_in_fit']} of "
               f"{s['n_snapshots']} snapshots  (R^2 = "
-              f"{s['lyapunov_fit_r_squared']:.5f}, "
-              f"{s['lyapunov_fit_residual_sign_changes']} residual sign changes)")
+              f"{s['lyapunov_fit_r_squared']:.5f}, spanning "
+              f"{s['lyapunov_fit_window_efolds']:.2f} e-folds, curvature t = "
+              f"{s['lyapunov_fit_curvature_t_statistic']:.2f})")
         print("  * heuristic finite-time fit to the measured divergence, not "
               "a formal chaos test -- see the HTML notes.")
     else:

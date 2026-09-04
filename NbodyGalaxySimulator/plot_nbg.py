@@ -5,7 +5,7 @@ Matplotlib visualisations for NbodyGalaxySimulator.
 
 One routine per mode:
 
-    plot_cluster   star-cluster evaporation: projected positions, Lagrangian
+    plot_cluster   star-cluster relaxation: projected positions, Lagrangian
                    radii, virial ratio, instantaneous-unbound count and
                    near-escape tail fraction, energy conservation
     plot_galaxy    cold-collapse galaxy formation: projected positions,
@@ -215,10 +215,10 @@ def plot_cluster(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     ax.set_title("Unbound-fraction diagnostics")
 
     _energy_panel(axes[1, 2], t, result["energy"], "total energy", C_A)
-    axes[1, 2].set_title(f"Energy conservation (max drift "
+    axes[1, 2].set_title(f"Energy conservation (max sampled drift "
                           f"{s['max_fractional_energy_drift']:.2%})")
 
-    fig.suptitle("NbodyGalaxySimulator -- star-cluster evaporation "
+    fig.suptitle("NbodyGalaxySimulator -- star-cluster relaxation "
                   f"(theta={s['theta']:.2f}, method={s['method']})")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     _finish(fig, outdir, "cluster", dpi, lw=lw, figsize=figsize, provenance=provenance)
@@ -258,16 +258,16 @@ def plot_galaxy(result, outdir=None, dpi=150, lw=1.6, provenance=None,
 
     _scatter_projection(axes[1, 0], result["positions"][-1], C_B, "final")
     _finalize_scatter_axes(axes[1, 0], [result["positions"][-1]], robust_zoom=True)
-    # "quasi-equilibrium" describes the settled remnant this experiment
-    # usually produces, not a guaranteed outcome for every parameter
-    # choice -- label it that way only when the run's own final virial
-    # ratio actually landed near scalar balance (2T/|W| = 1); otherwise
-    # use a neutral title so the panel never claims a settled remnant it
-    # did not observe.
-    if abs(s["virial_ratio_final"] - 1.0) <= 0.3:
-        axes[1, 0].set_title("Final (quasi-equilibrium) positions")
-    else:
-        axes[1, 0].set_title("Final positions")
+    # A neutral title showing the run's own final scalar virial ratio,
+    # never a "quasi-equilibrium" label inferred from that ratio alone:
+    # 2T/|W_vir| close to 1 is necessary but NOT sufficient for genuine
+    # dynamical (phase-space) equilibrium (see virial_force_term()'s
+    # docstring and the Help file's Virial Theorem section) -- a snapshot
+    # of a system still collapsing or expanding can pass through Q = 1
+    # in transit, so this panel reports the number and lets the reader
+    # judge, rather than asserting a settled remnant from one scalar.
+    axes[1, 0].set_title(f"Final positions  ($Q_\\mathrm{{final}}$ = "
+                          f"{s['virial_ratio_final']:.3f})")
 
     ax = axes[1, 1]
     ax.plot(t, result["virial_ratio"], color=C_A, lw=lw)
@@ -277,7 +277,7 @@ def plot_galaxy(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     ax.set_title("Virial ratio (violent relaxation)")
 
     _energy_panel(axes[1, 2], t, result["energy"], "total energy", C_A)
-    axes[1, 2].set_title(f"Energy conservation (max drift "
+    axes[1, 2].set_title(f"Energy conservation (max sampled drift "
                           f"{s['max_fractional_energy_drift']:.2%})")
 
     fig.suptitle("NbodyGalaxySimulator -- galaxy-formation cold collapse "
@@ -326,6 +326,20 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
         ax.semilogy(t[fit_lo:fit_hi], div[fit_lo:fit_hi], color=C_FIT, lw=lw * 1.8,
                     label=f"fit window ({n_used} pts, "
                           f"$R^2$={s['lyapunov_fit_r_squared']:.4f})")
+        # Also draw the fitted straight line itself (in log space), not
+        # only the measured points it was fit to, so a student can see how
+        # well the exponential model actually tracks the data rather than
+        # having to trust the reported R^2 alone. Refit directly from
+        # these same plotting-unit arrays over the identical window --
+        # this reproduces the estimator's own fit exactly (same data,
+        # same window), without needing the intercept to be threaded
+        # through the summary dict as its own field.
+        tw_plot = t[fit_lo:fit_hi]
+        logd_plot = np.log(np.maximum(div[fit_lo:fit_hi], 1e-300))
+        slope_plot, intercept_plot = np.polyfit(tw_plot, logd_plot, 1)
+        ax.semilogy(tw_plot, np.exp(intercept_plot + slope_plot * tw_plot),
+                    color=C_FIT, lw=lw, linestyle="--", alpha=0.9,
+                    label="fitted line")
         has_fit_overlay = True
         ax.set_title(f"Divergence (Lyapunov time = "
                      f"{s['lyapunov_time_myr']:.3g} Myr = "
@@ -337,25 +351,36 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     # The only labeled artist on this axis is the fit-window overlay
     # above, which is added only when a fit was found. Calling legend()
     # unconditionally would raise matplotlib's "No artists with labels
-    # found to put in legend" UserWarning on every unsuccessful-fit run
-    # whenever nothing is labeled -- an unexpected warning by this
-    # project's own testing standard. Only call it when there is
-    # something to show.
+    # found to put in legend" UserWarning whenever nothing is labeled (an
+    # unsuccessful-fit run), so only call it when there is something to
+    # show.
     if has_fit_overlay:
         ax.legend(fontsize=7)
 
     ax = axes[1, 0]
     _energy_panel(ax, t, result["energy_a"], "realization A", C_A)
     _energy_panel(ax, t, result["energy_b"], "realization B", C_B)
-    ax.set_title(f"Energy conservation, both realizations (max drift "
+    ax.set_title(f"Energy conservation, both realizations (max sampled drift "
                  f"{s['max_fractional_energy_drift']:.2%})")
     ax.legend(fontsize=8)
 
     ax = axes[1, 1]
-    diff = (result["positions_a"][-1] - result["positions_b"][-1]) / phys.PC
+    # Recenter each realization's final snapshot on its OWN mass-weighted
+    # center of mass before differencing, exactly as the main divergence
+    # trace above does (see position_space_divergence()) -- using the raw,
+    # unrecentered positions here would let a coherent centroid drift
+    # between the two realizations (possible with method="tree", whose
+    # momentum conservation is only approximate) leak into this histogram
+    # as spurious separation, even though the main panel was specifically
+    # corrected to remove exactly that contamination.
+    masses = result["masses"]
+    com_a = phys.center_of_mass(result["positions_a"][-1], masses)
+    com_b = phys.center_of_mass(result["positions_b"][-1], masses)
+    diff = ((result["positions_a"][-1] - com_a)
+            - (result["positions_b"][-1] - com_b)) / phys.PC
     r = np.sqrt(np.sum(diff ** 2, axis=1))
     ax.hist(r, bins=min(30, max(5, result["masses"].size // 3)), color=C_A)
-    ax.set_xlabel("final per-body separation  [pc]")
+    ax.set_xlabel("final per-body separation  [pc]  (recentered)")
     ax.set_ylabel("number of bodies")
     ax.set_title("Final separation distribution")
 
