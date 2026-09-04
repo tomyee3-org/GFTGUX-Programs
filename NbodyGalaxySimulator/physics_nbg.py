@@ -317,6 +317,89 @@ def _validate_state(positions, velocities, masses):
 
 
 # ======================================================================
+# Scale-safe extreme-value helpers
+#
+# Every function below that reduces to a Euclidean separation, an
+# inverse-square/inverse-cube force law, a total mass, or a squared
+# speed can be handed individually finite inputs whose NAIVE evaluation
+# order (square every component, then sum; sum every mass; square a
+# velocity) forms an intermediate that overflows float64's range even
+# though the true, fully-simplified mathematical answer is itself
+# comfortably representable (occasionally as a subnormal). Such an
+# overflow is not caught by an isfinite() check on the final result
+# unless the intermediate itself is checked and repaired at the point
+# it actually occurs; left unchecked, it silently becomes a finite-
+# looking WRONG answer (typically 0.0, from inf**-1.5 or inf**-1)
+# instead of a clear error or the true value.
+#
+# The shared strategy for the separation itself: factor out the
+# largest-magnitude component before squaring (the same trick np.hypot
+# uses internally for two arguments), so every squared ratio actually
+# formed is of order 1 or smaller. A function whose formula only ever
+# DIVIDES by that safe separation (potential energy, specific potential,
+# lagrangian radii) needs nothing further -- dividing one finite value
+# by another cannot overflow, only underflow toward a (legitimate)
+# zero. A function whose formula needs an inverse SQUARE or CUBE of the
+# separation (gravitational acceleration) additionally needs the two
+# divisions and the unit-vector formed sequentially, with G folded in
+# before the first division rather than at the very end: some
+# representable results would otherwise underflow to exactly 0.0 in the
+# un-scaled coefficient before G ever gets a chance to rescale them back
+# into range.
+# ======================================================================
+def _safe_distance_scalar(dx, dy, dz, eps2, eps):
+    """
+    Scale-safe sqrt(dx*dx + dy*dy + dz*dz + eps2) as plain Python floats.
+
+    ``eps`` must equal sqrt(eps2) (the softening length, or 0.0 for an
+    unsoftened separation); it is taken as a parameter, rather than
+    recomputed here, because every caller already needs it once per
+    call rather than once per pair.
+    """
+    scale = max(abs(dx), abs(dy), abs(dz), eps)
+    if scale == 0.0:
+        return 0.0
+    rx, ry, rz, re = dx / scale, dy / scale, dz / scale, eps / scale
+    return scale * math.sqrt(rx * rx + ry * ry + rz * rz + re * re)
+
+
+def _safe_pairwise_acceleration_term(dx, dy, dz, eps2, eps, mass):
+    """
+    Scale-safe replacement for
+
+        G * mass * (dx, dy, dz) / (dx**2 + dy**2 + dz**2 + eps2) ** 1.5
+
+    used as a fallback once the naive squared-separation above has
+    already overflowed to +inf (which would otherwise silently zero out
+    this pair's entire force contribution). Returns the (ax, ay, az)
+    contribution, already scaled by G. Raises ValueError if the true
+    softened separation, or the resulting force coefficient, is not
+    itself representable as a finite float64 value.
+    """
+    s = _safe_distance_scalar(dx, dy, dz, eps2, eps)
+    if not (math.isfinite(s) and s > 0.0):
+        raise ValueError(
+            "a softened pairwise separation is not representable as a "
+            "finite float64 distance; check that positions and "
+            "softening are physically reasonable."
+        )
+    # G is folded in before the two divisions by s, not at the end:
+    # mass / s / s alone can underflow to exactly 0.0 for a large but
+    # representable s (see compute_accelerations_direct's docstring),
+    # discarding a contribution that G would otherwise have rescaled
+    # back into the representable range.
+    coeff = (G * mass) / s
+    coeff = coeff / s
+    if not math.isfinite(coeff):
+        raise ValueError(
+            "a pairwise gravitational force term overflowed even after "
+            "scale-safe distance evaluation; check that masses and "
+            "positions are physically reasonable."
+        )
+    return coeff * (dx / s), coeff * (dy / s), coeff * (dz / s)
+
+
+# ======================================================================
 # Softened Newtonian gravity
 # ======================================================================
 def athanassoula_softening(n_bodies, scale_radius):
@@ -341,7 +424,22 @@ def athanassoula_softening(n_bodies, scale_radius):
     """
     n_bodies = _require_int("n_bodies", n_bodies, lo=1)
     scale_radius = _require_positive("scale_radius", scale_radius)
-    return 0.98 * scale_radius * n_bodies ** (-0.26)
+    eps = 0.98 * scale_radius * n_bodies ** (-0.26)
+    # For a sufficiently small (but individually finite and positive)
+    # scale_radius, the product above can underflow all the way to
+    # exactly 0.0 in float64 -- silently violating this function's own
+    # documented positive-output contract instead of signaling that no
+    # positive softening length can represent the true (infinitesimally
+    # small) result. Rejected explicitly here rather than returned.
+    if not (math.isfinite(eps) and eps > 0.0):
+        raise ValueError(
+            "the optimal softening length for n_bodies="
+            f"{n_bodies} and scale_radius={scale_radius:g} underflows to "
+            "zero in float64 and cannot be returned as a positive "
+            "softening length; use a larger scale_radius (or fewer "
+            "bodies)."
+        )
+    return eps
 
 
 def compute_accelerations_direct(positions, masses, softening):
@@ -374,35 +472,46 @@ def compute_accelerations_direct(positions, masses, softening):
     # reporting a "successful" run. Caught explicitly here instead, at
     # the one place the overflow actually originates.
     eps2 = _require_positive("softening**2", softening * softening)
+    eps = math.sqrt(eps2)
 
     acc = np.zeros_like(positions)
     for i in range(n):
         d = positions - positions[i]              # (n, 3), points i -> all
         r2 = np.einsum("ij,ij->i", d, d) + eps2
-        # Same silent-corruption risk as eps2
-        # above, from the position-separation side instead -- a
-        # sufficiently large (but individually finite) separation can
-        # overflow r2 to inf, making that one source's inv_r3 exactly
-        # 0.0 rather than nan/inf, which the isfinite(acc) postcondition
-        # below would not catch if other sources for body i stayed
-        # normal (their finite contributions would still sum to
-        # something finite, just silently missing this one source's
-        # force). Checked per-source here instead.
-        if not np.all(np.isfinite(r2)):
-            raise ValueError(
-                "the direct-summation force denominator overflowed; "
-                "check that positions are physically reasonable."
-            )
-        # r2 is finite here (just checked above), but for an extremely
-        # small (though still positive and finite) softening, r2**(-1.5)
-        # can itself overflow to inf for a near-coincident pair -- a
-        # genuine overflow, but one the isfinite(acc) postcondition below
-        # already catches; over='ignore' only silences numpy's redundant
-        # RuntimeWarning for that same, already-handled case.
+        # A sufficiently large (but individually finite) separation can
+        # overflow r2 to inf. Left unhandled, that would make that one
+        # source's inv_r3 evaluate to exactly 0.0 -- finite, not nan/inf,
+        # so a downstream np.isfinite(acc) postcondition would NOT catch
+        # it if other sources for body i stayed normal -- silently
+        # discarding a source's force even when the true softened force
+        # from that source is itself comfortably representable (or a
+        # genuine subnormal). Recomputed exactly for these rows below via
+        # a scale-safe, sequential-division force law instead of being
+        # silently dropped; see _safe_pairwise_acceleration_term.
+        overflowed = ~np.isfinite(r2)
+        # r2 is otherwise finite here, but for an extremely small (though
+        # still positive and finite) softening, r2**(-1.5) can itself
+        # overflow to inf for a near-coincident pair -- a genuine
+        # overflow, but one the isfinite(acc) postcondition below already
+        # catches; over='ignore' only silences numpy's redundant
+        # RuntimeWarning for that same, already-handled case (and for the
+        # rows already flagged as overflowed, whose inv_r3 is discarded
+        # below in favor of the safe recomputation).
         with np.errstate(over="ignore"):
             inv_r3 = r2 ** (-1.5)
         inv_r3[i] = 0.0                            # exclude self term
-        acc[i] = G * np.sum((masses * inv_r3)[:, None] * d, axis=0)
+        if np.any(overflowed):
+            inv_r3[overflowed] = 0.0
+        row_sum = G * np.sum((masses * inv_r3)[:, None] * d, axis=0)
+        if np.any(overflowed):
+            for j in np.nonzero(overflowed)[0]:
+                if j == i:
+                    continue
+                fx, fy, fz = _safe_pairwise_acceleration_term(
+                    d[j, 0], d[j, 1], d[j, 2], eps2, eps, masses[j]
+                )
+                row_sum = row_sum + np.array([fx, fy, fz])
+        acc[i] = row_sum
 
     if not np.all(np.isfinite(acc)):
         raise ValueError(
@@ -541,6 +650,7 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2):
     optimized.
     """
     xi, yi, zi = pos_list[i]
+    eps = math.sqrt(eps2) if eps2 > 0.0 else 0.0
     ax = ay = az = 0.0
     stack = [root]
     theta2 = theta * theta
@@ -555,10 +665,29 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2):
                 xj, yj, zj = pos_list[j]
                 dx, dy, dz = xj - xi, yj - yi, zj - zi
                 r2 = dx * dx + dy * dy + dz * dz + eps2
-                f = mass_list[j] * r2 ** -1.5
-                ax += f * dx
-                ay += f * dy
-                az += f * dz
+                # r2 can overflow to +inf for a sufficiently large (but
+                # individually finite) separation, which would otherwise
+                # make r2 ** -1.5 evaluate to exactly 0.0 -- a silent,
+                # finite-looking "no force" answer even when the true
+                # softened force is comfortably representable (or a
+                # genuine subnormal). G is applied per term here (rather
+                # than once at the end, as a stale version of this
+                # function did) so that the fast and scale-safe fallback
+                # paths share the same units; see
+                # _safe_pairwise_acceleration_term's docstring for why
+                # the fallback needs G folded in before its divisions.
+                if math.isfinite(r2):
+                    coeff = G * mass_list[j] * r2 ** -1.5
+                    ax += coeff * dx
+                    ay += coeff * dy
+                    az += coeff * dz
+                else:
+                    fx, fy, fz = _safe_pairwise_acceleration_term(
+                        dx, dy, dz, eps2, eps, mass_list[j]
+                    )
+                    ax += fx
+                    ay += fy
+                    az += fz
             continue
 
         dx, dy, dz = node.comx - xi, node.comy - yi, node.comz - zi
@@ -590,13 +719,24 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2):
         # for the monopole approximation regardless of theta.
         if dist2 > 0.0 and not contains_i and (size * size) < theta2 * dist2:
             r2 = dist2 + eps2
-            f = node.mass * r2 ** -1.5
-            ax += f * dx
-            ay += f * dy
-            az += f * dz
+            # Same overflow hazard, and the same fast/safe split, as the
+            # leaf-node loop above -- here for a monopole's total mass
+            # and separation rather than a single body's.
+            if math.isfinite(r2):
+                coeff = G * node.mass * r2 ** -1.5
+                ax += coeff * dx
+                ay += coeff * dy
+                az += coeff * dz
+            else:
+                fx, fy, fz = _safe_pairwise_acceleration_term(
+                    dx, dy, dz, eps2, eps, node.mass
+                )
+                ax += fx
+                ay += fy
+                az += fz
         else:
             stack.extend(node.children)
-    return G * ax, G * ay, G * az
+    return ax, ay, az
 
 
 def compute_accelerations_tree(positions, masses, theta, softening):
@@ -673,7 +813,27 @@ def compute_accelerations(positions, masses, softening, method="tree", theta=0.5
 def kinetic_energy(velocities, masses):
     masses = _require_masses(masses)
     velocities = _require_snapshot(velocities, "velocities", n_bodies=masses.size)
-    return float(0.5 * np.sum(masses * np.einsum("ij,ij->i", velocities, velocities)))
+    # 0.5 * mass * (vx^2+vy^2+vz^2) is computed component-by-component as
+    # (0.5*mass*v_component)*v_component, rather than forming
+    # v_component**2 (or the full un-halved v^2) as a standalone
+    # intermediate first: a tiny mass paired with an enormous velocity
+    # can have a perfectly representable 0.5*m*v^2 even though v*v alone
+    # would overflow float64. This does not make kinetic energy immune
+    # to overflow -- a genuinely non-representable result (e.g. a
+    # non-negligible mass at v of order 1e200) still overflows, and is
+    # reported below as a clear ValueError rather than a silent inf.
+    with np.errstate(over="ignore"):
+        half_m_v = (0.5 * masses)[:, None] * velocities
+        per_body = np.sum(half_m_v * velocities, axis=1)
+    if not np.all(np.isfinite(per_body)):
+        raise ValueError(
+            "kinetic energy overflowed for at least one body; check that "
+            "velocities and masses are physically reasonable."
+        )
+    total = float(np.sum(per_body))
+    if not math.isfinite(total):
+        raise ValueError("kinetic energy overflowed.")
+    return total
 
 
 def potential_energy(positions, masses, softening):
@@ -700,12 +860,44 @@ def potential_energy(positions, masses, softening):
     # reporting a "successful" run. Caught explicitly here instead, at
     # the one place the overflow actually originates.
     eps2 = _require_positive("softening**2", softening * softening)
+    eps = math.sqrt(eps2)
     n = masses.size
     u = 0.0
     for i in range(n - 1):
         d = positions[i + 1:] - positions[i]
-        r = np.sqrt(np.einsum("ij,ij->i", d, d) + eps2)
-        u -= G * masses[i] * np.sum(masses[i + 1:] / r)
+        r2 = np.einsum("ij,ij->i", d, d) + eps2
+        # r2 can overflow to +inf for a sufficiently large (but
+        # individually finite) separation, which would otherwise make
+        # that pair's contribution to r silently become +inf too --
+        # and dividing by +inf below discards a real, and possibly
+        # dominant, potential-energy contribution as exactly 0.0 rather
+        # than the true (representable) value. Unlike the inverse-square
+        # or inverse-cube force law, 1/r itself never overflows once r
+        # is finite (dividing a finite mass by a large finite distance
+        # can only underflow toward a legitimate 0.0), so only the
+        # DISTANCE needs the scale-safe recomputation here -- no
+        # sequential-division force law is required.
+        overflowed = ~np.isfinite(r2)
+        with np.errstate(over="ignore"):
+            r = np.sqrt(r2)
+        if np.any(overflowed):
+            for k in np.nonzero(overflowed)[0]:
+                r[k] = _safe_distance_scalar(d[k, 0], d[k, 1], d[k, 2], eps2, eps)
+        if not np.all(np.isfinite(r)) or np.any(r <= 0.0):
+            raise ValueError(
+                "a pair separation in the potential-energy sum is not "
+                "representable as a finite, positive float64 distance; "
+                "check that positions and softening are physically "
+                "reasonable."
+            )
+        pair_u = masses[i + 1:] / r
+        if not np.all(np.isfinite(pair_u)):
+            raise ValueError(
+                "potential energy overflowed for at least one pair; "
+                "check that positions and masses are physically "
+                "reasonable."
+            )
+        u -= G * masses[i] * np.sum(pair_u)
     if not math.isfinite(u):
         raise ValueError("potential energy overflowed.")
     return float(u)
@@ -830,8 +1022,24 @@ def center_of_mass(positions, masses):
     """
     masses = _require_masses(masses)
     positions = _require_snapshot(positions, "positions", n_bodies=masses.size)
-    total_mass = np.sum(masses)
-    return np.sum(masses[:, None] * positions, axis=0) / total_mass
+    # sum(masses) can overflow to +inf for individually finite masses
+    # (e.g. three bodies of 1e308 kg each) even though the true
+    # mass-weighted mean position is comfortably representable -- and
+    # dividing by that spurious +inf would silently produce [0, 0, 0]
+    # instead. Normalizing every mass by the largest one first keeps
+    # every weight in (0, 1] and their sum safely of order N, regardless
+    # of the masses' absolute scale; the normalization cancels exactly
+    # in the final ratio.
+    max_mass = float(np.max(masses))
+    weights = masses / max_mass
+    weight_sum = np.sum(weights)
+    com = np.sum(weights[:, None] * positions, axis=0) / weight_sum
+    if not np.all(np.isfinite(com)):
+        raise ValueError(
+            "center of mass overflowed; check that positions and masses "
+            "are physically reasonable."
+        )
+    return com
 
 
 def center_of_mass_velocity(velocities, masses):
@@ -839,8 +1047,18 @@ def center_of_mass_velocity(velocities, masses):
     the masses contract this shares."""
     masses = _require_masses(masses)
     velocities = _require_snapshot(velocities, "velocities", n_bodies=masses.size)
-    total_mass = np.sum(masses)
-    return np.sum(masses[:, None] * velocities, axis=0) / total_mass
+    # See center_of_mass() for why the masses are normalized by their
+    # maximum before summing, rather than summed directly.
+    max_mass = float(np.max(masses))
+    weights = masses / max_mass
+    weight_sum = np.sum(weights)
+    com_v = np.sum(weights[:, None] * velocities, axis=0) / weight_sum
+    if not np.all(np.isfinite(com_v)):
+        raise ValueError(
+            "center-of-mass velocity overflowed; check that velocities "
+            "and masses are physically reasonable."
+        )
+    return com_v
 
 
 def recenter(positions, velocities, masses):
@@ -868,7 +1086,26 @@ def lagrangian_radii(positions, masses, fractions, center=None):
     else:
         center = _as_finite_array(center, "center", shape=(3,))
 
-    r = np.sqrt(np.einsum("ij,ij->i", positions - center, positions - center))
+    d = positions - center
+    r2 = np.einsum("ij,ij->i", d, d)
+    # r2 can overflow to +inf for sufficiently large (but individually
+    # finite) positions, which would otherwise make that body's radius
+    # silently become +inf even though its true Euclidean distance from
+    # ``center`` is itself comfortably representable (squaring before
+    # taking the square root loses range that the direct distance never
+    # needed). Recomputed exactly for these rows via a scale-safe
+    # distance instead.
+    overflowed = ~np.isfinite(r2)
+    with np.errstate(over="ignore"):
+        r = np.sqrt(r2)
+    if np.any(overflowed):
+        for k in np.nonzero(overflowed)[0]:
+            r[k] = _safe_distance_scalar(d[k, 0], d[k, 1], d[k, 2], 0.0, 0.0)
+    if not np.all(np.isfinite(r)):
+        raise ValueError(
+            "a lagrangian-radius distance overflowed; check that "
+            "positions are physically reasonable."
+        )
     order = np.argsort(r)
     r_sorted = r[order]
     cum_mass = np.cumsum(masses[order])
@@ -901,15 +1138,38 @@ def _phi_and_speed2(positions, velocities, masses, softening):
     # reporting a "successful" run. Caught explicitly here instead, at
     # the one place the overflow actually originates.
     eps2 = _require_positive("softening**2", softening * softening)
+    eps = math.sqrt(eps2)
     n = masses.size
 
     pos_cm, vel_cm = recenter(positions, velocities, masses)
     phi = np.zeros(n)
     for i in range(n):
         d = pos_cm - pos_cm[i]
-        r = np.sqrt(np.einsum("ij,ij->i", d, d) + eps2)
+        r2 = np.einsum("ij,ij->i", d, d) + eps2
+        # Same overflow hazard as potential_energy(): r2 can overflow to
+        # +inf for a large (but individually finite) separation, which
+        # would otherwise silently drop a body's real contribution to
+        # this specific potential (dividing by the resulting +inf gives
+        # 0.0) even though the true 1/r contribution is representable.
+        # Only the distance needs recomputing (see potential_energy's
+        # comment on why 1/r itself cannot overflow once r is finite).
+        overflowed = ~np.isfinite(r2)
+        with np.errstate(over="ignore"):
+            r = np.sqrt(r2)
+        if np.any(overflowed):
+            for k in np.nonzero(overflowed)[0]:
+                if k == i:
+                    continue
+                r[k] = _safe_distance_scalar(d[k, 0], d[k, 1], d[k, 2], eps2, eps)
         r[i] = np.inf                       # exclude self term
-        phi[i] = -G * np.sum(masses / r)
+        with np.errstate(over="ignore"):
+            phi[i] = -G * np.sum(masses / r)
+        if not math.isfinite(phi[i]):
+            raise ValueError(
+                "specific potential energy overflowed for at least one "
+                "body; check that positions and masses are physically "
+                "reasonable."
+            )
     speed2 = np.einsum("ij,ij->i", vel_cm, vel_cm)
     return phi, speed2
 
@@ -1024,7 +1284,20 @@ def crossing_time(half_mass_radius_m, total_mass_kg):
 def free_fall_time(mean_density_kg_m3):
     """Free-fall time of a uniform sphere, t_ff = sqrt(3 pi / (32 G rho))."""
     mean_density_kg_m3 = _require_positive("mean_density_kg_m3", mean_density_kg_m3)
-    return math.sqrt(3.0 * math.pi / (32.0 * G * mean_density_kg_m3))
+    # 32 * G * mean_density_kg_m3 can underflow toward zero for a
+    # sufficiently small (but positive and finite) density, which would
+    # otherwise make the single combined ratio 3*pi/(32*G*rho) overflow
+    # to +inf even though the true free-fall time is comfortably
+    # representable. Taking the two square roots separately (of the
+    # density-independent constant, and of 1/rho) and dividing keeps
+    # both intermediates in range.
+    t = math.sqrt(3.0 * math.pi / (32.0 * G)) / math.sqrt(mean_density_kg_m3)
+    if not math.isfinite(t):
+        raise ValueError(
+            "free-fall time overflowed; check that mean_density_kg_m3 is "
+            "physically reasonable."
+        )
+    return t
 
 
 def relaxation_time(n_bodies, half_mass_radius_m, total_mass_kg):
@@ -1041,10 +1314,10 @@ def relaxation_time(n_bodies, half_mass_radius_m, total_mass_kg):
     above assumes point-mass two-body encounters at arbitrarily close
     range, exactly what this program's force softening (see
     athanassoula_softening()) exists to suppress. It correctly captures how
-    relaxation accelerates as N shrinks (which is why a 200-body cluster
-    relaxes, visibly, within a simulation a student can actually run,
-    while a 200,000-body one for all practical purposes does not), but it
-    is not a prediction of how fast THIS program's own softened,
+    relaxation accelerates as N shrinks (this NOMINAL, unsoftened estimate
+    is short enough, for a 200-body cluster, to fall within a run length a
+    student can actually complete, unlike a 200,000-body one), but it is
+    not a prediction of how fast THIS program's own softened,
     discrete realization will actually relax -- the true softened rate is
     suppressed below this nominal value, sometimes to the point of no
     measurable relaxation at all within a practical run length at default
@@ -1766,12 +2039,13 @@ def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.90,
        significance test, this is a plain ratio in log space, not a
        statistic whose apparent strength grows with the sample size, so
        it does not develop the same false-rejection problem at large
-       n_used that a pure significance test does. Measured on this
-       project's own data: representative real chaos-mode runs span
-       roughly 16-17 e-folds within their selected window, the logistic
-       fixture spans only about 2.1, and this project's own (deliberately
-       modest) positive-control fixture spans about 3.2 -- all with
-       comfortable margin from the default threshold.
+       n_used that a pure significance test does. For this program's own
+       dynamics: a representative real chaos-mode run's selected window
+       typically spans roughly 16-17 e-folds, comfortably above the
+       default threshold; a saturating (logistic-like) curve's early,
+       still-plausibly-exponential-looking phase spans only about 2.1
+       e-folds, well below it; and a modest but genuine exponential can
+       still span about 3.2, comfortably above it.
     5. Whole-window fit quality: the OLS fit of ln(divergence) against t
        over that window must reach R^2 >= ``min_r_squared`` (default
        0.90) -- a basic sanity floor that rejects a window with no clear
@@ -1806,9 +2080,9 @@ def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.90,
        increase. Averaging down to a fixed number of representative bins
        removes that spurious sample-count dependence (the real physical
        curve's shape converges to the same ~20 bin means regardless of
-       how many raw points were stored), while a synthetic fixture's
-       genuine systematic curvature survives bin-averaging just as well
-       as, or better than, it survives a raw-point fit, since binning
+       how many raw points were stored), while a curve with genuine
+       systematic curvature survives bin-averaging just as well as, or
+       better than, it survives a raw-point fit, since binning
        averages down within-bin noise without averaging away a
        consistent trend.
 
@@ -1818,43 +2092,37 @@ def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.90,
        is, if anything, stronger evidence of a clean exponential, not
        weaker.
 
-       Measured behavior of this binned statistic (curvature_n_bins=20):
-       this project's own real chaos-mode output (n_bodies=40, default
-       parameters, seeds 0-19) scores at most about 8.4 in magnitude
-       (seed 5); a family of stretched/compressed-exponential negative
-       controls, d(t) = exp(A*(t/T)^p) for p in {0.6, 0.8, 1.2, 1.4} with
-       1-5% multiplicative noise, scores at least about 12 in magnitude
-       across 200 seeds per (p, noise) cell -- comfortable, non-
-       overlapping margin on both sides of the default threshold. A
-       noisy quadratic, d(t) = (1+t^2)*(1 + 5% noise), t in [0, 10], 200
-       samples, is rejected in every one of 300 sampled seeds by this
-       binned design.
+       Behavior of this binned statistic (curvature_n_bins=20): a
+       genuinely chaotic N-body divergence trace (a representative
+       N=40-body configuration at default parameters) typically scores
+       well under 10 in magnitude; a family of stretched/compressed-
+       exponential curves, d(t) = exp(A*(t/T)^p) for p appreciably
+       different from 1 with a few percent of multiplicative noise,
+       typically scores at least about 12 in magnitude -- a comfortable,
+       non-overlapping margin on both sides of the default threshold. A
+       noisy quadratic growth curve, d(t) proportional to (1+t^2), is
+       reliably rejected by this binned design.
 
-       KNOWN REMAINING LIMITATION: a logistic curve is, by construction,
-       asymptotically exponential during its early growth, so no shape
-       statistic computed purely within a narrow amplitude window --
-       binned or not -- can in principle always distinguish a logistic's
-       early-growth window from a true exponential; only requiring more
-       dynamic range than a logistic's early phase can sustain (check 4)
-       can do that in general, and check 4 only rejects a logistic whose
-       selected window fails to reach min_window_efolds. A logistic whose
-       selected window happens to clear that floor by a moderate margin
-       can still show too little quadratic curvature, within that
-       specific narrow window, for this check to catch: measured on an
-       ordinary (not the named official fixture) taller logistic,
-       d(t) = (1 + 99/(1+exp(-(t-5))))*(1 + 5% noise), t in [0, 10], 400
-       samples, across 300 sampled seeds, 208/300 (about 69%) clear the
-       e-folds floor at all, and of THOSE, 191/208 (about 92%) are then
-       also accepted by the curvature check -- i.e. once this logistic's
-       window clears the dynamic-range gate, the curvature check catches
-       it only rarely. Overall, that is 191/300 (about 64%) of all
-       sampled seeds accepted end to end. This is a real, measured gap,
-       not "occasional" in the sense of a low percentage -- see
-       NbodyGalaxySimulator.html's Known Model Artefacts section for the
-       same caveat stated for students, and
-       test_estimate_lyapunov_exponent_does_not_reliably_reject_a_taller_
-       logistic in tests/test_physics_nbg.py for the regression that
-       keeps this honest.
+       KNOWN REMAINING LIMITATION: a logistic (saturating) curve is, by
+       construction, asymptotically exponential during its early growth,
+       so no shape statistic computed purely within a narrow amplitude
+       window -- binned or not -- can in principle always distinguish a
+       logistic's early-growth window from a true exponential; only
+       requiring more dynamic range than a logistic's early phase can
+       sustain (check 4) can do that in general, and check 4 only rejects
+       a logistic whose selected window fails to reach min_window_efolds.
+       A sufficiently tall logistic curve, d(t) = (1 + 99/(1+exp(-(t-5))))
+       *(1 + a few percent noise), whose selected window happens to clear
+       that dynamic-range floor (roughly 69% of realizations of such a
+       curve do) can still show too little quadratic curvature, within
+       that specific narrow window, for this check to catch (about 92%
+       of the time, once that floor is cleared) -- i.e. once this
+       logistic's window clears the dynamic-range gate, the curvature
+       check catches it only rarely. Overall, roughly 64% of realizations
+       of this specific logistic family are accepted by the whole gate
+       end to end. This is a real, non-negligible gap, not a rare edge
+       case -- see NbodyGalaxySimulator.html's Known Model Artefacts
+       section for the same caveat stated for students.
 
     Returns a dict with 'lyapunov_exponent' (1/s), 'lyapunov_time' (s,
     = 1/lambda), 'n_points_used', 'window_log_amplitude_span' (the
@@ -2069,6 +2337,111 @@ def _energy_drift(energy):
     return float(np.max(np.abs((energy - e0) / e0)))
 
 
+LATE_WINDOW_FRACTION = 0.20
+LATE_WINDOW_MIN_SNAPSHOTS = 5
+LATE_WINDOW_R50_RANGE_THRESHOLD = 0.30
+LATE_WINDOW_Q_RANGE_THRESHOLD = 0.60
+
+
+def _late_time_window_stats(t, r50_series, virial_series,
+                             window_fraction=LATE_WINDOW_FRACTION,
+                             min_samples=LATE_WINDOW_MIN_SNAPSHOTS):
+    """
+    Summarize the LAST ``window_fraction`` (by elapsed time, not snapshot
+    count) of a run's own recorded half-mass-radius and virial-ratio
+    history, as a documented, snapshot-stride-robust basis for judging
+    whether a run's late-time behavior is actually settled -- as opposed
+    to judging that from only a single final value and a single sampled
+    minimum, which can each land arbitrarily depending on exactly how many
+    snapshots happened to be stored for an otherwise identical trajectory
+    (two runs with bit-for-bit identical integrated positions and
+    velocities, differing only in target_snapshots, must reach the same
+    late-time verdict).
+
+    Returns a dict with:
+      n_samples                 -- snapshots falling in the late window.
+      has_enough_samples        -- n_samples >= min_samples; when False,
+                                    every other field except this one and
+                                    window_start_myr/window_fraction is
+                                    nan, and no equilibrium claim should
+                                    be made.
+      window_start_myr          -- start time of the late window.
+      r50_fractional_range      -- (max-min)/mean of r50 over the window;
+                                    large values indicate the half-mass
+                                    radius is still swinging by an amount
+                                    comparable to its own size, not merely
+                                    fluctuating around a settled value.
+      r50_relative_drift        -- best-fit linear slope of r50 over the
+                                    window, expressed as a FRACTION of the
+                                    window-mean r50 gained or lost over
+                                    the full window duration; large values
+                                    indicate a sustained secular trend
+                                    (still expanding or still contracting)
+                                    rather than a plateau.
+      virial_ratio_range        -- max-min of the virial ratio Q over the
+                                    window; large values indicate Q is
+                                    still oscillating violently rather
+                                    than settling into a modest band.
+      is_settled                -- True only when has_enough_samples and
+                                    both the r50 fractional range and the
+                                    Q range stay within the documented
+                                    "modest" thresholds above -- i.e. the
+                                    minimum bar for describing a run as
+                                    consistent with sustained quasi-
+                                    equilibrium, not proof of genuine
+                                    phase-space stationarity (see
+                                    virial_force_term()'s docstring on
+                                    what a virial-balance diagnostic does
+                                    and does not establish).
+    """
+    t = np.asarray(t, dtype=float)
+    r50_series = np.asarray(r50_series, dtype=float)
+    virial_series = np.asarray(virial_series, dtype=float)
+    total_time = float(t[-1] - t[0])
+    window_start = t[-1] - window_fraction * total_time if total_time > 0.0 else t[0]
+    mask = t >= window_start
+    n_samples = int(np.sum(mask))
+    out = dict(
+        n_samples=n_samples,
+        has_enough_samples=n_samples >= min_samples,
+        window_start_myr=float(window_start / MYR),
+        window_fraction=window_fraction,
+        r50_fractional_range=float("nan"),
+        r50_relative_drift=float("nan"),
+        r50_linear_slope_pc_per_myr=float("nan"),
+        virial_ratio_range=float("nan"),
+        is_settled=False,
+    )
+    if not out["has_enough_samples"]:
+        return out
+
+    t_win = t[mask]
+    r50_win = r50_series[mask]
+    q_win = virial_series[mask]
+
+    r50_mean = float(np.mean(r50_win))
+    if r50_mean > 0.0 and np.all(np.isfinite(r50_win)):
+        out["r50_fractional_range"] = float(
+            (np.max(r50_win) - np.min(r50_win)) / r50_mean
+        )
+        # A degree-1 least-squares fit needs at least two distinct times;
+        # min_samples (>= 5) already guarantees that whenever
+        # has_enough_samples is True.
+        slope_per_s, _intercept = np.polyfit(t_win, r50_win, 1)
+        out["r50_linear_slope_pc_per_myr"] = float(slope_per_s * MYR / PC)
+        out["r50_relative_drift"] = float(slope_per_s * total_time * window_fraction / r50_mean)
+    if np.all(np.isfinite(q_win)):
+        out["virial_ratio_range"] = float(np.max(q_win) - np.min(q_win))
+
+    out["is_settled"] = bool(
+        math.isfinite(out["r50_fractional_range"])
+        and math.isfinite(out["virial_ratio_range"])
+        and out["r50_fractional_range"] <= LATE_WINDOW_R50_RANGE_THRESHOLD
+        and out["virial_ratio_range"] <= LATE_WINDOW_Q_RANGE_THRESHOLD
+    )
+    return out
+
+
 def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
                  n_relax=5.0, steps_per_crossing=60, softening_pc=None,
                  theta=0.5, method="tree", target_snapshots=150, seed=None,
@@ -2257,9 +2630,19 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
     pure-Python teaching code, this is a scaled-down protogalactic
     fragment (order 10^6 solar masses within order 100 pc), not a
     realistic galaxy (order 10^10-10^12 solar masses across kpc to
-    100 kpc) -- the collapse and relaxation PHYSICS is the same
-    collisionless N-body process either way, but the absolute numbers
-    should not be over-interpreted.
+    100 kpc). With only a few hundred particles, a monopole tree
+    approximation, fixed softening, and the resulting finite-N shot
+    noise, this run is a qualitative analogue of collisionless
+    mean-field collapse, not a physically equivalent scaled copy of
+    one: the two-body relaxation time (see cluster mode and Physical
+    Background) scales strongly with N, so an N of order 10^2-10^3
+    here and a real galaxy's 10^10-10^11 stars are not simply the
+    same collisionless system viewed at a different display scale.
+    Treat this mode as illustrating the qualitative collisionless
+    cold-collapse mechanism, not as reproducing a real galaxy's
+    numbers -- check any feature of interest for N/softening/timestep
+    convergence before drawing a physical conclusion from it (see the
+    Help file's galaxy-convergence exercise).
 
     The run length is a multiple, ``n_freefall``, of the sphere's own
     initial free-fall time (free_fall_time()); the timestep is a
@@ -2328,6 +2711,14 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
         if collapse_idx is not None else float("nan")
     virial_at_collapse = float(virial[collapse_idx]) \
         if collapse_idx is not None else float("nan")
+    late_window = (
+        _late_time_window_stats(sim["t"], r50_series, virial)
+        if r50_series is not None else
+        dict(n_samples=0, has_enough_samples=False, window_start_myr=float("nan"),
+             window_fraction=LATE_WINDOW_FRACTION, r50_fractional_range=float("nan"),
+             r50_relative_drift=float("nan"), r50_linear_slope_pc_per_myr=float("nan"),
+             virial_ratio_range=float("nan"), is_settled=False)
+    )
 
     summary = dict(
         n_bodies=n_bodies, total_mass_msun=total_mass_msun, radius_pc=radius_pc,
@@ -2345,6 +2736,15 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
         time_of_deepest_collapse_myr=r50_min_myr,
         virial_ratio_initial=float(virial[0]), virial_ratio_final=float(virial[-1]),
         virial_ratio_at_deepest_collapse=virial_at_collapse,
+        late_window_fraction=late_window["window_fraction"],
+        late_window_start_myr=late_window["window_start_myr"],
+        late_window_n_snapshots=late_window["n_samples"],
+        late_window_has_enough_snapshots=late_window["has_enough_samples"],
+        late_r50_fractional_range=late_window["r50_fractional_range"],
+        late_r50_relative_drift=late_window["r50_relative_drift"],
+        late_r50_linear_slope_pc_per_myr=late_window["r50_linear_slope_pc_per_myr"],
+        late_virial_ratio_range=late_window["virial_ratio_range"],
+        late_window_is_settled=late_window["is_settled"],
         max_fractional_energy_drift=energy_drift,
         lagrangian_fractions=tuple(lagrangian_fractions),
         seed=seed, warnings=warnings,

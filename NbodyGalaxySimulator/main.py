@@ -8,8 +8,8 @@ Three calculations share one program, chosen with --mode:
     cluster  a Plummer sphere of stars, evolved to show two-body-relaxation
              driven expansion and (eventually) evaporation
     galaxy   a cold, uniform sphere collapsing and "violently relaxing"
-             (Lynden-Bell 1967) into a quasi-equilibrium remnant -- a toy
-             galaxy-formation experiment
+             (Lynden-Bell 1967), when it settles, into a quasi-equilibrium
+             remnant -- a toy galaxy-formation experiment
     chaos    two indistinguishably close realizations of the same cluster,
              integrated identically, whose separation is tracked to
              measure the Lyapunov time of gravitational N-body motion
@@ -29,15 +29,19 @@ codes and force softening into that program's introductory tutorial flow.
 
 Examples
 --------
-  # A 200-star Plummer cluster, watching two-body relaxation
+  # A 200-star Plummer cluster at default parameters; whether two-body
+  # relaxation is visibly acting within this run's length is not
+  # guaranteed at default softening -- see the Help file's EXP-1 and
+  # the tuned, multi-seed EXP-11 below for how to assess that properly
   python main.py --mode cluster
 
-  # A smaller cluster with softening lowered so real unbound bodies appear
-  # (needs a smaller timestep to stay accurate -- see the Help file); this
-  # exact command was measured, across seeds 0-4, to produce 1-3
-  # instantaneously-unbound bodies out of 60 by the end of the run
+  # A smaller cluster with softening lowered so real unbound bodies can
+  # appear (needs a smaller timestep to stay accurate -- see the Help
+  # file); whether any given seed ends with a nonzero instantaneously-
+  # unbound count varies -- see the Help file's EXP-11 for how to assess
+  # this properly across several seeds
   python main.py --mode cluster --n_bodies 60 --softening_pc 0.0338 \
-    --steps_per_crossing 150 --n_relax 40
+    --steps_per_crossing 150 --n_relax 40 --seed 0
 
   # A cold protogalactic sphere collapsing and violently relaxing
   python main.py --mode galaxy

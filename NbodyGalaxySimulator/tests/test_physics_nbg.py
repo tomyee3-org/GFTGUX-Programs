@@ -271,6 +271,64 @@ CORE_MODULE_FILES = (
 )
 HELP_FILE = "NbodyGalaxySimulator.html"
 
+# Shared development/audit-history leak sweep, applied identically to the
+# HTML help file (TestHelpFile) and the four executable .py modules
+# (TestModuleDiscovery) -- a reviewer name, round marker, or reference to
+# this project's own test suite is exactly as much a leak in one as the
+# other. Audit5 regression (Codex P1-3, Grok P2-1): a literal phrase
+# blacklist alone is brittle -- "regression fixtures" (a novel two-word
+# phrase not on the Audit3-era list) and a bare test-method-name reference
+# with no "TestClass." prefix (evading the original TestClass.test_method
+# regex) both slipped past the Audit4-era version of this sweep. Broadened
+# here with additional phrases and two more general regexes: one for any
+# literal path under this project's own tests/ directory (a student-facing
+# file legitimately never needs to name that path at all, in any phrasing),
+# and one for any long, multi-word test_-prefixed identifier (real unittest
+# method names in this project are verbose, multi-clause sentences -- at
+# least 4 underscore-separated words -- unlike any ordinary CLI flag or
+# variable name a student-facing file would plausibly contain).
+LEAK_PHRASES = (
+    "Claude", "Copilot", "Gemini", "Codex", "Grok",
+    "Critique", "Audit1", "Audit2", "Audit3",
+    "ChatGPT", "GPT-5", "Kickoff", "prior release",
+    "regression test", "test suite", "test fixtures", "test fixture",
+    "regression fixture", "development sweep", "seed sweep", "audit trail",
+)
+# A leaked test-name reference wrapped across a comment's line break (e.g.
+# "# TestFoo.\n    # test_bar") is just as much a leak as one on a single
+# line, so this pattern tolerates whitespace and an intervening "#"
+# between the dot and the "test_" that follows it.
+LEAK_TEST_METHOD_PATTERN = re.compile(
+    r"Test[A-Z][a-zA-Z]*\.\s*\n?\s*(#\s*)?test_[a-zA-Z_]+"
+)
+# Any literal reference to this project's own tests/ directory (e.g.
+# "tests/test_physics_nbg.py"), independent of surrounding phrasing.
+LEAK_TEST_PATH_PATTERN = re.compile(r"tests[\\/]test_[A-Za-z_]+\.py")
+# A bare, multi-word test_-prefixed identifier (at least 4 underscore-
+# separated words after "test_"), the shape of an actual unittest method
+# name in this project -- catches a leaked reference even with no
+# "TestClass." prefix and no tests/ path alongside it.
+LEAK_BARE_TEST_NAME_PATTERN = re.compile(r"\btest_(?:[a-z0-9]+_){3,}[a-z0-9]+\b")
+
+
+def _assert_no_leaked_history(testcase, source, label):
+    """Run the full leak sweep (see LEAK_PHRASES et al. above) against one
+    source string, reporting failures against ``label`` (a file name)."""
+    for phrase in LEAK_PHRASES:
+        with testcase.subTest(name=label, phrase=phrase):
+            testcase.assertNotIn(phrase, source)
+    with testcase.subTest(name=label, phrase="TestClass.test_method"):
+        testcase.assertIsNone(LEAK_TEST_METHOD_PATTERN.search(source))
+    with testcase.subTest(name=label, phrase="tests/test_*.py path"):
+        testcase.assertIsNone(LEAK_TEST_PATH_PATTERN.search(source))
+    match = LEAK_BARE_TEST_NAME_PATTERN.search(source)
+    with testcase.subTest(name=label, phrase="bare multi-word test_ identifier"):
+        testcase.assertIsNone(
+            match,
+            f"found a test-method-shaped identifier {match.group(0)!r} in {label}"
+            if match else None,
+        )
+
 
 def find_module_dir(start):
     """Find the nearest ancestor containing all four core program modules."""
@@ -512,38 +570,21 @@ class TestMetadataAndCompatibility(unittest.TestCase):
 
     def test_no_review_or_audit_history_leaked_into_core_modules(self):
         """
-        Audit3 addition (Codex's required correction, Grok P3-1): the
-        HTML help file has long had its own leakage sweep (see
-        TestHelpFile.test_no_review_or_audit_history_leaked_into_
-        student_help), but the four executable .py modules a student
-        also reads directly did not have an equivalent check -- a
-        reviewer name, round marker, "prior release" narrative aside, or
-        a literal reference to this project's own test names could slip
-        into a docstring or comment there just as easily. This project's
-        development history belongs ONLY in this test file's own module
-        docstring; every student-facing/executable file is swept here.
+        Audit3 addition (Codex's required correction, Grok P3-1); sweep
+        broadened in Audit5 (see LEAK_PHRASES et al. above and
+        _assert_no_leaked_history()). The HTML help file has long had its
+        own leakage sweep (see TestHelpFile's own version of this check),
+        but the four executable .py modules a student also reads directly
+        did not have an equivalent check -- a reviewer name, round
+        marker, "prior release" narrative aside, or a literal reference
+        to this project's own test names could slip into a docstring or
+        comment there just as easily. This project's development history
+        belongs ONLY in this test file's own module docstring; every
+        student-facing/executable file is swept here.
         """
-        phrases = ("Claude", "Copilot", "Gemini", "Codex", "Grok",
-                   "Critique", "Audit1", "Audit2", "Audit3",
-                   "ChatGPT", "GPT-5", "Kickoff", "prior release",
-                   "regression test", "test suite", "test fixtures")
-        # A leaked test-name reference wrapped across a comment's line
-        # break (e.g. "# TestFoo.\n    # test_bar") is just as much a
-        # leak as one on a single line, so this pattern tolerates
-        # whitespace and an intervening "#" between the dot and the
-        # "test_" that follows it -- an earlier, single-line-only version
-        # of this pattern missed exactly such a wrapped reference in this
-        # project's own source (found and fixed during this round).
-        test_name_pattern = re.compile(
-            r"Test[A-Z][a-zA-Z]*\.\s*\n?\s*(#\s*)?test_[a-zA-Z_]+"
-        )
         for name in CORE_MODULE_FILES:
             source = (MODULE_DIR / name).read_text(encoding="utf-8")
-            for phrase in phrases:
-                with self.subTest(name=name, phrase=phrase):
-                    self.assertNotIn(phrase, source)
-            with self.subTest(name=name, phrase="TestClass.test_method"):
-                self.assertIsNone(test_name_pattern.search(source))
+            _assert_no_leaked_history(self, source, name)
 
     def test_version_command(self):
         result = run_cli(["--version"])
@@ -761,6 +802,32 @@ class TestAthanassoulaSoftening(unittest.TestCase):
         with self.assertRaises(ValueError):
             phys.athanassoula_softening(0, 1.0)
 
+    def test_underflowing_result_raises_instead_of_violating_positive_contract(self):
+        """
+        Audit5 regression (Codex P1-1, case I): for a sufficiently small
+        (but individually finite and positive) scale_radius, 0.98 *
+        scale_radius * n_bodies**(-0.26) underflows all the way to
+        exactly 0.0 in float64 -- silently violating this function's own
+        documented "always returns a positive softening length"
+        contract, rather than signaling that no positive float64 value
+        can represent the true (infinitesimally small) result. Must
+        raise a clear ValueError, with no RuntimeWarning escaping first.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with self.assertRaises(ValueError):
+                phys.athanassoula_softening(5000, 5e-324)
+
+    def test_ordinary_inputs_are_unaffected_by_the_underflow_check(self):
+        """
+        Companion negative control for the case-I regression above: the
+        new postcondition must not reject any input it previously
+        accepted.
+        """
+        value = phys.athanassoula_softening(200, 1.0)
+        self.assertGreater(value, 0.0)
+        self.assertTrue(math.isfinite(value))
+
 
 # ======================================================================
 class TestDirectAcceleration(unittest.TestCase):
@@ -896,6 +963,60 @@ class TestDirectAcceleration(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_extreme_but_representable_separation_computes_correct_subnormal_force(self):
+        """
+        Audit5 regression (Codex P1-1, case B): a pair separation of
+        order 1e200 makes the naive dx**2 overflow to +inf, which used
+        to make that source's inv_r3 term evaluate to exactly 0.0 --
+        finite, not nan/inf, so a downstream isfinite(acc) postcondition
+        never caught it -- discarding a real, representable (here,
+        subnormal) force. The true softened acceleration magnitude,
+        G * m / r^2 (softening negligible at this separation), is
+        approximately 6.67430e-311 m/s^2, itself a subnormal but valid
+        float64 value; this asserts that exact value, not merely
+        finiteness or a nonzero sign.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e200, 0.0, 0.0]])
+        masses = np.array([1.0e100, 1.0e100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc = phys.compute_accelerations_direct(positions, masses, 1.0)
+        expected = phys.G * 1.0e100 / 1.0e200 / 1.0e200
+        self.assertAlmostEqual(acc[0, 0] / expected, 1.0, places=6)
+        self.assertAlmostEqual(acc[1, 0] / -expected, 1.0, places=6)
+        self.assertEqual(acc[0, 1], 0.0)
+        self.assertEqual(acc[0, 2], 0.0)
+
+    def test_partial_pair_overflow_no_longer_raises_partial_answers_are_correct(self):
+        """
+        Audit5 regression (Codex P1-1, case D): a mixed configuration
+        with one ordinary-scale pair (separation 1) and one extreme-scale
+        pair (separation 1e200) previously made direct summation raise
+        ValueError outright (the far pair's r^2 overflowed) while the
+        tree method silently returned a finite-looking answer missing
+        that pair's contribution entirely -- an inconsistency where the
+        "clean" behavior and the "corrupted" behavior disagreed on the
+        same physical setup. Now both methods compute the SAME correct
+        result: the near pair contributes normally, and the far pair's
+        true contribution (~6.67e-11 / (1e200)^2 =~ 6.67e-411 m/s^2)
+        correctly underflows to 0.0 -- a legitimate correctly-rounded
+        answer for a value smaller than the smallest representable
+        subnormal, not a silently dropped one.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e200, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        masses = np.array([1.0, 1.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc_direct = phys.compute_accelerations_direct(positions, masses, 1.0)
+        self.assertTrue(np.all(np.isfinite(acc_direct)))
+        # Body 0 (near the third body, negligibly perturbed by the
+        # far body) accelerates toward body 2; the far body's pull is
+        # representable-but-underflows-to-zero, not a dropped nonzero
+        # contribution.
+        self.assertGreater(acc_direct[0, 0], 0.0)
+        self.assertAlmostEqual(acc_direct[0, 0], -acc_direct[2, 0], places=20)
+        self.assertEqual(acc_direct[1, 0], 0.0)
+
 
 # ======================================================================
 class TestOctreeAndTreeAcceleration(unittest.TestCase):
@@ -937,10 +1058,27 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
                                              self.softening)
 
     def test_coincident_bodies_do_not_crash_and_give_zero_force(self):
+        """
+        Audit5 fix (Gemini): six exactly-coincident bodies inevitably force
+        the same MAX_TREE_DEPTH "bodies could not be separated" bucket-leaf
+        RuntimeWarning that test_coincident_bodies_emit_max_tree_depth_warning
+        below asserts on directly -- this test's own point is the zero-net-
+        force result, not that warning, but leaving it unhandled let it
+        bleed into this process's real stderr on every run of this test,
+        an unrelated and unasserted emission that a quiet, isolated test
+        run should not produce. Captured (and loosely sanity-checked) here
+        instead, exactly as the dedicated warning test below does.
+        """
         positions = np.zeros((6, 3))
         masses = np.ones(6)
-        acc = phys.compute_accelerations_tree(positions, masses, 0.5, 1.0)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            acc = phys.compute_accelerations_tree(positions, masses, 0.5, 1.0)
         self.assertTrue(np.allclose(acc, 0.0))
+        self.assertTrue(
+            any(issubclass(w.category, RuntimeWarning) for w in caught),
+            "expected the usual MAX_TREE_DEPTH warning for six coincident bodies"
+        )
 
     def test_max_depth_bucket_leaf_matches_direct_summation_exactly(self):
         """
@@ -991,9 +1129,15 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
         np.testing.assert_allclose(acc_tree, acc_direct, rtol=1e-12, atol=0.0)
 
     def test_degenerate_single_point_box_has_positive_half_size(self):
+        """Four exactly-coincident bodies also force the MAX_TREE_DEPTH
+        bucket-leaf warning (same reason as the coincident-bodies test
+        above); captured here for the same reason -- this test's point is
+        the bounding-box half-size, not that warning."""
         positions = np.full((4, 3), 2.0)
         masses = np.ones(4)
-        root = phys.build_octree(positions, masses)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            root = phys.build_octree(positions, masses)
         self.assertGreater(root.half_size, 0.0)
 
     def test_coincident_bodies_emit_max_tree_depth_warning(self):
@@ -1105,6 +1249,58 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
                 "indicates the target body's own node was accepted as a "
                 "monopole (self-force contamination).",
             )
+
+    def test_extreme_but_representable_separation_computes_correct_subnormal_force(self):
+        """
+        Audit5 regression (Codex P1-1, case B): theta=0 forces a full
+        descent to the leaves, so this is the tree-method twin of
+        TestDirectAcceleration's identically-named test -- before this
+        fix, the tree method returned two exact zero vectors for this
+        pair (the leaf-loop's r2 overflowed to +inf, making r2**-1.5
+        evaluate to exactly 0.0), while the direct method raised
+        ValueError for the same input: a method-selection-dependent
+        difference between "clean rejection" and "silent zero" for what
+        should be one shared numerical contract. Both methods must now
+        return the same correct (subnormal) result.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e200, 0.0, 0.0]])
+        masses = np.array([1.0e100, 1.0e100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc_tree = phys.compute_accelerations_tree(positions, masses, 0.0, 1.0)
+            acc_direct = phys.compute_accelerations_direct(positions, masses, 1.0)
+        expected = phys.G * 1.0e100 / 1.0e200 / 1.0e200
+        self.assertAlmostEqual(acc_tree[0, 0] / expected, 1.0, places=6)
+        self.assertAlmostEqual(acc_tree[1, 0] / -expected, 1.0, places=6)
+        np.testing.assert_allclose(acc_tree, acc_direct, rtol=1e-6, atol=0.0)
+
+    def test_direct_and_tree_agree_on_mixed_ordinary_and_extreme_pair(self):
+        """
+        Audit5 regression (Codex P1-1, case D): direct summation and the
+        theta=0 tree walk must obey the same acceptance/rejection
+        contract for a configuration mixing one ordinary-scale pair with
+        one extreme-scale (separation 1e200) pair -- previously direct
+        summation raised ValueError while the tree method silently
+        returned a partial (far-pair-omitted) answer for this exact
+        input. Building the octree over this input also triggers the
+        (unrelated, and here expected) MAX_TREE_DEPTH warning, because
+        bodies at x=0 and x=1 cannot be separated by octant subdivision
+        at a scale set by the x=1e200 body -- allowed to fire normally
+        here rather than forced to error, since it is a real, already-
+        tested structural warning (see TestOctreeAndTreeAcceleration's
+        coincident-bodies tests above), not evidence of a numerical
+        contract violation.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e200, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        masses = np.array([1.0, 1.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc_direct = phys.compute_accelerations_direct(positions, masses, 1.0)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            acc_tree = phys.compute_accelerations_tree(positions, masses, 0.0, 1.0)
+        self.assertTrue(np.all(np.isfinite(acc_tree)))
+        np.testing.assert_allclose(acc_tree, acc_direct, rtol=1e-6, atol=1e-320)
 
 
 # ======================================================================
@@ -1252,6 +1448,80 @@ class TestEnergyMomentumAndVirial(unittest.TestCase):
         with self.assertRaises(ValueError):
             phys.center_of_mass_velocity(np.zeros((5, 3)), np.ones(4))
 
+    def test_extreme_separation_computes_correct_representable_potential(self):
+        """
+        Audit5 regression (Codex P1-1, case A): a pair separation of
+        order 1e200 makes the naive r^2 overflow to +inf, which used to
+        make potential_energy() return exactly 0.0 (dividing by the
+        resulting +inf) for this pair, even though the true softened
+        potential energy, -G*m1*m2/r, is comfortably representable
+        (approximately -6.67430e-11 J). Asserts the exact value, not
+        merely finiteness or a nonzero sign.
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e200, 0.0, 0.0]])
+        masses = np.array([1.0e100, 1.0e100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            u = phys.potential_energy(positions, masses, 1.0)
+        expected = -phys.G * 1.0e100 * 1.0e100 / 1.0e200
+        self.assertAlmostEqual(u / expected, 1.0, places=6)
+
+    def test_extreme_velocity_raises_instead_of_returning_inf(self):
+        """
+        Audit5 regression (Codex P1-1, case E): a velocity of order
+        1e200 makes v^2 (hence 0.5*m*v^2) genuinely exceed float64's
+        representable range even after a scale-safe reordering, for a
+        mass that is not itself tiny enough to compensate -- the true
+        kinetic energy really is not representable in float64 here, so
+        this must raise a clear ValueError rather than silently return
+        +inf.
+        """
+        velocities = np.array([[1.0e200, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        masses = np.array([1.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with self.assertRaises(ValueError):
+                phys.kinetic_energy(velocities, masses)
+
+    def test_tiny_mass_extreme_velocity_kinetic_energy_stays_representable(self):
+        """
+        Companion positive control for the case-E regression above: a
+        tiny enough mass paired with the same enormous velocity gives a
+        0.5*m*v^2 that IS representable in float64 even though v*v alone
+        overflows -- this must be computed correctly, not rejected, by
+        the scale-safe per-component reordering (0.5*m*v_component
+        computed and multiplied by v_component before v_component**2 is
+        ever formed as a standalone intermediate).
+        """
+        velocities = np.array([[1.0e200, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        masses = np.array([1.0e-100, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            ke = phys.kinetic_energy(velocities, masses)
+        expected = 0.5 * 1.0e-100 * 1.0e200 * 1.0e200
+        self.assertTrue(math.isfinite(ke))
+        self.assertAlmostEqual(ke / expected, 1.0, places=10)
+
+    def test_extreme_masses_center_of_mass_computes_correct_normalized_result(self):
+        """
+        Audit5 regression (Codex P1-1, case F): summing three masses of
+        1e308 kg each overflows sum(masses) to +inf, which used to make
+        center_of_mass() return [0, 0, 0] (after a NumPy overflow
+        warning) instead of the true mass-weighted mean. Since the three
+        masses are equal, normalizing by the largest mass first (rather
+        than summing the raw masses) gives the correct result regardless
+        of the masses' absolute scale.
+        """
+        positions = np.eye(3)
+        masses = np.full(3, 1.0e308)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            com = phys.center_of_mass(positions, masses)
+            com_v = phys.center_of_mass_velocity(positions, masses)
+        expected = np.full(3, 1.0 / 3.0)
+        np.testing.assert_allclose(com, expected, rtol=1e-12)
+        np.testing.assert_allclose(com_v, expected, rtol=1e-12)
+
 
 # ======================================================================
 class TestLagrangianRadii(unittest.TestCase):
@@ -1302,6 +1572,23 @@ class TestLagrangianRadii(unittest.TestCase):
         masses[2] = -1.0
         with self.assertRaises(ValueError):
             phys.lagrangian_radii(self.positions, masses, [0.5])
+
+    def test_extreme_positions_compute_correct_finite_radius(self):
+        """
+        Audit5 regression (Codex P1-1, case G): positions of order 1e200
+        make the naive dx**2 overflow to +inf, which used to make
+        half_mass_radius() return +inf even though every true Euclidean
+        radius here is finite and exactly representable (squaring before
+        taking the square root loses range the direct distance never
+        needed).
+        """
+        positions = np.array([[1.0e200, 0.0, 0.0], [-1.0e200, 0.0, 0.0]])
+        masses = np.array([1.0, 1.0])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            r50 = phys.half_mass_radius(positions, masses, center=[0.0, 0.0, 0.0])
+        self.assertTrue(math.isfinite(r50))
+        self.assertAlmostEqual(r50 / 1.0e200, 1.0, places=10)
 
 
 # ======================================================================
@@ -1418,6 +1705,25 @@ class TestEscapersAndFastFraction(unittest.TestCase):
         with self.assertRaises(ValueError):
             phys.specific_energies(positions, velocities, masses, 1.0)
 
+    def test_extreme_separation_computes_correct_specific_potential(self):
+        """
+        Audit5 regression (Codex P1-1, case C): the same extreme
+        separation as potential_energy()'s case-A regression above used
+        to make specific_energies() return [0.0, 0.0] for this pair
+        (dividing by the overflowed +inf distance), even though the true
+        specific potential at each body, -G*m_other/r, is comfortably
+        representable (approximately -6.67430e-111 J/kg).
+        """
+        positions = np.array([[0.0, 0.0, 0.0], [1.0e200, 0.0, 0.0]])
+        velocities = np.zeros((2, 3))
+        masses = np.array([1.0e100, 1.0e100])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            energies = phys.specific_energies(positions, velocities, masses, 1.0)
+        expected = -phys.G * 1.0e100 / 1.0e200
+        self.assertAlmostEqual(energies[0] / expected, 1.0, places=6)
+        self.assertAlmostEqual(energies[1] / expected, 1.0, places=6)
+
 
 # ======================================================================
 class TestTimescales(unittest.TestCase):
@@ -1453,6 +1759,23 @@ class TestTimescales(unittest.TestCase):
             phys.free_fall_time(0.0)
         with self.assertRaises(ValueError):
             phys.relaxation_time(1, 1.0, 1.0)  # below lo=2
+
+    def test_extreme_low_density_computes_correct_finite_free_fall_time(self):
+        """
+        Audit5 regression (Codex P1-1, case H): forming 32*G*rho as one
+        combined denominator underflows toward zero for a sufficiently
+        small (but positive and finite) density, which used to make the
+        overall sqrt(3*pi/(32*G*rho)) overflow to +inf even though the
+        true free-fall time is comfortably representable. Evaluating the
+        two square roots separately (the density-independent constant,
+        and 1/rho) keeps both intermediates in range; expected value from
+        Codex Audit5: approximately 6.642899968666822e154 seconds.
+        """
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            t = phys.free_fall_time(1.0e-300)
+        self.assertTrue(math.isfinite(t))
+        self.assertAlmostEqual(t / 6.642899968666822e154, 1.0, places=10)
 
 
 # ======================================================================
@@ -2673,41 +2996,283 @@ class TestChaosRealRunRegression(unittest.TestCase):
 
 
 # ======================================================================
+class TestMetamorphicProperties(unittest.TestCase):
+    """
+    Audit5 addition (Codex P3-3 / Copilot A5-4): most of this suite checks
+    specific numbers against a specific expected value, which a matching
+    implementation bug can, in principle, satisfy by coincidence. A
+    metamorphic/property test instead checks a relationship that must
+    hold for ANY valid input -- translating every body leaves gravity
+    unchanged, rotating the whole system rotates the forces the same way,
+    the order bodies are listed in cannot matter, scaling every mass
+    scales every force by the same factor -- so it is much harder for a
+    real bug (a stray absolute-coordinate dependency, an axis mixed up, an
+    index used instead of a mass, a missing factor) to satisfy by luck.
+    """
+
+    def test_translation_invariance_of_forces_and_potential_energy(self):
+        """Newtonian gravity depends only on relative separations, so a
+        uniform rigid shift applied to every body's position must leave
+        every computed acceleration (direct and tree) and the total
+        potential energy unchanged."""
+        rng = np.random.default_rng(500)
+        n = 15
+        positions = rng.normal(size=(n, 3)) * 5.0
+        masses = rng.uniform(0.5, 3.0, size=n)
+        softening = 0.3
+        shift = np.array([40.0, -25.0, 15.0])
+
+        acc = phys.compute_accelerations_direct(positions, masses, softening)
+        acc_shifted = phys.compute_accelerations_direct(
+            positions + shift, masses, softening
+        )
+        self.assertTrue(np.allclose(acc, acc_shifted, rtol=1e-9, atol=1e-25))
+
+        pe = phys.potential_energy(positions, masses, softening)
+        pe_shifted = phys.potential_energy(positions + shift, masses, softening)
+        self.assertAlmostEqual(pe, pe_shifted, delta=abs(pe) * 1e-9)
+
+        acc_tree = phys.compute_accelerations_tree(positions, masses, 0.5, softening)
+        acc_tree_shifted = phys.compute_accelerations_tree(
+            positions + shift, masses, 0.5, softening
+        )
+        self.assertTrue(np.allclose(acc_tree, acc_tree_shifted, rtol=1e-6, atol=1e-20))
+
+    def test_rotation_covariance_of_forces_and_invariance_of_energies(self):
+        """Rotating every position and velocity by the same fixed rotation
+        must rotate the resulting acceleration vectors by that same
+        rotation, while the (rotation-independent) potential and kinetic
+        energies must not change at all."""
+        rng = np.random.default_rng(501)
+        n = 15
+        positions = rng.normal(size=(n, 3)) * 5.0
+        velocities = rng.normal(size=(n, 3)) * 2.0
+        masses = rng.uniform(0.5, 3.0, size=n)
+        softening = 0.3
+
+        # A fixed, arbitrary rotation: 40 degrees about z, then 25 about x.
+        cz, sz = math.cos(math.radians(40.0)), math.sin(math.radians(40.0))
+        cx, sx = math.cos(math.radians(25.0)), math.sin(math.radians(25.0))
+        rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+        rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
+        R = rx @ rz
+
+        positions_rot = positions @ R.T
+        velocities_rot = velocities @ R.T
+
+        acc = phys.compute_accelerations_direct(positions, masses, softening)
+        acc_rot = phys.compute_accelerations_direct(positions_rot, masses, softening)
+        self.assertTrue(np.allclose(acc @ R.T, acc_rot, rtol=1e-9, atol=1e-25))
+
+        pe = phys.potential_energy(positions, masses, softening)
+        pe_rot = phys.potential_energy(positions_rot, masses, softening)
+        self.assertAlmostEqual(pe, pe_rot, delta=abs(pe) * 1e-9)
+
+        ke = phys.kinetic_energy(velocities, masses)
+        ke_rot = phys.kinetic_energy(velocities_rot, masses)
+        self.assertAlmostEqual(ke, ke_rot, delta=abs(ke) * 1e-9)
+
+    def test_permutation_invariance_of_accelerations_and_aggregate_quantities(self):
+        """The order bodies are listed in is bookkeeping, not physics: with
+        positions, masses (and velocities) permuted consistently, direct
+        and tree accelerations must be permuted by that exact same
+        permutation, and every quantity that sums or aggregates over all
+        bodies (potential energy, kinetic energy, center of mass) must be
+        completely unaffected."""
+        rng = np.random.default_rng(502)
+        n = 20
+        positions = rng.normal(size=(n, 3)) * 4.0
+        velocities = rng.normal(size=(n, 3)) * 1.5
+        masses = rng.uniform(0.5, 2.5, size=n)
+        softening = 0.25
+        perm = rng.permutation(n)
+
+        acc = phys.compute_accelerations_direct(positions, masses, softening)
+        acc_perm = phys.compute_accelerations_direct(
+            positions[perm], masses[perm], softening
+        )
+        self.assertTrue(np.allclose(acc[perm], acc_perm, rtol=1e-9, atol=1e-25))
+
+        acc_tree = phys.compute_accelerations_tree(positions, masses, 0.5, softening)
+        acc_tree_perm = phys.compute_accelerations_tree(
+            positions[perm], masses[perm], 0.5, softening
+        )
+        self.assertTrue(np.allclose(acc_tree[perm], acc_tree_perm,
+                                     rtol=1e-6, atol=1e-20))
+
+        pe = phys.potential_energy(positions, masses, softening)
+        pe_perm = phys.potential_energy(positions[perm], masses[perm], softening)
+        self.assertAlmostEqual(pe, pe_perm, delta=abs(pe) * 1e-10)
+
+        ke = phys.kinetic_energy(velocities, masses)
+        ke_perm = phys.kinetic_energy(velocities[perm], masses[perm])
+        self.assertAlmostEqual(ke, ke_perm, delta=abs(ke) * 1e-10)
+
+        com = phys.center_of_mass(positions, masses)
+        com_perm = phys.center_of_mass(positions[perm], masses[perm])
+        self.assertTrue(np.allclose(com, com_perm, rtol=1e-10, atol=1e-20))
+
+    def test_direct_and_tree_acceleration_scale_linearly_with_source_masses(self):
+        """Gravity is linear in the source mass: scaling every body's mass
+        by the same constant c must scale every computed acceleration by
+        exactly c, for both force-evaluation methods."""
+        rng = np.random.default_rng(503)
+        n = 18
+        positions = rng.normal(size=(n, 3)) * 4.0
+        masses = rng.uniform(0.5, 3.0, size=n)
+        softening = 0.2
+        c = 7.5
+
+        acc = phys.compute_accelerations_direct(positions, masses, softening)
+        acc_scaled = phys.compute_accelerations_direct(positions, masses * c, softening)
+        self.assertTrue(np.allclose(acc * c, acc_scaled, rtol=1e-9, atol=1e-25))
+
+        acc_tree = phys.compute_accelerations_tree(positions, masses, 0.5, softening)
+        acc_tree_scaled = phys.compute_accelerations_tree(
+            positions, masses * c, 0.5, softening
+        )
+        self.assertTrue(np.allclose(acc_tree * c, acc_tree_scaled,
+                                     rtol=1e-7, atol=1e-20))
+
+    def test_theta_zero_matches_direct_across_several_random_configurations(self):
+        """Copilot A5-4: the existing theta=0-reproduces-direct check (see
+        TestOctreeAndTreeAcceleration) uses one fixed configuration; here
+        the same property -- an exact full-tree descent (theta=0) must
+        exactly reproduce direct summation -- is checked across several
+        independently drawn random configurations of varying size, spread
+        and softening, so a coincidental agreement at one particular seed
+        cannot pass unnoticed."""
+        for seed in (11, 12, 13, 14, 15):
+            with self.subTest(seed=seed):
+                rng = np.random.default_rng(seed)
+                n = int(rng.integers(5, 40))
+                positions = rng.normal(size=(n, 3)) * rng.uniform(1.0, 10.0)
+                masses = rng.uniform(0.1, 5.0, size=n)
+                softening = float(rng.uniform(0.05, 1.0))
+                acc_direct = phys.compute_accelerations_direct(
+                    positions, masses, softening
+                )
+                acc_tree = phys.compute_accelerations_tree(
+                    positions, masses, 0.0, softening
+                )
+                self.assertTrue(np.allclose(acc_direct, acc_tree,
+                                             rtol=1e-7, atol=1e-30))
+
+    def test_late_time_window_stats_ignore_history_before_the_window(self):
+        """
+        Metamorphic property for the galaxy quasi-equilibrium classifier
+        (see run_galaxy() / _late_time_window_stats()): the late window is
+        defined purely by elapsed time relative to the run's own start and
+        end, so any snapshot strictly BEFORE the window's start time is
+        free to take on any value whatsoever -- however noisy, however far
+        from equilibrium -- without moving the verdict at all, as long as
+        the run's overall start/end times and the window's own contents
+        are unchanged. This is the precise sense in which "settled" means
+        a property of the tail alone, not of the run's full history --
+        distinct from (and complementary to) the target_snapshots
+        sampling-density invariance already tested elsewhere.
+        """
+        late_t = np.linspace(80.0, 100.0, 20)
+        rng = np.random.default_rng(600)
+        late_r50 = 10.0 + rng.normal(scale=0.05, size=late_t.size)
+        late_q = 1.0 + rng.normal(scale=0.02, size=late_t.size)
+
+        # Case A: minimal early history -- a single wildly different point.
+        t_a = np.concatenate([[0.0], late_t])
+        r50_a = np.concatenate([[500.0], late_r50])
+        q_a = np.concatenate([[9.0], late_q])
+
+        # Case B: a densely sampled, extremely noisy early history spanning
+        # the SAME [t[0], window_start) interval.
+        early_t = np.linspace(0.0, 79.0, 200)
+        early_r50 = rng.uniform(1.0, 5000.0, size=early_t.size)
+        early_q = rng.uniform(-50.0, 50.0, size=early_t.size)
+        t_b = np.concatenate([early_t, late_t])
+        r50_b = np.concatenate([early_r50, late_r50])
+        q_b = np.concatenate([early_q, late_q])
+
+        out_a = phys._late_time_window_stats(t_a, r50_a, q_a)
+        out_b = phys._late_time_window_stats(t_b, r50_b, q_b)
+
+        self.assertEqual(out_a["n_samples"], late_t.size)
+        self.assertEqual(out_b["n_samples"], late_t.size)
+        self.assertTrue(out_a["is_settled"])
+        self.assertTrue(out_b["is_settled"])
+        self.assertAlmostEqual(out_a["r50_fractional_range"],
+                                out_b["r50_fractional_range"])
+        self.assertAlmostEqual(out_a["virial_ratio_range"],
+                                out_b["virial_ratio_range"])
+
+    def test_late_time_window_stats_calm_history_does_not_rescue_an_unsettled_tail(self):
+        """The symmetric case: a genuinely unsettled late window (large r50
+        drift and virial-ratio range) must be reported as unsettled even
+        when everything before the window was perfectly calm and steady --
+        good behavior earlier in the run cannot paper over bad behavior in
+        the window that actually matters."""
+        late_t = np.linspace(80.0, 100.0, 20)
+        late_r50 = np.linspace(10.0, 15.0, 20)   # 50% drift over the window
+        late_q = np.linspace(0.5, 1.6, 20)       # range 1.1 > 0.60 threshold
+
+        early_t = np.linspace(0.0, 79.0, 200)
+        early_r50 = np.full(early_t.size, 3.0)
+        early_q = np.full(early_t.size, 1.0)
+
+        t = np.concatenate([early_t, late_t])
+        r50 = np.concatenate([early_r50, late_r50])
+        q = np.concatenate([early_q, late_q])
+
+        out = phys._late_time_window_stats(t, r50, q)
+        self.assertEqual(out["n_samples"], late_t.size)
+        self.assertFalse(out["is_settled"])
+        self.assertGreater(out["r50_fractional_range"],
+                            phys.LATE_WINDOW_R50_RANGE_THRESHOLD)
+        self.assertGreater(out["virial_ratio_range"],
+                            phys.LATE_WINDOW_Q_RANGE_THRESHOLD)
+
+
+# ======================================================================
 class TestRunModes(unittest.TestCase):
     """Small, fast end-to-end runs of the three public per-mode functions."""
 
-    def test_exp11_reduced_softening_example_shows_unbound_bodies(self):
+    def test_exp11_reduced_softening_example_shows_seed_dependent_outcome(self):
         """
-        Audit4 regression (Codex P2-3): EXP-11 and main.py's module
-        docstring point students at a specific reduced-softening command
-        as a practical demonstration that lowering softening reveals
-        instantaneously-unbound bodies the default softening suppresses.
-        That command must actually be validated, not merely plausible --
-        this reproduces it exactly (n_bodies=60, softening_pc=0.0338,
-        steps_per_crossing=150, n_relax=40) across two seeds spanning the
-        range measured during development (seeds 0 and 4, both giving 1-3
-        of 60) and asserts at least one instantaneously-unbound body
-        appears by the end of the run, unlike this program's default
-        softening at the same N (see the companion cluster test class
-        for that zero-escaper default behavior). This test is
-        deliberately slower than the rest of this class (a real N=60,
-        ~11,000-step integration) because a fast toy-sized substitute
-        would not actually validate the command students are told to run.
+        Audit5 regression (Codex P1-4): EXP-11 and main.py's module
+        docstring previously promised that this exact reduced-softening
+        command produces 1-3 instantaneously-unbound bodies (out of 60)
+        "across seeds 0-4" -- and the prior (Audit4) regression here
+        tested only the two favorable endpoint seeds (0 and 4), both of
+        which happen to give a nonzero count. Codex Audit5 found seed=1
+        gives exactly 0, contradicting that promise outright; this
+        program's own docs and this test have since been reworded to a
+        stochastic tendency ("some seeds show none at all") rather than a
+        guaranteed range for every named seed. This regression checks
+        that reworded claim against real integrations of three of the
+        named seeds -- 0 and 4 (nonzero) and 1 (the zero counterexample)
+        -- confirming genuine seed-to-seed variance exists rather than
+        asserting a fixed outcome for any one seed. Deliberately slower
+        than the rest of this class (three real N=60, ~11,000-step
+        integrations) because a fast toy-sized substitute would not
+        actually validate the command students are told to run.
         """
-        for seed in (0, 4):
-            with self.subTest(seed=seed):
-                r = phys.run_cluster(
-                    n_bodies=60, total_mass_msun=1.0e3, scale_radius_pc=1.0,
-                    softening_pc=0.0338, steps_per_crossing=150, n_relax=40.0,
-                    target_snapshots=30, seed=seed,
-                )
-                s = r["summary"]
-                self.assertGreaterEqual(
-                    s["n_unbound_final"], 1,
-                    f"seed {seed}: expected at least one instantaneously-"
-                    f"unbound body with this reduced-softening example; "
-                    f"got {s['n_unbound_final']}."
-                )
+        counts = {}
+        for seed in (0, 1, 4):
+            r = phys.run_cluster(
+                n_bodies=60, total_mass_msun=1.0e3, scale_radius_pc=1.0,
+                softening_pc=0.0338, steps_per_crossing=150, n_relax=40.0,
+                target_snapshots=30, seed=seed,
+            )
+            counts[seed] = r["summary"]["n_unbound_final"]
+        self.assertEqual(
+            counts.get(1), 0,
+            f"expected seed=1 to reproduce Codex Audit5's zero-unbound "
+            f"counterexample for this exact command; got {counts!r}."
+        )
+        self.assertTrue(
+            any(c >= 1 for seed, c in counts.items() if seed != 1),
+            f"expected at least one of seeds 0/4 to show a nonzero "
+            f"instantaneously-unbound count, demonstrating this is a "
+            f"seed-dependent tendency, not always zero either; got {counts!r}."
+        )
 
     def test_run_cluster_summary_and_reproducibility(self):
         kwargs = dict(n_bodies=30, total_mass_msun=1e2, scale_radius_pc=1.0,
@@ -2807,6 +3372,12 @@ class TestRunModes(unittest.TestCase):
         self.assertEqual(s["n_bodies"], 30)
         self.assertIn("time_of_deepest_collapse_myr", s)
         self.assertLessEqual(s["r50_minimum_pc"], s["r50_initial_pc"])
+        for key in ("late_window_fraction", "late_window_start_myr",
+                    "late_window_n_snapshots", "late_window_has_enough_snapshots",
+                    "late_r50_fractional_range", "late_r50_relative_drift",
+                    "late_r50_linear_slope_pc_per_myr", "late_virial_ratio_range",
+                    "late_window_is_settled"):
+            self.assertIn(key, s)
 
     def test_run_chaos_summary_fields(self):
         r = phys.run_chaos(n_bodies=15, total_mass_msun=1e2, scale_radius_pc=1.0,
@@ -2926,9 +3497,10 @@ class TestDriverValidation(unittest.TestCase):
         """Positive-control companion: no_plot=True with csvdir (and no
         outdir) set must succeed and leave exactly a CSV file, no PNG."""
         with tempfile.TemporaryDirectory() as tmp:
-            driver.run(mode="cluster", n_bodies=20, n_relax=0.1,
-                       steps_per_crossing=8, target_snapshots=10,
-                       seed=1, no_plot=True, csvdir=tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                driver.run(mode="cluster", n_bodies=20, n_relax=0.1,
+                           steps_per_crossing=8, target_snapshots=10,
+                           seed=1, no_plot=True, csvdir=tmp)
             written = os.listdir(tmp)
         self.assertTrue(any(name.endswith(".csv") for name in written))
         self.assertFalse(any(name.endswith(".png") for name in written))
@@ -2976,9 +3548,25 @@ class TestDriverValidation(unittest.TestCase):
 
 # ======================================================================
 class TestCsvOutput(unittest.TestCase):
+    """
+    Audit5 fix (Codex P3-2, raised across several prior rounds too): a
+    driver.run() call made directly (in-process, not through run_cli()'s
+    subprocess -- which already captures its child's stdout/stderr) prints
+    a full run summary plus CSV/PNG "saved to" status lines to THIS
+    process's own stdout, unless silenced -- which, run repeatedly across
+    every test below that only inspects the returned/written data, drowns
+    a real unittest failure or an unexpected warning in routine program
+    chatter. None of these tests asserts anything about printed text, so
+    each direct driver.run() call here is now wrapped in
+    contextlib.redirect_stdout() to keep a successful run of this suite
+    quiet; tests that DO check the printed narrative (TestCli's
+    _printed_cluster_summary/_printed_galaxy_summary helpers) already
+    capture it deliberately and are unaffected by this change.
+    """
     def test_cluster_csv_has_expected_header_and_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("matplotlib.pyplot.show"):
+            with mock.patch("matplotlib.pyplot.show"), \
+                 contextlib.redirect_stdout(io.StringIO()):
                 result = driver.run(mode="cluster", n_bodies=20, total_mass_msun=1e2,
                                      scale_radius_pc=1.0, n_relax=0.3,
                                      steps_per_crossing=8, target_snapshots=10,
@@ -2997,7 +3585,8 @@ class TestCsvOutput(unittest.TestCase):
 
     def test_galaxy_csv_header_matches_result_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("matplotlib.pyplot.show"):
+            with mock.patch("matplotlib.pyplot.show"), \
+                 contextlib.redirect_stdout(io.StringIO()):
                 driver.run(mode="galaxy", n_bodies=20, total_mass_msun=1e5,
                            radius_pc=50.0, n_freefall=0.5, steps_per_freefall=10,
                            target_snapshots=10, seed=2, csvdir=tmp, no_plot=False,
@@ -3045,7 +3634,8 @@ class TestCsvOutput(unittest.TestCase):
 
     def test_chaos_csv_header_matches_result_columns(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("matplotlib.pyplot.show"):
+            with mock.patch("matplotlib.pyplot.show"), \
+                 contextlib.redirect_stdout(io.StringIO()):
                 driver.run(mode="chaos", n_bodies=12, total_mass_msun=1e2,
                            scale_radius_pc=1.0, n_cross=2.0, steps_per_crossing=8,
                            target_snapshots=10, seed=2, perturbation_seed=1,
@@ -3060,7 +3650,8 @@ class TestCsvOutput(unittest.TestCase):
         header = ["a", "b"]
         rows = [["1", "2"]]
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("driver_nbg.datetime") as mock_dt:
+            with mock.patch("driver_nbg.datetime") as mock_dt, \
+                 contextlib.redirect_stdout(io.StringIO()):
                 mock_dt.now.return_value.strftime.return_value = "20990101_000000"
                 path1 = driver._write_csv(tmp, "test", header, rows)
                 path2 = driver._write_csv(tmp, "test", header, rows)
@@ -3225,9 +3816,16 @@ class TestCli(unittest.TestCase):
         """A minimal, valid galaxy-mode summary dict for exercising
         driver._print_galaxy_summary() directly, without paying for a
         real integration -- every field it reads is present, with
-        plausible defaults, and individual fields are overridden per
-        test to hit an exact boundary condition that a real run cannot
-        be reliably steered to."""
+        plausible defaults describing a run whose late-time window is
+        genuinely settled, and individual fields are overridden per test
+        to hit an exact boundary condition that a real run cannot be
+        reliably steered to. The late-time verdict this program actually
+        prints is governed ONLY by the late_window_* fields (see
+        _late_time_window_stats() in physics_nbg.py and Response-to-
+        Audit5's discussion of Codex Audit5 finding P1-2) -- never by
+        r50_minimum_pc/virial_ratio_final alone, which are retained here
+        only as the separate, purely factual "sampled minimum" figures
+        this narrative also reports."""
         s = dict(
             n_bodies=20, total_mass_msun=1.0e5, radius_pc=50.0,
             m_body_msun=5.0e3, virial_ratio_init=0.0,
@@ -3235,10 +3833,15 @@ class TestCli(unittest.TestCase):
             theta=0.5, method="tree", steps_per_freefall=10,
             target_snapshots=10, dt_myr=0.1, n_steps=100, n_snapshots=10,
             t_freefall_myr=1.0, n_freefall_requested=1.0, total_time_myr=1.0,
-            r50_initial_pc=50.0, r50_final_pc=40.0, r50_minimum_pc=20.0,
-            time_of_deepest_collapse_myr=0.5,
-            virial_ratio_initial=0.0, virial_ratio_final=1.0,
+            r50_initial_pc=50.0, r50_final_pc=30.0, r50_minimum_pc=20.0,
+            time_of_deepest_collapse_myr=0.3,
+            virial_ratio_initial=0.0, virial_ratio_final=1.05,
             virial_ratio_at_deepest_collapse=3.0,
+            late_window_fraction=0.2, late_window_start_myr=0.8,
+            late_window_n_snapshots=6, late_window_has_enough_snapshots=True,
+            late_r50_fractional_range=0.05, late_r50_relative_drift=0.01,
+            late_r50_linear_slope_pc_per_myr=0.02, late_virial_ratio_range=0.1,
+            late_window_is_settled=True,
             max_fractional_energy_drift=0.001, warnings=[],
         )
         s.update(overrides)
@@ -3250,68 +3853,121 @@ class TestCli(unittest.TestCase):
             driver._print_galaxy_summary(self._galaxy_summary(**overrides))
         return buf.getvalue()
 
-    def test_galaxy_narrative_does_not_claim_rebound_while_still_at_minimum(self):
+    def test_galaxy_narrative_declines_to_classify_with_too_few_late_snapshots(self):
         """
-        Audit4 regression (Codex P1-2): the narrative previously judged
-        "rebound" purely from Q_initial and Q_final, so a run whose
-        half-mass radius is STILL sitting at (or has only fluctuated
-        negligibly off) its own deepest collapse at the final recorded
-        time -- i.e. has not rebounded at all -- could still print the
-        "collapses, overshoots, and rebounds" narrative if Q_final
-        happened to coincide with near-1. Constructed here: the minimum
-        r50 occurs exactly at the final time (first-passage / still-
-        collapsing case), with virial_ratio_final deliberately set to
-        1.0 to isolate that this is judged by r50's own time series, not
-        by Q.
+        Audit5 regression (Codex P1-2): the terminal narrative must
+        never assert (or deny) sustained quasi-equilibrium from a run
+        whose late-time window contains too few stored snapshots to
+        actually assess settling -- regardless of what the (sampling-
+        dependent) r50 minimum happened to be. See
+        _late_time_window_stats()'s docstring for why this specific
+        failure mode (a target_snapshots-dependent verdict on an
+        otherwise identical trajectory) was the core of Audit5 P1-2.
         """
         text = self._printed_galaxy_summary(
-            r50_minimum_pc=20.0, r50_final_pc=20.0,
-            time_of_deepest_collapse_myr=1.0, total_time_myr=1.0,
-            virial_ratio_final=1.0,
+            late_window_has_enough_snapshots=False, late_window_n_snapshots=1,
+            late_r50_fractional_range=float("nan"),
+            late_r50_linear_slope_pc_per_myr=float("nan"),
+            late_virial_ratio_range=float("nan"), late_window_is_settled=False,
         )
         self.assertNotIn("collapses, overshoots", text)
-        self.assertIn("has not yet shown a genuine rebound", text)
+        self.assertNotIn("consistent with the classic cold-collapse", text)
+        self.assertIn("too few to", text)
+        self.assertIn("assess whether the late-time half-mass radius", text)
 
-    def test_galaxy_narrative_does_not_claim_rebound_from_small_fluctuation(self):
-        """A minimum that occurs before the final time but with only a
-        trivial (<15%) subsequent increase in r50 is a fluctuation off
-        the bottom, not a genuine rebound, and must not be described as
-        one."""
+    def test_galaxy_narrative_reports_unsettled_late_window_plainly(self):
+        """
+        Audit5 regression (Codex P1-2): this is the program's own
+        counterexample from Codex Audit5 -- late r50 change over the
+        final 20% of +262.6% and a late Q range of 3.7446 -- rapid
+        expansion and violent oscillation, not a settled remnant. The
+        narrative must report these measured numbers and explicitly
+        decline the quasi-equilibrium claim, never print the classic
+        "collapses, overshoots, and rebounds" language for them.
+        """
         text = self._printed_galaxy_summary(
-            r50_minimum_pc=20.0, r50_final_pc=20.5,  # +2.5%, not material
-            time_of_deepest_collapse_myr=0.5, total_time_myr=1.0,
-            virial_ratio_final=1.0,
+            late_window_has_enough_snapshots=True, late_window_n_snapshots=40,
+            late_r50_fractional_range=2.626, late_r50_relative_drift=2.57,
+            late_r50_linear_slope_pc_per_myr=2.5701, late_virial_ratio_range=3.7446,
+            late_window_is_settled=False, virial_ratio_final=1.1112073348,
         )
         self.assertNotIn("collapses, overshoots", text)
-        self.assertIn("has not yet shown a genuine rebound", text)
+        self.assertNotIn("consistent with the classic cold-collapse", text)
+        self.assertIn("too much drift and/or oscillation", text)
+        self.assertIn("262.6%", text)
+        self.assertIn("3.745", text)
 
-    def test_galaxy_narrative_reports_rebound_without_yet_virialized(self):
-        """A run that has genuinely rebounded (minimum well before the
-        end, material subsequent expansion) but whose final virial ratio
-        has not settled near 1 gets its own honest message, distinct
-        from both the full classic narrative and the still-collapsing
-        case."""
-        text = self._printed_galaxy_summary(
-            r50_minimum_pc=20.0, r50_final_pc=30.0,  # +50%, material
-            time_of_deepest_collapse_myr=0.3, total_time_myr=1.0,
-            virial_ratio_final=2.0,  # far from 1
-        )
-        self.assertNotIn("collapses, overshoots", text)
-        self.assertNotIn("has not yet shown a genuine rebound", text)
-        self.assertIn("has NOT settled close to 1", text)
-
-    def test_galaxy_narrative_reports_full_classic_scenario_when_actually_shown(self):
-        """The full "collapses, overshoots, and rebounds" narrative is
-        printed only when all three pieces of actual evidence line up:
-        started cold, a genuine (material, pre-final) rebound from the
-        minimum, and a final virial ratio close to 1."""
-        text = self._printed_galaxy_summary(
-            r50_minimum_pc=20.0, r50_final_pc=30.0,  # +50%, material
-            time_of_deepest_collapse_myr=0.3, total_time_myr=1.0,
-            virial_ratio_final=1.05,
-        )
+    def test_galaxy_narrative_reports_full_classic_scenario_when_actually_settled(self):
+        """The full "collapses, overshoots, and rebounds into a quasi-
+        equilibrium remnant" narrative is printed only when the run
+        started cold AND its own late-time window (not merely its final
+        value) shows bounded r50 variation and a bounded virial-ratio
+        range -- the defaults from _galaxy_summary() above."""
+        text = self._printed_galaxy_summary()
         self.assertIn("collapses, overshoots", text)
-        self.assertIn("rebounds into a quasi-equilibrium remnant", text)
+        self.assertIn("consistent with the classic cold-collapse", text)
+        self.assertIn("CONSISTENT WITH approaching a virialized remnant, not proof",
+                       text)
+
+    def test_galaxy_narrative_not_cold_is_unaffected_by_late_window_fields(self):
+        """A run that never started cold is reported as such regardless
+        of what its late-time window looked like -- the not-cold branch
+        must take priority over the late-window classification."""
+        text = self._printed_galaxy_summary(
+            virial_ratio_initial=5.0, late_window_is_settled=True,
+        )
+        self.assertIn("did not start close to cold", text)
+        self.assertNotIn("collapses, overshoots", text)
+
+    def test_galaxy_quasi_equilibrium_verdict_is_invariant_to_target_snapshots(self):
+        """
+        Audit5 regression (Codex P1-2): Codex's own reproduction ran the
+        SAME physical parameters (N=20, M=1e5 Msun, R=50pc, n_freefall=1.9,
+        steps_per_freefall=80, method=direct, seed=1) at target_snapshots=2
+        and target_snapshots=150 and got bit-for-bit identical final
+        positions/velocities but a DIFFERENT printed quasi-equilibrium
+        verdict, purely because the sparser run's stored snapshots missed
+        the true r50 minimum. The redesigned criterion cannot make the
+        sparse run's has_enough_snapshots flag come out True (it genuinely
+        stored only one late-window snapshot here, and reporting "too few
+        to assess" for that is the CORRECT, honest answer -- not a defect
+        to paper over) -- what it must fix is that neither snapshot
+        density ever asserts sustained quasi-equilibrium (is_settled) for
+        a trajectory that, per the densely-sampled run, plainly has not
+        settled (r50 more than doubles and Q swings by more than 4 over
+        the late window): the sparse run must decline to classify rather
+        than default to the opposite, equally wrong, "yes it's settled"
+        answer the old three-condition rule could produce.
+        """
+        kwargs = dict(n_bodies=20, total_mass_msun=1.0e5, radius_pc=50.0,
+                      n_freefall=1.9, steps_per_freefall=80, method="direct",
+                      seed=1)
+        sparse = phys.run_galaxy(target_snapshots=2, **kwargs)["summary"]
+        dense = phys.run_galaxy(target_snapshots=150, **kwargs)["summary"]
+        self.assertEqual(sparse["r50_final_pc"], dense["r50_final_pc"])
+        self.assertFalse(dense["late_window_is_settled"])
+        self.assertFalse(sparse["late_window_is_settled"])
+        self.assertFalse(sparse["late_window_has_enough_snapshots"])
+
+    def test_galaxy_narrative_declines_on_real_short_run_with_sparse_snapshots(self):
+        """
+        Real-integration regression (not a hand-built summary dict, per
+        Audit5's requirement to validate this scientific decision against
+        an actual run rather than only synthetic dictionaries): a short,
+        sparsely-sampled cold-collapse run must not have its terminal
+        narrative claim (or deny) sustained quasi-equilibrium -- it must
+        say plainly that too few late-time snapshots were stored.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cli(["--mode", "galaxy", "--n_bodies", "20",
+                               "--total_mass_msun", "1e5", "--radius_pc", "50",
+                               "--virial_ratio_init", "0.0",
+                               "--n_freefall", "2.0", "--steps_per_freefall", "80",
+                               "--method", "direct", "--target_snapshots", "2",
+                               "--seed", "0", "--no_plot", "--csvdir", tmp])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("collapses, overshoots", result.stdout)
+        self.assertIn("too few to", result.stdout)
 
     def _cluster_summary(self, **overrides):
         """A minimal, valid cluster-mode summary dict for exercising
@@ -3403,7 +4059,8 @@ class TestPlotting(unittest.TestCase):
             with self.subTest(mode=mode):
                 result = self._small_result(mode)
                 with tempfile.TemporaryDirectory() as tmp:
-                    with mock.patch.object(plt, "show") as show:
+                    with mock.patch.object(plt, "show") as show, \
+                         contextlib.redirect_stdout(io.StringIO()):
                         plotting.plot_mode(mode, result, outdir=tmp, dpi=40, lw=1.0,
                                             provenance=["n_bodies = 20"])
                     show.assert_called_once_with()
@@ -3423,7 +4080,8 @@ class TestPlotting(unittest.TestCase):
         import matplotlib.pyplot as plt
         result = self._small_result("cluster")
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.object(plt, "show"):
+            with mock.patch.object(plt, "show"), \
+                 contextlib.redirect_stdout(io.StringIO()):
                 plotting.plot_cluster(result, outdir=tmp, dpi=40, lw=1.0)
             sidecars = [f for f in os.listdir(tmp) if f.endswith(".provenance.txt")]
             self.assertEqual(len(sidecars), 1)
@@ -3500,27 +4158,16 @@ class TestHelpFile(unittest.TestCase):
 
     def test_no_review_or_audit_history_leaked_into_student_help(self):
         """
-        Audit3 strengthening (Codex's required correction, Grok P3-1):
-        the earlier version of this check only looked for reviewer names
-        and a single round marker in the HTML. Broadened to also catch
-        later round markers, narrative phrases that reveal the audit-
-        response development process ("prior release"), and literal
-        references to this project's own test names -- any of which
-        would tell a student this document's own development history
-        rather than just the physics it teaches. See
-        test_no_review_or_audit_history_leaked_into_core_modules below
-        for the same sweep applied to the four executable .py files.
+        Audit3 strengthening (Codex's required correction, Grok P3-1),
+        broadened again in Audit5 after a two-word phrase ("regression
+        fixtures") and a bare (no "TestClass." prefix) test-method-name
+        reference both evaded the Audit4-era version of this sweep -- see
+        LEAK_PHRASES et al. and _assert_no_leaked_history() above for the
+        shared implementation applied identically to the four executable
+        .py files (see TestMetadataAndCompatibility's version of this
+        check).
         """
-        for phrase in ("Claude", "Copilot", "Gemini", "Codex", "Grok",
-                       "Critique", "Audit1", "Audit2", "Audit3",
-                       "ChatGPT", "GPT-5", "Kickoff", "prior release",
-                       "regression test", "test suite", "test fixtures"):
-            with self.subTest(phrase=phrase):
-                self.assertNotIn(phrase, self.html)
-        self.assertIsNone(
-            re.search(r"Test[A-Z][a-zA-Z]*\.\s*\n?\s*(#\s*)?test_[a-zA-Z_]+", self.html),
-            "found a literal TestClass.test_method reference in student help"
-        )
+        _assert_no_leaked_history(self, self.html, HELP_FILE)
 
     def test_all_internal_navigation_targets_exist_and_ids_are_unique(self):
         ids = re.findall(r'\bid="([^"]+)"', self.html)

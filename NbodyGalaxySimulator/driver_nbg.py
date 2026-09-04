@@ -21,7 +21,14 @@ from datetime import datetime
 import numpy as np
 
 import physics_nbg as phys
-import plot_nbg as viz
+
+# plot_nbg.py (and, through it, matplotlib.pyplot) is imported lazily,
+# inside run_mode() itself, only on the code path that actually draws a
+# figure -- NOT unconditionally at module load. A prior version imported
+# it here unconditionally, which meant Matplotlib had to be installed and
+# importable even for a plot-free, CSV-only run (`--no_plot --csvdir`):
+# NumPy alone is genuinely sufficient for that case, and this program
+# should not demand a plotting library it never calls into.
 
 MODES = ("cluster", "galaxy", "chaos")
 
@@ -375,65 +382,84 @@ def _print_galaxy_summary(s):
     print(SEP)
     # Conditional on what THIS run's own inputs and outputs actually were,
     # not a fixed narrative printed regardless of them: a run that did not
-    # start cold, or whose final virial ratio never approached 1, did not
-    # exhibit the classic cold-collapse-into-quasi-equilibrium scenario,
-    # and saying so unconditionally would misdescribe it.
+    # start cold did not exhibit the classic cold-collapse-into-quasi-
+    # equilibrium scenario, and saying so unconditionally would misdescribe
+    # it.
     #
-    # Checking only the INITIAL and FINAL
-    # virial ratio is not enough to claim a "rebound" -- Q_final can sit
-    # near 1 by coincidence while r50 is still AT its minimum (the run is
-    # still mid-collapse, not past it), since Q and r50 are not the same
-    # quantity and can cross their respective landmarks at different
-    # times. "Rebounded" now requires actual time-series evidence: the
-    # half-mass radius's own minimum must occur strictly before the final
-    # recorded time (not simultaneous with it, i.e. not still sitting at
-    # its own deepest point), AND the final radius must be a MATERIAL
-    # (>=15%) fraction above that minimum, not merely a small fluctuation
-    # off the bottom.
+    # The quasi-equilibrium CLAIM itself (as opposed to the purely factual
+    # "reached a sampled minimum, then expanded" statement above) is
+    # decided ONLY by whether the run's own LATE-TIME window (the final
+    # late_window_fraction of its elapsed time, by time -- not by snapshot
+    # count) has actually settled: bounded fractional variation in the
+    # half-mass radius, a small secular trend in it, and a bounded range in
+    # the virial ratio over that same window -- never from a single final
+    # value, a single earlier sampled minimum, or the sample count used to
+    # store the run's diagnostics. Two runs with bit-for-bit identical
+    # integrated trajectories that differ only in target_snapshots reach
+    # the same verdict here, because the late window is defined by ELAPSED
+    # TIME and requires a minimum number of stored samples in it before any
+    # claim is made at all (see _late_time_window_stats()'s docstring) --
+    # a run whose diagnostics were stored too sparsely to populate that
+    # window is reported as such, not silently classified either way.
     started_cold = s["virial_ratio_initial"] <= 0.3
-    ended_near_virial_balance = abs(s["virial_ratio_final"] - 1.0) <= 0.3
-    collapsed_before_end = s["time_of_deepest_collapse_myr"] < s["total_time_myr"]
+    late_ok = s["late_window_has_enough_snapshots"]
+    late_settled = s["late_window_is_settled"]
     if s["r50_minimum_pc"] > 0.0:
         rebound_fraction = (
             (s["r50_final_pc"] - s["r50_minimum_pc"]) / s["r50_minimum_pc"]
         )
     else:
         rebound_fraction = 0.0
-    has_rebounded = collapsed_before_end and rebound_fraction >= 0.15
-    if started_cold and has_rebounded and ended_near_virial_balance:
-        print("  This run started close to cold (Q_initial near 0), its half-mass")
-        print("  radius reached its deepest collapse before the end of the run and")
-        print("  has since expanded back out by a material amount, and its final")
-        print("  virial ratio above is close to 1 -- consistent with the classic")
-        print("  cold-collapse scenario: the sphere collapses, overshoots, and")
-        print("  rebounds into a quasi-equilibrium remnant through 'violent")
-        print("  relaxation' (Lynden-Bell 1967). The virial ratio typically")
-        print("  settles into a modest oscillation close to Q = 1 rather than")
-        print("  converging to it exactly -- watch for that oscillation, not a")
-        print("  single settled number, as the signature of a properly")
-        print("  virialized remnant.")
-    elif started_cold and has_rebounded:
-        print("  This run started close to cold (Q_initial near 0) and its half-mass")
-        print("  radius reached its deepest collapse before the end of the run and")
-        print("  has since expanded back out by a material amount -- it has passed")
-        print("  through the classic collapse-and-rebound stage -- but its final")
-        print("  virial ratio above has NOT settled close to 1: it may still be")
-        print("  oscillating through a later contraction, or may not yet have had")
-        print("  time to fully virialize.")
-    elif started_cold:
-        print("  This run started close to cold (Q_initial near 0), the classic")
-        print("  setup for violent relaxation (Lynden-Bell 1967), but its half-mass")
-        print("  radius above is still at, or has not materially recovered from,")
-        print("  its own deepest collapse as of the final recorded time -- this")
-        print("  run has not yet shown a genuine rebound. A final virial ratio near")
-        print("  1 by itself does NOT mean otherwise: Q and r50 can each cross")
-        print("  their own landmark at a different time, so run longer (raise")
-        print("  n_freefall) before concluding this run has virialized.")
-    else:
+
+    if not started_cold:
         print("  This run did not start close to cold (Q_initial above 0.3), so")
         print("  it is not an instance of the classic cold-collapse-into-")
         print("  quasi-equilibrium scenario -- interpret its virial ratio history")
         print("  on its own terms, not against that specific benchmark.")
+    elif not late_ok:
+        print(f"  This run started close to cold (Q_initial near 0) and its half-mass")
+        print(f"  radius fell to a SAMPLED minimum of {s['r50_minimum_pc']:.4g} pc at "
+              f"{s['time_of_deepest_collapse_myr']:.3g} Myr, ending "
+              f"{rebound_fraction:+.1%} away from that minimum -- but only "
+              f"{s['late_window_n_snapshots']} snapshot(s) fall within the final "
+              f"{s['late_window_fraction']:.0%} of the run's elapsed time, too few to")
+        print("  assess whether the late-time half-mass radius and virial ratio have")
+        print("  actually settled. Store more snapshots (raise target_snapshots) or")
+        print("  run longer (raise n_freefall) before drawing any quasi-equilibrium")
+        print("  conclusion; the sampled minimum above is itself sampling-dependent")
+        print("  and may understate the true collapse.")
+    elif late_settled:
+        print(f"  This run started close to cold (Q_initial near 0). Over the final")
+        print(f"  {s['late_window_fraction']:.0%} of its elapsed time "
+              f"({s['late_window_n_snapshots']} stored snapshots from "
+              f"{s['late_window_start_myr']:.3g} Myr onward), the half-mass radius")
+        print(f"  varied by only {s['late_r50_fractional_range']:.1%} of its own mean "
+              f"value and the virial ratio's range was {s['late_virial_ratio_range']:.3f}")
+        print("  -- both within this program's documented 'modest' bounds. This is")
+        print("  consistent with the classic cold-collapse scenario having settled")
+        print("  into a quasi-equilibrium remnant through 'violent relaxation'")
+        print("  (Lynden-Bell 1967): the sphere collapses, overshoots, and rebounds,")
+        print("  then oscillates around a roughly steady state rather than")
+        print("  continuing to expand, contract, or swing in Q. This is evidence")
+        print("  CONSISTENT WITH approaching a virialized remnant, not proof of")
+        print("  genuine phase-space (Boltzmann-equation) stationarity -- see the")
+        print("  Help file's Domain of Validity section.")
+    else:
+        print(f"  This run started close to cold (Q_initial near 0) and reached a")
+        print(f"  sampled half-mass-radius minimum of {s['r50_minimum_pc']:.4g} pc at "
+              f"{s['time_of_deepest_collapse_myr']:.3g} Myr, but its final "
+              f"{s['late_window_fraction']:.0%}")
+        print(f"  of elapsed time ({s['late_window_n_snapshots']} stored snapshots) "
+              f"shows a half-mass-radius range of {s['late_r50_fractional_range']:.1%} "
+              "of its own mean value")
+        print(f"  (linear trend {s['late_r50_linear_slope_pc_per_myr']:+.4g} pc/Myr) "
+              f"and a virial-ratio range of {s['late_virial_ratio_range']:.3f}.")
+        print("  This is too much drift and/or oscillation to call this run settled:")
+        print("  it has NOT yet shown a genuine, sustained quasi-equilibrium remnant --")
+        print("  it may still be mid-collapse, mid-rebound, or ringing through a")
+        print("  later contraction. Run longer (raise n_freefall) before concluding")
+        print("  otherwise; a single final virial ratio near 1 does not by itself")
+        print("  establish settling (see above).")
     print("  Q near 1 alone is necessary but not sufficient for genuine")
     print("  dynamical equilibrium; see the Help file's Domain of Validity")
     print("  section before drawing physical conclusions from Q alone.")
@@ -460,16 +486,27 @@ def _print_chaos_summary(s):
           f"{s['final_divergence_pc']:.4g}  pc  "
           f"(peak {s['max_divergence_pc']:.4g} pc)")
     if math.isfinite(s["lyapunov_exponent_per_myr"]) and s["lyapunov_exponent_per_myr"] > 0:
-        print(f"  Lyapunov exponent*  : {s['lyapunov_exponent_per_myr']:.4g}  1/Myr")
+        # The qualifier sits on the SAME line as the number, not only in a
+        # trailing footnote several lines below -- a reader who stops at
+        # the number itself (as in a quick terminal scan, or a value
+        # copied out of context) still sees that this is a finite-time
+        # estimate from an automatically chosen window, not a certified,
+        # held-out-validated Lyapunov exponent (see the Help file's
+        # Domain of Validity section).
+        print(f"  Lyapunov exponent*  : {s['lyapunov_exponent_per_myr']:.4g}  1/Myr  "
+              "(finite-time growth-rate ESTIMATE, not a certified value)")
         print(f"  Lyapunov time*      : {s['lyapunov_time_myr']:.4g}  Myr  "
-              f"({s['lyapunov_time_over_t_cross']:.3g} x crossing times)")
+              f"({s['lyapunov_time_over_t_cross']:.3g} x crossing times; "
+              "i.e. the e-folding time of that same estimate)")
         print(f"  Fit used            : {s['n_points_used_in_fit']} of "
               f"{s['n_snapshots']} snapshots  (R^2 = "
               f"{s['lyapunov_fit_r_squared']:.5f}, spanning "
               f"{s['lyapunov_fit_window_efolds']:.2f} e-folds, curvature t = "
               f"{s['lyapunov_fit_curvature_t_statistic']:.2f})")
-        print("  * heuristic finite-time fit to the measured divergence, not "
-              "a formal chaos test -- see the HTML notes.")
+        print("  * a heuristic finite-time fit to the measured divergence over an")
+        print("  automatically chosen window, not a formal chaos test and not")
+        print("  validated outside the specific model/parameter regime this")
+        print("  program explores -- see the HTML notes.")
     else:
         print("  No clean exponential-growth window was found in this run; "
               "see the notes below.")
@@ -557,6 +594,7 @@ def run(mode="cluster",
                    comments=_provenance(mode, result["summary"]))
 
     if not no_plot:
+        import plot_nbg as viz  # see the module-level comment on this import
         viz.plot_mode(mode, result, outdir=outdir, dpi=dpi, lw=lw,
                        provenance=_provenance(mode, result["summary"]))
     elif outdir is not None:
