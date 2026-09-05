@@ -7,7 +7,11 @@ This module owns every governing equation used by the program:
 
   gravity     Newtonian point-mass gravity with Plummer softening, evaluated
               either by direct O(N^2) pairwise summation or by a Barnes-Hut
-              (1986) octree approximation, O(N log N).
+              (1986) octree approximation, typically O(N log N) for a
+              reasonably well-distributed tree and nonzero opening angle
+              (a degenerate, highly clumped distribution, or theta=0, can
+              lose this speedup and approach O(N^2); see
+              compute_accelerations_tree()'s own docstring).
 
   integrator  A kick-drift-kick (leapfrog) time-stepping loop.  Leapfrog is
               symplectic: it does not conserve energy exactly step to step,
@@ -41,16 +45,18 @@ O(N^2), unsoftened, single-orbit-accurate approach stops scaling, and
 teaches the two ideas that let a simulation reach hundreds or thousands of
 bodies: force softening (so close encounters no longer need an
 astronomically small timestep) and hierarchical (tree) force
-approximation (so cost grows as N log N rather than N^2).
+approximation (so cost typically grows as N log N rather than N^2, for a
+reasonably well-distributed tree and nonzero opening angle).
 """
 
 from fractions import Fraction
 import math
+import re
 import warnings
 
 import numpy as np
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
 
 
 #: The exact source files this build identifier covers: only the four core
@@ -1627,9 +1633,11 @@ def virial_force_term(positions, masses, softening):
     for the softened equations actually being integrated is a real, and
     non-negligible, error: for eps/a of order this program's own default
     softening (roughly 0.2-0.25 for the default cluster N), the two
-    ratios differ by several percent to tens of percent (measured:
-    2T/|U| = 1.298 vs 2T/|Wvir| = 1.380 for one N=200 Plummer realization
-    at the default softening). virial_ratio() itself is agnostic to which
+    ratios differ by several percent to tens of percent -- large enough
+    that a run genuinely near scalar virial balance under the softened
+    force (2T/|Wvir| close to 1) can misleadingly read as significantly
+    unbalanced under 2T/|U| instead, or vice versa. virial_ratio() itself is
+    agnostic to which
     W is supplied (it is simply 2T/|W|); every CALLER that wants a
     scalar-virial-balance diagnostic for the softened force must pass
     virial_force_term(...), not potential_energy(...), and every caller
@@ -2911,22 +2919,57 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
     # silently absorbs a warning a caller's filter depends on seeing; only
     # the specific build_octree bucket message is rate-limited, and only
     # inside this function's own force-evaluation calls.
-    _bucket_warning_state = {"count": 0}
+    #
+    # Both the tallying and the re-emission of every captured warning
+    # happen in a `finally` clause, not merely after a normal return, so
+    # that a warning caught here is never lost if fn() itself raises (a
+    # ValueError from a downstream validity check, for instance): whatever
+    # was captured before the exception is still forwarded to the caller's
+    # own warnings context before that exception propagates. The
+    # end-of-run summary also records the worst single occurrence's own
+    # severity (largest clump, bucket count, total bucketed bodies) across
+    # every occurrence during the run, not just how many times the
+    # condition repeated, so a later, more severe force evaluation is
+    # never hidden behind an earlier, milder one that merely happened
+    # first.
+    _bucket_warning_state = {
+        "count": 0,
+        "max_bucketed_bodies": 0,
+        "max_buckets": 0,
+        "max_clump_size": 0,
+    }
+    _bucket_msg_re = re.compile(
+        r"^build_octree: (\d+) bodies \(in (\d+) separate 'bucket' "
+        r"nodes?, largest (\d+) bodies\)"
+    )
 
     def _rate_limited(fn):
         if method != "tree":
             return fn()
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            result = fn()
-        for w in caught:
-            if (issubclass(w.category, RuntimeWarning)
-                    and str(w.message).startswith("build_octree:")):
-                _bucket_warning_state["count"] += 1
-                if _bucket_warning_state["count"] == 1:
+        caught = []
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                result = fn()
+        finally:
+            for w in caught:
+                match = (issubclass(w.category, RuntimeWarning)
+                          and _bucket_msg_re.match(str(w.message)))
+                if match:
+                    _bucket_warning_state["count"] += 1
+                    _bucket_warning_state["max_bucketed_bodies"] = max(
+                        _bucket_warning_state["max_bucketed_bodies"],
+                        int(match.group(1)))
+                    _bucket_warning_state["max_buckets"] = max(
+                        _bucket_warning_state["max_buckets"],
+                        int(match.group(2)))
+                    _bucket_warning_state["max_clump_size"] = max(
+                        _bucket_warning_state["max_clump_size"],
+                        int(match.group(3)))
+                    if _bucket_warning_state["count"] == 1:
+                        warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
+                else:
                     warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
-            else:
-                warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
         return result
 
     pos, vel = positions.copy(), velocities.copy()
@@ -2960,7 +3003,15 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
             "run (only the first occurrence was reported individually; "
             "every occurrence's own force evaluation remains fully "
             "accurate -- see build_octree's warning above for what the "
-            "condition means and why no force accuracy is lost).",
+            "condition means and why no force accuracy is lost). Across "
+            f"all {_bucket_warning_state['count']} occurrences this run, "
+            "the single worst force evaluation bucketed "
+            f"{_bucket_warning_state['max_bucketed_bodies']} bodies (in "
+            f"up to {_bucket_warning_state['max_buckets']} separate "
+            f"'bucket' nodes, largest single clump "
+            f"{_bucket_warning_state['max_clump_size']} bodies) -- this "
+            "may be more or less severe than the first occurrence shown "
+            "above.",
             RuntimeWarning,
         )
 
@@ -3593,28 +3644,27 @@ LATE_WINDOW_Q_RANGE_THRESHOLD = 0.60
 #: expansion/contraction trend that a pure range check can miss (a straight
 #: line has a large range-to-mean ratio too, but "range" alone does not
 #: distinguish a one-way trend from noisy oscillation around a plateau;
-#: this threshold specifically targets the trend itself). Calibrated
-#: below a synthetic monotonic-expansion counterexample's fitted drift
-#: of 0.2456 (which must fail) and above the drift
-#: actually measured across several seeded default-scale
-#: (n_bodies=300, n_freefall=8) run_galaxy() calls, which stayed in
-#: 0.02-0.16.
+#: this threshold specifically targets the trend itself). Set strictly
+#: between a synthetic monotonic-expansion counterexample's fitted drift
+#: (which must fail this gate) and the much smaller residual drift a
+#: numerically well-resolved, already-settled default-scale remnant's
+#: late-time window exhibits (which must pass it).
 LATE_WINDOW_DRIFT_THRESHOLD = 0.20
 #: Bound on abs(mean(Q) - 1) over the late window -- the scalar virial
 #: condition is Q = 1, not merely "Q holds still" (a synthetic
 #: Q=5-constant counterexample has virial_ratio_range=0 yet is
-#: nowhere near virialized). Calibrated above the late-window mean-Q
-#: deviation actually measured across several seeded default-scale
-#: (n_bodies=300, n_freefall=8) run_galaxy() calls (0.04-0.12) and well
-#: below both the Q=5 synthetic case (4.0) and the real still-collapsing
-#: N=20/n_freefall=0.75 counterexample (0.57-0.59).
+#: nowhere near virialized). Set strictly between the small late-window
+#: mean-Q deviation a settled default-scale remnant exhibits (which must
+#: pass this gate) and both the Q=5 synthetic counterexample and the real
+#: still-collapsing N=20/n_freefall=0.75 counterexample (which must both
+#: fail it).
 LATE_WINDOW_Q_CENTER_TOLERANCE = 0.25
 #: Minimum late-window-mean-r50 / global-minimum-r50 ratio required to
 #: call a run's collapse "materially rebounded" rather than "still sitting
-#: at its deepest point." Calibrated far below the ratios actually
-#: measured for genuinely relaxed default-scale runs (2.7-8.9x) and just
-#: above the ratio for a run that has not yet turned around (the real
-#: N=20/n_freefall=0.75 counterexample sits at 1.06x).
+#: at its deepest point." Set strictly between the much larger ratio a
+#: genuinely relaxed default-scale remnant reaches (which must pass this
+#: gate) and the ratio for a run that has not yet turned around at all
+#: (the real N=20/n_freefall=0.75 counterexample, which must fail it).
 LATE_WINDOW_REBOUND_RATIO = 1.10
 #: Maximum global-minimum-r50 / initial-r50 ratio still allowed to call
 #: the run's global minimum a genuine COLLAPSE rather than merely "the

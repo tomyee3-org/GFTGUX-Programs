@@ -736,6 +736,123 @@ the resulting technical behavior only, timelessly.
     exercise), never all 22 classes, and never every class run
     individually in sequence.
     287 tests (from 281). BUILD_ID: 353540c6724c.
+
+  2026-09-05  Claude, responding to Audit10 (Codex, Copilot, Gemini and
+    Grok; all four participated), and closing out this review-response
+    cycle. Codex reported four further release-blocking findings in the
+    same "every input finite, true result representable, an intermediate
+    step is not" family this project has repeatedly fixed: a nonzero-
+    but-subnormal (not merely exactly-zero) rescale residue in
+    _scale_safe_sum(), G-folding itself underflowing to exactly 0.0 in
+    compute_accelerations_direct() before a downstream multiplication by
+    a large displacement would have made the final result normal-
+    magnitude again, several force/energy reductions summing individual
+    per-term roundings-to-zero instead of the true pre-rounding
+    aggregate, and a COM-relative kinetic-energy path amplifying an
+    ordinary 1-ULP centering residue by an astronomically large mass
+    factor. Each was independently reproduced against this delivery
+    exactly as reported and confirmed real, not a false positive. Direct
+    measurement (a mass-ratio sweep against an exact Fraction oracle for
+    the fourth finding; magnitude thresholds for the other three) showed
+    every one of the four requires inputs tens to hundreds of orders of
+    magnitude beyond anything this program's physical-unit conversions,
+    validated parameter ranges, or Help-file exercises can produce for
+    an educational astrophysics simulator using solar-mass/parsec-scale
+    SI inputs and 3-5000 bodies -- not reachable by ordinary or even
+    deliberately aggressive-but-physical student use, only by inputs
+    that are themselves already physically nonsensical on their own
+    terms (e.g. a body mass of 1e300 kg, or two bodies differing in mass
+    by a factor of 1e100). Copilot's own new finding (a possible
+    worst-case performance cost if many reduction slices simultaneously
+    trigger the exact-Fraction fallback) is the same kind of magnitude-
+    only concern. Grok, reviewing the identical Audit9 delivery,
+    independently reproduced Codex's own P1-1/P1-2/P1-3 numbers, found 0
+    P1 and 0 P2 of its own, and recommended "ship it," explicitly
+    advising against further extreme-value chasing absent a new
+    measurement contradicting a student-facing sentence; Copilot
+    likewise identified no new release-blocking defect. Weighed against
+    this project's own standing don't-return-a-silently-wrong-finite-
+    value philosophy, but concluded these four are correctly understood
+    as intentional, honestly documented scope boundaries rather than as
+    defects to keep chasing indefinitely -- the same judgment call
+    Planck2's own release documented for its analogous domain-boundary
+    limitations -- and recorded all four, plus the Fraction-fallback
+    performance question, as Known Limitations in this release's Release
+    Notes rather than as further code changes.
+
+    Separately fixed, this round, every finding that was NOT purely a
+    magnitude/reachability question. Codex's exception-unsafe warning
+    capture (P2-1): integrate_nbody()'s internal _rate_limited() wrapper
+    forwarded every captured warning to the caller only after its
+    wrapped call returned normally, so a tree-method force evaluation
+    that warned and then raised (any exception, not merely an extreme-
+    value one) silently discarded every warning captured before that
+    exception -- contradicting the wrapper's own documented guarantee
+    that every non-bucket warning is re-emitted unaffected; fixed by
+    moving the forwarding/tallying loop into a finally clause around the
+    warning-capturing context manager, verified by injecting a
+    controlled warn-then-raise force evaluation and confirming the
+    warning now reaches the caller before the exception propagates.
+    Codex's structured warning-severity loss (P2-2): the same wrapper's
+    end-of-run summary tracked only a repeat COUNT of later bucket
+    occurrences, silently dropping a later, more severe occurrence's own
+    largest-clump/bucket-count/total-bodies figures behind an earlier,
+    milder one that merely happened first; fixed by having the wrapper
+    track the worst-seen figures across the whole run (parsed from each
+    occurrence's own warning text) and report them in the end-of-run
+    summary alongside the repeat count, verified with an escalating-
+    severity synthetic run. Codex's EXP-17 ambiguous range comparator
+    (P3-1): the exercise's between-setting comparison rule never said
+    which of two potentially different within-setting ranges to test
+    against; fixed by specifying the maximum of the two, per Codex's own
+    suggested correction, for both Part A (N) and Part B (softening).
+    Codex's unqualified Barnes-Hut O(N log N) claims (P3-2): the
+    Description and Background sections stated the tree method's cost
+    reduction unconditionally, while compute_accelerations_tree()'s own
+    docstring already correctly qualified it as typical "for a well-
+    distributed set of bodies"; fixed by adding the same qualification
+    (a reasonably well-distributed tree, nonzero opening angle; a
+    degenerate distribution or theta=0 can approach O(N^2)) to both
+    Help-file statements and to the module docstring's two matching
+    claims. Also reworded the LATE_WINDOW_* threshold constants'
+    comments and virial_force_term()'s docstring, both flagged again
+    this round (Grok P3-4, carrying forward Codex's original P2-4):
+    reversing my own explicit Audit9 judgment call to leave them
+    unchanged, on the view that citing a specific one-off development
+    campaign's own measured ranges (e.g. "stayed in 0.02-0.16 across
+    several seeded runs") is the same development-calibration-history
+    shape Codex's P2-4 already required removing elsewhere, even though
+    these particular thresholds are load-bearing; reworded all three
+    LATE_WINDOW_* comments and the virial_force_term() docstring to keep
+    the physics rationale and the deterministic, reproducible boundary
+    cases (the synthetic monotonic-expansion counterexample; the real
+    N=20/n_freefall=0.75 counterexample, both fixed, reproducible
+    regression-test fixtures, not campaign narrative) while dropping the
+    specific measured-range citations, per Grok's own suggested
+    "timeless rewrite" shape. Declined Copilot's C10-3 (a preference for
+    a machine-readable verification artifact over prose) and C10-4 (a
+    preference for splitting future response documents by concern) as
+    process suggestions for a future round that will not occur, this
+    being the final round; declined Gemini's report in full after
+    verifying, by direct code inspection and reproduction, that its
+    central claim (a "bounding box" / spatial-deletion feature for
+    escaping particles) does not exist and was never implemented -- I
+    explicitly declined exactly that feature in the Audit9 response --
+    its claim that the tree-depth warning counter "now successfully
+    resets per simulation step" is the opposite of what Audit9 actually
+    implemented (a run-scoped rate limit, chosen specifically because a
+    per-step reset would reproduce the flood Codex's Audit9 P2-1 found),
+    and its subnormal-softening claim (1e-320) is false: softening**2
+    underflowing to exactly 0.0 already raises a clean ValueError via
+    the existing _require_positive() check, confirmed by direct
+    reproduction. Bumped MODEL_VERSION from 1.0.0 to 1.0.1 to mark this
+    release. Ran the full suite exactly once this round under a real
+    Python 3.10 interpreter (Python 3.10.20, NumPy 2.2.6, Matplotlib
+    3.10.9), plus the flattened-layout discovery smoke test only;
+    development verification was scoped to the specific classes and
+    individual methods exercising whichever fix was in progress, never
+    a full-class enumeration beyond what each fix actually touched.
+    291 tests (from 287). BUILD_ID: fda9adf9e39a.
 """
 
 import ast
@@ -2163,6 +2280,111 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
             [w for w in caught_direct if issubclass(w.category, RuntimeWarning)],
             [],
         )
+
+    def test_rate_limited_warning_wrapper_forwards_captured_warnings_even_if_fn_raises(self):
+        """
+        Audit10 regression (Codex P2-1): integrate_nbody()'s internal
+        _rate_limited() wrapper captures every warning from one force
+        evaluation inside `with warnings.catch_warnings(record=True) as
+        caught:`, then forwards them to the caller's own warnings context
+        afterward. The wrapper's own comment promises every non-bucket
+        warning is "re-emitted completely unaffected". Previously that
+        forwarding loop ran only after `result = fn()` returned normally,
+        so if fn() raised an exception, control never reached the
+        forwarding loop and every warning already captured before the
+        exception -- including an ordinary warning the wrapper is not
+        even trying to rate-limit -- was silently discarded instead of
+        reaching the caller, contradicting that guarantee. A force
+        evaluation that warns and then raises must still forward the
+        warning to the caller before the exception propagates.
+        """
+        positions = np.zeros((3, 3))
+        velocities = np.zeros((3, 3))
+        masses = np.ones(3)
+
+        def warn_then_raise(pos, masses, softening, method, theta):
+            warnings.warn("synthetic non-bucket warning before failure", UserWarning)
+            raise ValueError("synthetic failure after warning")
+
+        with mock.patch.object(phys, "compute_accelerations", side_effect=warn_then_raise):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                with self.assertRaises(ValueError):
+                    phys.integrate_nbody(
+                        positions, velocities, masses, dt=0.1, n_steps=1,
+                        softening=1.0, method="tree", theta=0.5,
+                    )
+                self.assertEqual(
+                    len(caught), 1,
+                    f"a warning captured before fn() raised must still "
+                    f"reach the caller; got {len(caught)}: "
+                    f"{[str(w.message) for w in caught]!r}"
+                )
+                self.assertEqual(caught[0].category, UserWarning)
+                self.assertIn("synthetic non-bucket warning", str(caught[0].message))
+
+    def test_end_of_run_bucket_summary_reports_the_run_s_worst_occurrence(self):
+        """
+        Audit10 regression (Codex P2-2): the end-of-run summary warning
+        (see the test above this one's sibling,
+        test_max_tree_depth_warning_is_rate_limited_across_an_integration_
+        run) previously tracked only a repeat COUNT of later bucket
+        occurrences, not their own severity, so if a later force
+        evaluation in the same run hit a much larger/more severe bucket
+        condition than the first-reported occurrence, that greater
+        severity was silently lost -- the summary only ever repeated how
+        many times the condition recurred, undermining the same project's
+        own Copilot A9-2 fix that added largest-clump-size reporting to
+        the underlying per-build warning in the first place. A run whose
+        first occurrence is mild (one small clump) but whose later
+        occurrence is far more severe (a much larger clump, in more
+        bucket nodes) must report that worse severity in the end-of-run
+        summary, not just a bare repeat count.
+        """
+        positions = np.zeros((3, 3))
+        velocities = np.zeros((3, 3))
+        masses = np.ones(3)
+        mild_message = (
+            "build_octree: 3 bodies (in 1 separate 'bucket' node, "
+            "largest 3 bodies) could not be separated"
+        )
+        severe_message = (
+            "build_octree: 50 bodies (in 4 separate 'bucket' nodes, "
+            "largest 40 bodies) could not be separated"
+        )
+        calls = {"n": 0}
+        real_leapfrog_step = phys.leapfrog_step
+
+        def escalating_leapfrog(pos, vel, masses, dt, softening, method, theta, accel=None):
+            calls["n"] += 1
+            warnings.warn(
+                mild_message if calls["n"] == 1 else severe_message,
+                RuntimeWarning,
+            )
+            return real_leapfrog_step(pos, vel, masses, dt, softening,
+                                       "direct", theta, accel=accel)
+
+        # integrate_nbody() also makes one real (unpatched) initial
+        # compute_accelerations() call before the step loop; over these
+        # permanently-coincident bodies that also hits the same mild
+        # bucket condition for real, so the run sees 1 (initial, real,
+        # mild) + 3 (patched leapfrog steps: mild, severe, severe) = 4
+        # total occurrences, 3 of them "additional" beyond the first.
+        with mock.patch.object(phys, "leapfrog_step", side_effect=escalating_leapfrog):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                phys.integrate_nbody(
+                    positions, velocities, masses, dt=0.1, n_steps=3,
+                    softening=1.0, method="tree", theta=0.5, snapshot_stride=3,
+                )
+        runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        self.assertEqual(len(runtime_warnings), 2)
+        self.assertIn(mild_message, str(runtime_warnings[0].message))
+        summary = str(runtime_warnings[1].message)
+        self.assertIn("recurred on 3 additional", summary)
+        self.assertIn("all 4 occurrences", summary)
+        self.assertIn("50 bodies", summary)
+        self.assertIn("largest single clump 40 bodies", summary)
 
     def test_theta_zero_tree_is_translation_covariant_at_extreme_coordinates(self):
         """
@@ -6636,6 +6858,50 @@ class TestHelpFile(unittest.TestCase):
         self.assertNotIn("is what a feature surviving this check looks like",
                           lowered)
 
+    def test_exp17_specifies_a_single_deterministic_range_comparator(self):
+        """
+        Audit10 regression (Codex P3-1): EXP-17 correctly defines each
+        setting's "typical value" as its median, but the comparator rule
+        told students to check whether the between-setting median
+        difference is clearly larger than "the seed-to-seed range WITHIN
+        a single N" (Part A) / "the within-softening seed-to-seed range"
+        (Part B) -- ambiguous, since the two settings being compared
+        generally have two DIFFERENT within-setting ranges, and the rule
+        never said which one (or whether to pool them) to use. Example:
+        N=100 has range 0.05, N=300 has range 0.30, and the median shift
+        is 0.20 -- the old wording gives opposite verdicts depending on
+        which range a student picks. The card must now specify one
+        deterministic rule: compare against BOTH within-setting ranges
+        (equivalently, their MAXIMUM), for both Part A (N) and Part B
+        (softening).
+        """
+        exp_section = nodes_by_id(self.root, "experiments")[0]
+        cards = descendants(exp_section, lambda n: has_class(n, "exp-card"))
+        exp17_cards = [c for c in cards if "EXP-17" in normalized_text(c)]
+        self.assertEqual(len(exp17_cards), 1)
+        text = normalized_text(exp17_cards[0])
+        self.assertIn("BOTH within-N ranges", text)
+        self.assertIn("MAXIMUM of the two", text)
+        self.assertIn("BOTH within-softening seed-to-seed ranges", text)
+        self.assertIn("comparable to (not clearly larger than) the larger "
+                       "of the two within-N ranges", text)
+        self.assertIn(
+            "comparable to the larger of the two within-softening ranges",
+            text,
+        )
+        # The old, ambiguous single-range phrasing (which range? unstated)
+        # must not reappear verbatim.
+        self.assertNotIn(
+            "clearly larger than the seed-to-seed range within a single n "
+            "is real evidence",
+            text.lower(),
+        )
+        self.assertNotIn(
+            "clearly larger than the within-softening seed-to-seed range "
+            "demonstrates",
+            text.lower(),
+        )
+
     def test_license_uses_original_investigation_wording_not_port_wording(self):
         license_text = normalized_text(nodes_by_id(self.root, "license")[0])
         self.assertIn("original supplemental Python investigation", license_text)
@@ -6711,6 +6977,33 @@ class TestHelpFile(unittest.TestCase):
         algo = normalized_text(nodes_by_id(self.root, "algorithm")[0])
         self.assertIn("not guaranteed to be faster", algo)
         self.assertIn("momentum", algo)
+
+    def test_barnes_hut_o_n_log_n_claims_are_qualified_not_unconditional(self):
+        """
+        Audit10 regression (Codex P3-2): the Description and "Why direct
+        summation stops scaling" sections stated the Barnes-Hut tree
+        "reduces the cost to O(N log N)" as an unconditional fact, even
+        though compute_accelerations_tree()'s own docstring correctly
+        qualifies this as O(N log N) "for a well-distributed set of
+        bodies" -- a degenerate, highly clumped distribution, or an
+        opening angle of zero, can approach the direct method's O(N^2)
+        cost instead (this program's own bucket-leaf handling exists
+        precisely because that case is real, not hypothetical). Both
+        Help-file statements must now carry the same qualification the
+        code-level docstring already had, so a student cannot read the
+        Help file as promising a worst-case guarantee the implementation
+        does not make.
+        """
+        description = normalized_text(nodes_by_id(self.root, "description")[0])
+        self.assertIn("typically, for a reasonably well-distributed tree "
+                       "and a nonzero opening angle", description)
+        self.assertIn("can lose this speedup", description)
+
+        background = normalized_text(nodes_by_id(self.root, "background")[0])
+        self.assertIn("typically", background)
+        self.assertIn("reasonably well-distributed tree and a nonzero "
+                       "opening angle", background)
+        self.assertIn("not a worst-case guarantee", background)
 
 
 if __name__ == "__main__":
