@@ -5,8 +5,12 @@ Command-line entry point for NbodyGalaxySimulator.
 
 Three calculations share one program, chosen with --mode:
 
-    cluster  a Plummer sphere of stars, evolved to show two-body-relaxation
-             driven expansion and (eventually) evaporation
+    cluster  a Plummer sphere of stars, evolved for a chosen multiple of its
+             own nominal two-body relaxation time -- seeing relaxation-
+             driven expansion and (eventually) evaporation clearly requires
+             tuned, non-default parameters, since the default softening
+             actively suppresses both (see the Examples below and the Help
+             file's EXP-1/EXP-11)
     galaxy   a cold, uniform sphere collapsing and "violently relaxing"
              (Lynden-Bell 1967), when it settles, into a quasi-equilibrium
              remnant -- a toy galaxy-formation experiment

@@ -193,19 +193,30 @@ def _write_csv(csvdir, prefix, header, rows, comments=()):
 
 # virial_work_J is the scalar virial-theorem quantity Wvir =
 # sum_i r_i.F_i (virial_force_term()), not the potential energy U
-# (potential_energy()) -- the two coincide only as softening -> 0. It is
-# recorded alongside potential_J so that virial_ratio = 2*kinetic_J /
-# abs(virial_work_J) is independently checkable from the CSV.
+# (potential_energy()) -- the two coincide only as softening -> 0.
+# kinetic_J is the RAW, lab-frame total kinetic energy: it is recorded
+# alongside potential_J so that energy_J = kinetic_J + potential_J is
+# independently checkable from the CSV, matching the conserved quantity
+# the integrator actually evolves. kinetic_com_J is a SEPARATE column,
+# the system's internal (center-of-mass-frame) kinetic energy; the
+# scalar virial ratio is computed from THAT column, not kinetic_J --
+# virial_ratio = 2*kinetic_com_J / abs(virial_work_J) is independently
+# checkable from the CSV. The two kinetic columns differ only by the
+# constant bulk translational energy of the system's overall motion
+# (kinetic_J = kinetic_com_J + (1/2)*M_total*|COM velocity|^2), which is
+# irrelevant to the internal virial balance the ratio is meant to
+# report but is exactly what the conserved total energy must include.
 CLUSTER_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
                    "virial_ratio", "n_unbound", "high_velocity_fraction",
-                   "kinetic_J", "potential_J", "virial_work_J", "energy_J"]
+                   "kinetic_J", "kinetic_com_J", "potential_J",
+                   "virial_work_J", "energy_J"]
 # GALAXY_HEADER is built to match _galaxy_rows() exactly, column for
 # column, rather than derived from CLUSTER_HEADER by slicing -- galaxy
 # mode has no escaper tracking, so it must not carry "n_unbound" or
 # "high_velocity_fraction" columns that _galaxy_rows() never populates.
 GALAXY_HEADER = ["t_Myr", "r10_pc", "r25_pc", "r50_pc", "r75_pc", "r90_pc",
-                  "virial_ratio", "kinetic_J", "potential_J", "virial_work_J",
-                  "energy_J"]
+                  "virial_ratio", "kinetic_J", "kinetic_com_J", "potential_J",
+                  "virial_work_J", "energy_J"]
 CHAOS_HEADER = ["t_Myr", "divergence_pc", "energy_a_J", "energy_b_J"]
 
 
@@ -220,6 +231,7 @@ def _cluster_rows(result):
             int(result["n_unbound"][i]),
             f"{result['high_velocity_fraction'][i]:.6g}",
             f"{result['kinetic'][i]:.6e}",
+            f"{result['kinetic_com'][i]:.6e}",
             f"{result['potential'][i]:.6e}",
             f"{result['virial_work'][i]:.6e}",
             f"{result['energy'][i]:.6e}",
@@ -236,6 +248,7 @@ def _galaxy_rows(result):
             *[f"{lag[i, j] / phys.PC:.6g}" for j in range(lag.shape[1])],
             f"{result['virial_ratio'][i]:.6g}",
             f"{result['kinetic'][i]:.6e}",
+            f"{result['kinetic_com'][i]:.6e}",
             f"{result['potential'][i]:.6e}",
             f"{result['virial_work'][i]:.6e}",
             f"{result['energy'][i]:.6e}",
@@ -408,7 +421,7 @@ def _print_galaxy_summary(s):
     # (only possible for a very short run) is reported as such, not
     # silently classified either way.
     started_cold = s["virial_ratio_initial"] <= 0.3
-    late_ok = s["late_window_has_enough_snapshots"]
+    late_ok = s["late_window_has_enough_dense_samples"]
     late_settled = s["late_window_is_settled"]
     if s["r50_minimum_pc"] > 0.0:
         rebound_fraction = (
@@ -427,18 +440,22 @@ def _print_galaxy_summary(s):
         print(f"  radius fell to a SAMPLED minimum of {s['r50_minimum_pc']:.4g} pc at "
               f"{s['time_of_deepest_collapse_myr']:.3g} Myr, ending "
               f"{rebound_fraction:+.1%} away from that minimum -- but only "
-              f"{s['late_window_n_snapshots']} snapshot(s) fall within the final "
+              f"{s['late_window_n_dense_samples']} dense integration-step sample(s) "
+              f"fall within the final "
               f"{s['late_window_fraction']:.0%} of the run's elapsed time, too few to")
         print("  assess whether the late-time half-mass radius and virial ratio have")
-        print("  actually settled. Store more snapshots (raise target_snapshots) or")
-        print("  run longer (raise n_freefall) before drawing any quasi-equilibrium")
+        print("  actually settled. This dense sample count is set by the run's own")
+        print("  integration step count, NOT by --target_snapshots (which only")
+        print("  controls how many snapshots are STORED for plotting/CSV output);")
+        print("  run longer and/or finer (raise --n_freefall and/or")
+        print("  --steps_per_freefall) before drawing any quasi-equilibrium")
         print("  conclusion; the sampled minimum above is itself sampling-dependent")
         print("  and may understate the true collapse.")
     elif late_settled:
         print(f"  This run started close to cold (Q_initial near 0). Over the final")
         print(f"  {s['late_window_fraction']:.0%} of its elapsed time "
-              f"({s['late_window_n_snapshots']} stored snapshots from "
-              f"{s['late_window_start_myr']:.3g} Myr onward), the half-mass radius")
+              f"({s['late_window_n_dense_samples']} dense integration-step samples "
+              f"from {s['late_window_start_myr']:.3g} Myr onward), the half-mass radius")
         print(f"  varied by only {s['late_r50_fractional_range']:.1%} of its own mean "
               f"value and the virial ratio's range was {s['late_virial_ratio_range']:.3f}")
         print("  -- both within this program's documented 'modest' bounds. The window's")
@@ -461,7 +478,8 @@ def _print_galaxy_summary(s):
         print(f"  sampled half-mass-radius minimum of {s['r50_minimum_pc']:.4g} pc at "
               f"{s['time_of_deepest_collapse_myr']:.3g} Myr, but its final "
               f"{s['late_window_fraction']:.0%}")
-        print(f"  of elapsed time ({s['late_window_n_snapshots']} stored snapshots) "
+        print(f"  of elapsed time ({s['late_window_n_dense_samples']} dense "
+              f"integration-step samples) "
               f"shows a half-mass-radius range of {s['late_r50_fractional_range']:.1%} "
               "of its own mean value")
         print(f"  (linear trend {s['late_r50_linear_slope_pc_per_myr']:+.4g} pc/Myr) "

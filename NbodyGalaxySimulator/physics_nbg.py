@@ -360,30 +360,51 @@ def _validate_state(positions, velocities, masses):
 # power of two (frexp), multiplies the mantissas and sums the exponents
 # WITHOUT ever rounding a partial product to a real float64 in between,
 # and reconstructs the final float (ldexp) only once, at the very end.
-# This is exact whenever the true mathematical product is itself finite
-# and representable (which is precisely the class of case this section
-# exists to fix); it does not, and cannot, rescue a product whose true
-# value is genuinely non-representable.
+# This is RANGE-SAFE (immune to the intermediate overflow/underflow
+# this section exists to fix) whenever the true mathematical product is
+# itself finite and representable -- but it is not thereby EXACT: each
+# running mantissa multiplication is still an ordinary, rounded float64
+# operation, so a handful of ulp of accumulated rounding error relative
+# to a single correctly-rounded result is expected, not eliminated (see
+# _scaled_product()'s own docstring). It does not, and cannot, rescue a
+# product whose true value is genuinely non-representable. The same
+# caveat applies to every other "scale-safe" helper in this section:
+# each is safe against the specific overflow/underflow/cancellation
+# hazard it targets, not a guarantee of a faithfully-rounded result.
 # ======================================================================
 def _scaled_product(*factors):
     """
     Multiply the given (mutually broadcastable) float arrays/scalars
-    together, computing the IEEE-correct rounding of the FULLY COMBINED
-    product directly, without ever materializing an intermediate partial
-    product that could itself overflow to inf or underflow to 0 before
-    the remaining factors are applied.
+    together, WITHOUT ever materializing an intermediate partial product
+    that could itself overflow to inf or underflow to 0 before the
+    remaining factors are applied -- even though the true, fully combined
+    mathematical product would have been representable in float64.
 
     Uses np.frexp to factor each argument into (mantissa in [0.5, 1) or
     0.0, integer exponent), accumulates the mantissa product and the
     exponent sum symbolically across all factors (renormalizing the
     running mantissa via frexp after each multiplication, so it never
-    itself needs a wide dynamic range), and reconstructs the single
-    final float64 with one np.ldexp call. Handles zero and negative
-    factors correctly (frexp(0.0) = (0.0, 0); sign rides along in the
-    mantissa). Only the FINAL reconstructed value can overflow/underflow
-    -- exactly when the true mathematical product itself is not
-    representable, which is the correct, unavoidable case to report as
-    such (e.g. via an isfinite() postcondition at the call site).
+    itself needs a wide dynamic range), and reconstructs the final float64
+    with one np.ldexp call. Handles zero and negative factors correctly
+    (frexp(0.0) = (0.0, 0); sign rides along in the mantissa).
+
+    This is NOT a single correctly-rounded (0.5-ulp) result for the fully
+    combined product across many factors: each running "mantissa =
+    mantissa * fm" step is itself an ordinary float64 multiplication, so
+    it rounds at every step just like any other chain of float64
+    multiplications, and can accumulate a few ulp of error over many
+    factors (typically no more than a handful of ulp for the small
+    factor counts this module actually calls it with) relative to what
+    an exact/extended-precision computation rounded once at the very end
+    would give. What IS guaranteed is the overflow/underflow safety this
+    helper exists for: the exponent is tracked
+    separately as an exact integer with no intermediate range limit, so
+    the only place this computation itself can overflow or underflow is
+    the single final np.ldexp reconstruction -- exactly when the true
+    mathematical product is not representable in float64, which is the
+    correct, unavoidable case to report as such (e.g. via an isfinite()
+    postcondition at the call site) -- not any intermediate step along
+    the way, unlike a naive left-to-right product of the same factors.
     """
     shape = np.broadcast_shapes(*(np.shape(f) for f in factors))
     mantissa = np.ones(shape, dtype=float)
@@ -492,6 +513,86 @@ def _scale_safe_rms(values, axis=-1):
         safe_scale, axis=axis
     )
     return np.where(np.squeeze(scale, axis=axis) == 0.0, 0.0, rms)
+
+
+def _scale_safe_sum(values, axis, keepdims=False):
+    """
+    Sum ``values`` along ``axis``, robust to a PARTIAL sum along the way
+    overflowing to +-inf even when the true, fully combined sum is
+    itself representable -- e.g. terms [+1e308, +1e308, -1e308] along
+    one axis: the true sum, 1e308, is comfortably representable, but a
+    naive sequential or pairwise reduction overflows the moment it adds
+    the first two +1e308 terms together, before the compensating
+    -1e308 term ever gets a chance to bring the running total back into
+    range (np.sum's own reduction order is not something a caller
+    controls). This is the aggregate-scale sibling of _scaled_product():
+    that function fuses several individually-safe FACTORS of one term
+    without ever rounding a partial product; this one fuses many
+    individually-safe TERMS of one sum without ever forming a partial
+    sum that could itself already be non-representable.
+
+    Rescales every term by the largest-magnitude term along ``axis``
+    first (bounding every scaled term in [-1, 1], so the running total
+    during the reduction stays of order (size along axis) regardless of
+    the terms' own absolute scale), sums the rescaled terms with
+    Neumaier's (1974) improved Kahan compensated-summation algorithm
+    (not a plain np.sum), then rescales back up in the single final
+    multiplication -- the only place the true result's own magnitude
+    can overflow, and only when the true sum itself is not
+    representable.
+
+    The rescale step alone, without Neumaier compensation, is
+    range-safe but NOT cancellation-safe: for terms like [+1e308,
+    +1e308, -1e308, -1e308, +1], rescaling by the largest magnitude
+    (1e308) makes the true residual (1/1e308, about 1e-308) fall at the
+    very bottom of a plain np.sum's rounding error, so np.sum silently
+    keeps or drops it depending on the ORDER the terms happen to arrive
+    in -- the same physical configuration, permuted, could then report
+    two different centers of mass. Neumaier summation tracks a running
+    compensation term (the low-order bits an ordinary running sum would
+    otherwise discard) alongside the running total, so a small but
+    genuine contribution like this is preserved regardless of
+    summation order, making the result permutation-invariant to within
+    ordinary floating-point rounding rather than losing real
+    cancellation residue outright.
+    """
+    values = np.asarray(values, dtype=float)
+    axis = axis % values.ndim
+    scale = np.max(np.abs(values), axis=axis, keepdims=True)
+    safe_scale = np.where(scale == 0.0, 1.0, scale)
+    scaled = values / safe_scale
+
+    # Neumaier compensated summation along ``axis``, vectorized over every
+    # other axis at once: move the reduction axis to the front, then walk
+    # it one term at a time, maintaining a running total and a running
+    # compensation array (both shaped like every OTHER axis combined).
+    moved = np.moveaxis(scaled, axis, 0)
+    total = np.zeros(moved.shape[1:], dtype=float)
+    comp = np.zeros(moved.shape[1:], dtype=float)
+    for k in range(moved.shape[0]):
+        term = moved[k]
+        new_total = total + term
+        # Whichever of the running total or the new term has the larger
+        # magnitude determines which one absorbs the rounding error of
+        # this step's addition -- Neumaier's correction, generalizing
+        # Kahan summation to remain accurate even when a single term
+        # outweighs the running total (which plain Kahan summation does
+        # not handle correctly).
+        total_ge = np.abs(total) >= np.abs(term)
+        comp = comp + np.where(
+            total_ge, (total - new_total) + term, (term - new_total) + total
+        )
+        total = new_total
+    scaled_sum = total + comp
+
+    scale_squeezed = np.squeeze(scale, axis=axis)
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = scaled_sum * scale_squeezed
+    if keepdims:
+        result = np.expand_dims(result, axis=axis)
+    return result
+
+
 def _safe_distance_scalar(dx, dy, dz, eps2, eps):
     """
     Scale-safe sqrt(dx*dx + dy*dy + dz*dz + eps2) as plain Python floats.
@@ -679,10 +780,30 @@ def compute_accelerations_direct(positions, masses, softening):
     # whose square falls deep in the denormal range loses precision
     # that using the already-available original value avoids entirely.
     eps = softening
+    # Halved copies of the softening length/its square, used ONLY by the
+    # scale-safe fallback below (never by the fast path): halving any
+    # finite float64 value can never overflow (it only decrements the
+    # exponent), so these are always finite even when eps itself is at
+    # the extreme end of the representable range.
+    eps_half = 0.5 * eps
+    eps2_half = eps_half * eps_half
+    # Halved copies of every position, for the same reason: 0.5*x_j -
+    # 0.5*x_i is always finite even for opposite-sign extreme-magnitude
+    # coordinates whose true difference x_j - x_i would overflow (see the
+    # fallback loop below). Precomputed once outside the body loop rather
+    # than per-pair.
+    positions_half = 0.5 * positions
 
     acc = np.zeros_like(positions)
     for i in range(n):
-        d = positions - positions[i]              # (n, 3), points i -> all
+        # Opposite-sign extreme-magnitude coordinates (e.g. -1e308 and
+        # +1e308) make this subtraction itself overflow to +-inf for the
+        # affected rows even though the eventual softened force is
+        # comfortably representable; that is expected and handled below
+        # (via needs_fallback / the halved-displacement fallback), not a
+        # bug to surface as a warning-turned-exception.
+        with np.errstate(over="ignore"):
+            d = positions - positions[i]           # (n, 3), points i -> all
         r2 = np.einsum("ij,ij->i", d, d) + eps2
         # A sufficiently large (but individually finite) separation can
         # overflow r2 to inf. Left unhandled, that would make that one
@@ -710,18 +831,71 @@ def compute_accelerations_direct(positions, masses, softening):
         with np.errstate(over="ignore"):
             inv_r3 = r2 ** (-1.5)
         needs_fallback = overflowed | ~np.isfinite(inv_r3)
-        inv_r3[i] = 0.0                            # exclude self term
+        # masses[j] and inv_r3[j] can each be individually finite and
+        # nonzero yet still multiply to exactly 0.0 -- the true product
+        # underflows below the smallest representable subnormal
+        # (~4.9e-324) -- while the FULLY combined force (which still has
+        # G and a potentially enormous displacement d left to fold in)
+        # is comfortably representable. That silently reads exactly like
+        # a legitimate zero mass unless caught here, before this row's
+        # per-source coefficient is formed; routed to the same fused,
+        # order-independent fallback as an overflowed r2/inv_r3 rather
+        # than dropped.
+        with np.errstate(over="ignore"):
+            coeff = masses * inv_r3
+        underflowed = (coeff == 0.0) & (masses != 0.0) & (inv_r3 != 0.0)
+        # coeff itself can overflow to +inf even though r2 and inv_r3
+        # were each individually finite -- an enormous mass times an
+        # enormous inv_r3 (e.g. a very close, very massive source) whose
+        # product cannot be represented, while the FULLY combined force
+        # (which still has the displacement and the compensating G left
+        # to fold in) is comfortably representable. Left unchecked, this
+        # would either corrupt row_sum with a spurious +-inf term or, if
+        # it happens to cancel, be silently wrong; routed to the same
+        # scale-safe fallback as every other case here instead.
+        overflowed_coeff = ~np.isfinite(coeff)
+        needs_fallback = needs_fallback | underflowed | overflowed_coeff
+        coeff[i] = 0.0                              # exclude self term
         if np.any(needs_fallback):
-            inv_r3[needs_fallback] = 0.0
-        row_sum = G * np.sum((masses * inv_r3)[:, None] * d, axis=0)
+            coeff[needs_fallback] = 0.0
+            # d itself can contain +-inf at exactly these rows (an
+            # opposite-sign extreme-magnitude coordinate pair whose raw
+            # x_j - x_i overflows even though the eventual softened force
+            # is representable). Zeroing coeff alone is not enough to
+            # exclude such a row from the vectorized sum below: 0.0 * inf
+            # is nan, which would silently contaminate every other body's
+            # otherwise-normal contribution to this row's total. d is
+            # therefore zeroed at exactly the same rows; those rows'
+            # actual contribution is added back below via the halved-
+            # displacement fallback, which never needs the raw (possibly
+            # non-representable) d.
+            d = np.where(needs_fallback[:, None], 0.0, d)
+        row_sum = G * np.sum(coeff[:, None] * d, axis=0)
         if np.any(needs_fallback):
             for j in np.nonzero(needs_fallback)[0]:
                 if j == i:
                     continue
-                fx, fy, fz = _safe_pairwise_acceleration_term(
-                    d[j, 0], d[j, 1], d[j, 2], eps2, eps, masses[j]
+                # Displacement is recomputed here from HALVED copies of
+                # the two positions (0.5*x_j - 0.5*x_i), not from d[j]
+                # (which may be non-finite for exactly this row -- see
+                # above). Halving each position first can never overflow
+                # (it only decrements the exponent), and 0.5*x_j - 0.5*x_i
+                # is always finite even when x_j - x_i itself is not, for
+                # any two individually-finite float64 values. The result
+                # fed into _safe_pairwise_acceleration_term (with eps and
+                # eps2 halved to match) is therefore exactly 4x the true
+                # acceleration -- s_half = s/2, so
+                # G*mass*d_half/s_half**3 = G*mass*(d/2)/(s/2)**3 =
+                # 4*G*mass*d/s**3 -- and dividing by 4 below recovers the
+                # true, representable result even in cases where the raw
+                # displacement itself could never have been formed.
+                dx_half = positions_half[j, 0] - positions_half[i, 0]
+                dy_half = positions_half[j, 1] - positions_half[i, 1]
+                dz_half = positions_half[j, 2] - positions_half[i, 2]
+                fx_h, fy_h, fz_h = _safe_pairwise_acceleration_term(
+                    dx_half, dy_half, dz_half, eps2_half, eps_half, masses[j]
                 )
-                row_sum = row_sum + np.array([fx, fy, fz])
+                row_sum = row_sum + np.array([fx_h, fy_h, fz_h]) / 4.0
         acc[i] = row_sum
 
     if not np.all(np.isfinite(acc)):
@@ -752,7 +926,8 @@ class _OctreeNode:
                  "comz", "is_leaf", "indices", "children")
 
 
-def _build_octree(positions, masses, indices, center, half_size, depth):
+def _build_octree(positions, masses, indices, center, half_size, depth,
+                   bucket_report):
     node = _OctreeNode()
     node.cx, node.cy, node.cz = center
     node.half_size = half_size
@@ -775,7 +950,13 @@ def _build_octree(positions, masses, indices, center, half_size, depth):
     total_mass = max_mass * weight_sum
     node.mass = total_mass
     numerator = _scaled_product_over(max_mass, sub_mass[:, None], sub_pos)
-    com = np.sum(numerator, axis=0) / weight_sum
+    # _scale_safe_sum, not a plain np.sum, for the same reason
+    # center_of_mass() below needs it: the per-axis reduction across
+    # bodies can overflow at a partial sum even when the true,
+    # fully-combined numerator total is representable (e.g. two large
+    # same-sign terms whose partial sum overflows before a third,
+    # compensating opposite-sign term is added in).
+    com = _scale_safe_sum(numerator, axis=0) / weight_sum
     node.comx, node.comy, node.comz = float(com[0]), float(com[1]), float(com[2])
 
     if depth >= MAX_TREE_DEPTH and len(indices) > 1:
@@ -794,19 +975,20 @@ def _build_octree(positions, masses, indices, center, half_size, depth):
         # genuine severe coordinate overlap does not otherwise pass with
         # no visible signal to a student debugging an extreme-parameter
         # run.
-        warnings.warn(
-            f"build_octree: {len(indices)} bodies could not be separated "
-            f"after {MAX_TREE_DEPTH} levels of octree subdivision (they are "
-            "at or extremely near the same position) and were placed "
-            "together in one 'bucket' leaf node; the tree walk still "
-            "evaluates each of their forces individually and exactly "
-            "(the same softened pairwise force direct summation would "
-            "give), not as a combined monopole, so no force accuracy is "
-            "lost -- only the usual octree traversal speedup for these "
-            "particular bodies.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+        #
+        # Rather than calling warnings.warn() directly at every bucket
+        # node -- which, for a dense cluster
+        # with many separate small clumps of near-coincident bodies,
+        # would fire once per clump, on every single integration step's
+        # tree rebuild, and (since the message text embeds len(indices),
+        # defeating Python's own default once-per-identical-message
+        # warning dedup whenever the count differs between clumps or
+        # steps) could genuinely spam stdout and slow the run -- this
+        # only RECORDS the occurrence in ``bucket_report`` here.
+        # build_octree() below issues at most ONE consolidated warning
+        # per tree build (i.e. at most once per integration step),
+        # summarizing every bucket node from that build together.
+        bucket_report.append(len(indices))
 
     if len(indices) <= 1 or depth >= MAX_TREE_DEPTH:
         node.is_leaf = True
@@ -833,7 +1015,8 @@ def _build_octree(positions, masses, indices, center, half_size, depth):
             center[2] + (child_half if (k & 4) else -child_half),
         )
         node.children[k] = _build_octree(
-            positions, masses, sub_idx, child_center, child_half, depth + 1
+            positions, masses, sub_idx, child_center, child_half, depth + 1,
+            bucket_report,
         )
     return node
 
@@ -857,11 +1040,84 @@ def build_octree(positions, masses):
     positions = _require_snapshot(positions, "positions", n_bodies=n)
     lo = positions.min(axis=0)
     hi = positions.max(axis=0)
-    center = tuple((0.5 * (lo + hi)).tolist())
-    half_size = float(np.max(hi - lo)) * 0.5 * 1.001
+    # Halve lo and hi SEPARATELY before combining, both for the midpoint
+    # and for the half-extent, rather than forming lo+hi or hi-lo as a
+    # standalone value first: for same-sign extreme coordinates (e.g.
+    # lo=8e307, hi=1e308) lo+hi can overflow even though the true
+    # midpoint is representable, and for opposite-sign extreme
+    # coordinates (e.g. lo=-1e308, hi=1e308) hi-lo can overflow even
+    # though the true half-extent (1e308) is representable. This is a
+    # coordinate-only special case of the same "no order of sequential
+    # combination saves every representable case" issue documented at
+    # _scaled_product()'s module note.
+    center = tuple((0.5 * lo + 0.5 * hi).tolist())
+    half_size = float(np.max(0.5 * hi - 0.5 * lo)) * 1.001
+    if not (np.all(np.isfinite(center)) and math.isfinite(half_size)):
+        raise ValueError(
+            "the octree bounding cube overflowed; check that positions "
+            "are physically reasonable."
+        )
     if not (half_size > 0.0):
         half_size = 1.0
-    return _build_octree(positions, masses, np.arange(n), center, half_size, 0)
+    bucket_report = []
+    root = _build_octree(positions, masses, np.arange(n), center, half_size,
+                          0, bucket_report)
+    if bucket_report:
+        # ONE consolidated warning per tree build (i.e. per integration
+        # step, not per bucket node/clump within it) -- see
+        # _build_octree()'s matching comment. Summarizes every bucket
+        # node from this build: how many separate nodes needed
+        # bucketing and how many bodies, in total, they contained.
+        n_buckets = len(bucket_report)
+        n_bucketed_bodies = sum(bucket_report)
+        warnings.warn(
+            f"build_octree: {n_bucketed_bodies} bodies (in {n_buckets} "
+            f"separate 'bucket' node{'s' if n_buckets != 1 else ''}) could "
+            f"not be separated after {MAX_TREE_DEPTH} levels of octree "
+            "subdivision (they are at or extremely near the same "
+            "position); the tree walk still evaluates each of their "
+            "forces individually and exactly (the same softened pairwise "
+            "force direct summation would give), not as a combined "
+            "monopole, so no force accuracy is lost -- only the usual "
+            "octree traversal speedup for these particular bodies.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return root
+
+
+def _fast_pairwise_coeff(mass, r2):
+    """
+    Fast-path scalar force coefficient ``G * mass * r2 ** -1.5`` used by
+    the tree walk's leaf and monopole terms, returning ``math.nan``
+    whenever the result cannot be trusted as the fully combined,
+    representable value -- the caller then routes to the fused,
+    scale-safe fallback (_safe_pairwise_acceleration_term) instead of
+    silently zeroing out or corrupting this pair's/node's contribution.
+    Three distinct failure modes are all folded into the same nan
+    signal: r2 itself overflowing to +inf; r2 ** -1.5 overflowing
+    (raised by C's pow() as a raw OverflowError rather than saturating
+    to inf); and mass * r2 ** -1.5 underflowing to exactly 0.0 even
+    though mass and r2 ** -1.5 are each individually finite and
+    nonzero. That last case is not hypothetical: a mass and an inv_r3
+    that are each comfortably representable on their own can still
+    multiply (in either order, including with G folded in first) to
+    something below the smallest representable subnormal
+    (~4.9e-324) -- while the FULLY combined force, which still has the
+    displacement components left to fold in, is itself representable.
+    """
+    if not math.isfinite(r2):
+        return math.nan
+    try:
+        inv_r3 = r2 ** -1.5
+    except OverflowError:
+        return math.nan
+    if not math.isfinite(inv_r3):
+        return math.nan
+    coeff = G * mass * inv_r3
+    if coeff == 0.0 and mass != 0.0 and inv_r3 != 0.0:
+        return math.nan
+    return coeff
 
 
 def _node_acceleration(root, i, pos_list, mass_list, theta, eps2, softening):
@@ -883,6 +1139,18 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2, softening):
     """
     xi, yi, zi = pos_list[i]
     eps = softening
+    # Halved copies of softening and body i's own position, used ONLY by
+    # the scale-safe fallback branches below: halving any finite float64
+    # value can never overflow (it only decrements the exponent), so
+    # these stay finite even at the extreme end of the representable
+    # range. See compute_accelerations_direct's matching comment -- the
+    # tree walk needs the identical halving trick for the identical
+    # reason (an opposite-sign extreme-magnitude pair whose raw
+    # difference overflows even though the final softened force is
+    # representable).
+    eps_half = 0.5 * eps
+    eps2_half = eps_half * eps_half
+    xi_half, yi_half, zi_half = 0.5 * xi, 0.5 * yi, 0.5 * zi
     ax = ay = az = 0.0
     stack = [root]
     theta2 = theta * theta
@@ -895,49 +1163,53 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2, softening):
                 if j == i:
                     continue
                 xj, yj, zj = pos_list[j]
+                # xj - xi (etc.) can silently overflow to +-inf here for
+                # an opposite-sign extreme-magnitude pair; unlike NumPy,
+                # plain Python float arithmetic does not warn when this
+                # happens, so no errstate suppression is needed, but dx/
+                # dy/dz themselves must never be used below once that
+                # happens -- only r2's resulting non-finiteness (routing
+                # to the halved-displacement fallback) is relied upon.
                 dx, dy, dz = xj - xi, yj - yi, zj - zi
                 r2 = dx * dx + dy * dy + dz * dz + eps2
-                # r2 can overflow to +inf for a sufficiently large (but
-                # individually finite) separation, which would otherwise
-                # make r2 ** -1.5 evaluate to exactly 0.0 -- a silent,
-                # finite-looking "no force" answer even when the true
-                # softened force is comfortably representable (or a
-                # genuine subnormal). G is applied per term here so that
-                # the fast and scale-safe fallback paths share the same
+                # G is applied inside _fast_pairwise_coeff so that the
+                # fast and scale-safe fallback paths share the same
                 # units; see _safe_pairwise_acceleration_term's docstring
                 # for why the fallback needs G folded in before its
-                # divisions. Also routed to that same fallback when r2
-                # stays finite but r2 ** -1.5 itself overflows -- a
-                # near-coincident pair or a very small softening can hit
-                # this even though the true softened force is
-                # representable.
-                coeff = math.nan
-                if math.isfinite(r2):
-                    try:
-                        # Plain-float ** goes through C's pow(), which
-                        # signals ERANGE as a raw OverflowError rather
-                        # than saturating to inf the way multiplication
-                        # does -- a tiny (but finite, representable) r2
-                        # raised to -1.5 can hit this exact path, so it
-                        # must be caught explicitly rather than left to
-                        # an isfinite() check that a raised exception
-                        # would bypass.
-                        coeff = G * mass_list[j] * r2 ** -1.5
-                    except OverflowError:
-                        coeff = math.nan
+                # divisions. _fast_pairwise_coeff returns nan (routing to
+                # that fallback) for every case where the fast, un-fused
+                # G*mass*r2**-1.5 computation cannot be trusted: r2
+                # overflowing, r2**-1.5 overflowing, or mass*r2**-1.5
+                # underflowing to exactly 0.0 despite both factors being
+                # individually finite and nonzero.
+                coeff = _fast_pairwise_coeff(mass_list[j], r2)
                 if math.isfinite(coeff):
                     ax += coeff * dx
                     ay += coeff * dy
                     az += coeff * dz
                 else:
-                    fx, fy, fz = _safe_pairwise_acceleration_term(
-                        dx, dy, dz, eps2, eps, mass_list[j]
+                    # Recomputed from HALVED copies of both positions,
+                    # not from dx/dy/dz (which may themselves be
+                    # non-finite -- see above); see
+                    # compute_accelerations_direct's matching fallback
+                    # for the full derivation of the factor of 4.
+                    dx_half = 0.5 * xj - xi_half
+                    dy_half = 0.5 * yj - yi_half
+                    dz_half = 0.5 * zj - zi_half
+                    fx_h, fy_h, fz_h = _safe_pairwise_acceleration_term(
+                        dx_half, dy_half, dz_half, eps2_half, eps_half,
+                        mass_list[j],
                     )
-                    ax += fx
-                    ay += fy
-                    az += fz
+                    ax += fx_h / 4.0
+                    ay += fy_h / 4.0
+                    az += fz_h / 4.0
             continue
 
+        # node.comx - xi (etc.) can silently overflow to +-inf for an
+        # opposite-sign extreme-magnitude pair, exactly as in the leaf
+        # loop above; dx/dy/dz are then only used for dist2/the fast
+        # path below, never for the fallback (which recomputes from
+        # halved copies instead -- see below).
         dx, dy, dz = node.comx - xi, node.comy - yi, node.comz - zi
         dist2 = dx * dx + dy * dy + dz * dz
         size = 2.0 * node.half_size
@@ -967,27 +1239,29 @@ def _node_acceleration(root, i, pos_list, mass_list, theta, eps2, softening):
         # for the monopole approximation regardless of theta.
         if dist2 > 0.0 and not contains_i and (size * size) < theta2 * dist2:
             r2 = dist2 + eps2
-            # Same overflow hazard, and the same fast/safe split (raw
-            # OverflowError included), as the leaf-node loop above --
-            # here for a monopole's total mass and separation rather
-            # than a single body's.
-            coeff = math.nan
-            if math.isfinite(r2):
-                try:
-                    coeff = G * node.mass * r2 ** -1.5
-                except OverflowError:
-                    coeff = math.nan
+            # Same fast/safe split as the leaf-node loop above, via the
+            # same helper -- here for a monopole's total mass and
+            # separation rather than a single body's.
+            coeff = _fast_pairwise_coeff(node.mass, r2)
             if math.isfinite(coeff):
                 ax += coeff * dx
                 ay += coeff * dy
                 az += coeff * dz
             else:
-                fx, fy, fz = _safe_pairwise_acceleration_term(
-                    dx, dy, dz, eps2, eps, node.mass
+                # Recomputed from HALVED copies of both positions, not
+                # from dx/dy/dz (which may themselves be non-finite --
+                # see above); see compute_accelerations_direct's matching
+                # fallback for the full derivation of the factor of 4.
+                dx_half = 0.5 * node.comx - xi_half
+                dy_half = 0.5 * node.comy - yi_half
+                dz_half = 0.5 * node.comz - zi_half
+                fx_h, fy_h, fz_h = _safe_pairwise_acceleration_term(
+                    dx_half, dy_half, dz_half, eps2_half, eps_half,
+                    node.mass,
                 )
-                ax += fx
-                ay += fy
-                az += fz
+                ax += fx_h / 4.0
+                ay += fy_h / 4.0
+                az += fz_h / 4.0
         else:
             stack.extend(node.children)
     return ax, ay, az
@@ -1007,15 +1281,16 @@ def compute_accelerations_tree(positions, masses, theta, softening):
     useful as a correctness check; theta of order 0.5-0.8 is the usual
     working range, trading force accuracy for speed.
     """
-    positions = _as_finite_array(positions, "positions")
-    masses = _as_finite_array(masses, "masses")
-    if positions.shape != (masses.size, 3):
-        raise ValueError(
-            f"positions must have shape ({masses.size}, 3) to match masses; "
-            f"got {positions.shape}."
-        )
-    if np.any(masses <= 0.0):
-        raise ValueError("all masses must be strictly positive.")
+    # _require_masses()/_require_snapshot(), the same shared validators
+    # compute_accelerations_direct() already uses, not a separate
+    # _as_finite_array() + ad hoc positivity/shape
+    # check -- a bare scalar mass, a mismatched masses length, or a
+    # wrong-shaped positions array now gets the identical error wording
+    # regardless of which force method (direct or tree) was requested,
+    # rather than two different validation contracts for what is meant
+    # to be an interchangeable choice (see compute_accelerations()).
+    masses = _require_masses(masses)
+    positions = _require_snapshot(positions, "positions", n_bodies=masses.size)
     theta = _require_theta(theta)
     softening = _require_positive("softening", softening)
     # For a sufficiently large (but individually
@@ -1343,7 +1618,14 @@ def center_of_mass(positions, masses):
     # ever forming the standalone reciprocal 1/max_mass, which matters
     # when max_mass itself is extremely small (see its own docstring).
     numerator = _scaled_product_over(max_mass, masses[:, None], positions)
-    com = np.sum(numerator, axis=0) / weight_sum
+    # _scale_safe_sum, not a plain np.sum, over the per-body axis: a
+    # partial sum across bodies can overflow even when the true,
+    # cancellation-involving total is representable (e.g. positions
+    # [+1e308, +1e308, -1e308] with equal masses -- the true COM,
+    # 1e308/3, is comfortably representable, but naive reduction
+    # overflows at the first two same-sign terms before the third,
+    # compensating term is folded in).
+    com = _scale_safe_sum(numerator, axis=0) / weight_sum
     if not np.all(np.isfinite(com)):
         raise ValueError(
             "center of mass overflowed; check that positions and masses "
@@ -1365,7 +1647,9 @@ def center_of_mass_velocity(velocities, masses):
     weights = masses / max_mass
     weight_sum = np.sum(weights)
     numerator = _scaled_product_over(max_mass, masses[:, None], velocities)
-    com_v = np.sum(numerator, axis=0) / weight_sum
+    # See center_of_mass() for why this reduction must be
+    # _scale_safe_sum rather than a plain np.sum.
+    com_v = _scale_safe_sum(numerator, axis=0) / weight_sum
     if not np.all(np.isfinite(com_v)):
         raise ValueError(
             "center-of-mass velocity overflowed; check that velocities "
@@ -1487,30 +1771,47 @@ def _phi_and_speed2(positions, velocities, masses, softening):
                     continue
                 r[k] = _safe_distance_scalar(d[k, 0], d[k, 1], d[k, 2], eps2, eps)
         r[i] = np.inf                       # exclude self term
+        # Each body's G*m_j/r contribution is combined in ONE fused
+        # _scaled_product_over() call, not computed as G*(masses/r): a
+        # sufficiently large source mass and small r can make masses/r
+        # ALONE overflow to +inf even though the fully combined G*m_j/r
+        # term is comfortably representable once G (~6.674e-11) is
+        # folded in -- e.g. masses of 1e308 kg at r=0.1 m makes
+        # masses/r ~1e309 overflow, while G*masses/r ~6.67e298 does not.
+        # This mirrors potential_energy()'s own pair_terms fusion above.
         with np.errstate(over="ignore"):
-            phi[i] = -G * np.sum(masses / r)
+            phi[i] = -float(np.sum(_scaled_product_over(r, G, masses)))
         if not math.isfinite(phi[i]):
             raise ValueError(
                 "specific potential energy overflowed for at least one "
                 "body; check that positions and masses are physically "
                 "reasonable."
             )
-    # speed2 = |v|^2 in the center-of-mass frame needs its own finiteness
-    # check: a velocity of order 1e200 makes v*v alone overflow float64,
-    # and the true squared speed genuinely is not representable in that
-    # regime (unlike phi above, whose overflow is often only an artifact
-    # of the naive summation order) -- so the correct behavior is the
-    # same clean rejection every other overflow in this module gets, not
-    # a silently returned inf that specific_energies()/high_velocity_
-    # fraction() would otherwise propagate outward untested.
+    # This returns (1/2)|v|^2 -- HALF the squared speed, in the
+    # center-of-mass frame -- not the raw |v|^2. That distinction
+    # matters: both of this
+    # function's callers (specific_energies's (1/2)v^2 + Phi, and
+    # high_velocity_fraction's bound/fast comparisons, reformulated below
+    # to use half_speed2 directly rather than 0.5*speed2/speed2) only
+    # ever need the HALVED quantity, but summing the raw per-component
+    # squares first (vx^2+vy^2+vz^2) before applying the 1/2 factor can
+    # overflow even when the true, halved result is representable: e.g.
+    # v=(1e154,1e154,0) has vx^2+vy^2 = 2e308, which exceeds float64's
+    # ~1.8e308 ceiling and overflows, while (1/2)(vx^2+vy^2) = 1e308 is
+    # comfortably representable. Applying the 1/2 factor to each squared
+    # COMPONENT before summing (via the same fused _scaled_product()
+    # pattern kinetic_energy() already uses), rather than to their sum
+    # afterward, keeps every individual term -- and therefore the
+    # per-body total -- in range whenever the true halved speed-squared
+    # itself is representable, even though the unhalved sum is not.
     with np.errstate(over="ignore"):
-        speed2 = np.einsum("ij,ij->i", vel_cm, vel_cm)
-    if not np.all(np.isfinite(speed2)):
+        half_speed2 = np.sum(_scaled_product(0.5, vel_cm, vel_cm), axis=1)
+    if not np.all(np.isfinite(half_speed2)):
         raise ValueError(
             "squared speed overflowed for at least one body; check that "
             "velocities are physically reasonable."
         )
-    return phi, speed2
+    return phi, half_speed2
 
 
 def specific_energies(positions, velocities, masses, softening):
@@ -1523,9 +1824,9 @@ def specific_energies(positions, velocities, masses, softening):
 
     O(N^2); intended for periodic diagnostics, not every integration step.
     """
-    phi, speed2 = _phi_and_speed2(positions, velocities, masses, softening)
+    phi, half_speed2 = _phi_and_speed2(positions, velocities, masses, softening)
     with np.errstate(over="ignore"):
-        energies = 0.5 * speed2 + phi
+        energies = half_speed2 + phi
     if not np.all(np.isfinite(energies)):
         raise ValueError(
             "specific energy overflowed for at least one body; check "
@@ -1570,10 +1871,32 @@ def high_velocity_fraction(positions, velocities, masses, softening, threshold=0
     still bound" should be chosen in (0, 1).
     """
     threshold = _require_positive("threshold", threshold)
-    phi, speed2 = _phi_and_speed2(positions, velocities, masses, softening)
-    v_esc2 = 2.0 * np.abs(phi)
-    bound = (0.5 * speed2 + phi) < 0.0
-    fast = speed2 >= (threshold ** 2) * v_esc2
+    phi, half_speed2 = _phi_and_speed2(positions, velocities, masses, softening)
+    # threshold>=1 is documented above as always returning 0.0 -- the
+    # "bound" mask already excludes anything at or past the local escape
+    # speed, so nothing can simultaneously be bound and at or above
+    # threshold=1 times that speed. Returned here directly, immediately
+    # AFTER the shared validation/computation above (so a malformed
+    # positions/velocities/masses argument is still caught) but BEFORE
+    # ever computing threshold**2: that squaring itself overflows for a
+    # large but individually valid finite threshold like 1e308, even
+    # though the documented answer for every threshold>=1 is the same
+    # simple 0.0 regardless of phi/half_speed2.
+    if threshold >= 1.0:
+        return 0.0
+    # Both comparisons below are stated in terms of HALF the escape
+    # speed squared and half the speed squared, never the raw (unhalved)
+    # quantities -- v_esc2 = 2*|phi| can itself overflow for a large but
+    # individually representable phi even when |phi| (its own half)
+    # does not, and speed2 = 2*half_speed2 has the identical hazard
+    # _phi_and_speed2's own docstring now explains. Since both sides of
+    # "speed2 >= threshold**2 * v_esc2" would be scaled by the same
+    # factor of 2, the comparison's truth value is unaffected by
+    # working in half-quantities throughout, so nothing is lost by
+    # never forming the unhalved values at all.
+    half_v_esc2 = np.abs(phi)
+    bound = (half_speed2 + phi) < 0.0
+    fast = half_speed2 >= (threshold ** 2) * half_v_esc2
     return float(np.mean(fast & bound))
 
 
@@ -1602,6 +1925,112 @@ def identify_unbound(positions, velocities, masses, softening):
     return specific_energies(positions, velocities, masses, softening) > 0.0
 
 
+def _scale_safe_ratio_mantissa_exponent(numerator, *denominator_factors):
+    """
+    Shared core of _scale_safe_scalar_ratio() and _scale_safe_sqrt_ratio():
+    decompose ``numerator / (denominator_factors[0] * denominator_factors[1]
+    * ...)`` into (mantissa in [0.5, 1) or its negative, integer exponent)
+    via math.frexp, WITHOUT ever reconstructing the ratio as a standalone
+    float64 (that reconstruction is exactly the step each caller wants to
+    defer or skip -- see their own docstrings for why).
+    """
+    nm, ne = math.frexp(numerator)
+    dm, de = 1.0, 0
+    for factor in denominator_factors:
+        fm, fe = math.frexp(factor)
+        dm *= fm
+        dm, me = math.frexp(dm)
+        de += fe + me
+    ratio_m = nm / dm
+    ratio_m, me = math.frexp(ratio_m)
+    ratio_e = ne - de + me
+    return ratio_m, ratio_e
+
+
+def _scale_safe_scalar_ratio(numerator, *denominator_factors):
+    """
+    Scale-safe ``numerator / (denominator_factors[0] * denominator_factors[1] * ...)``
+    for plain Python floats, computed by frexp-decomposing every factor
+    (numerator included) into a mantissa in [0.5, 1) times a power of
+    two and combining the exponents symbolically, so the denominator's
+    product is never formed as its own standalone float64 value.
+
+    That standalone product can underflow to exactly 0.0 (turning an
+    ordinary division into a raw ZeroDivisionError) or overflow to +inf
+    even when the true, fully combined ratio is itself comfortably
+    representable -- e.g. G * total_mass_kg underflows for a mass at
+    the representable-denormal floor, even though r / (G * total_mass_kg)
+    is not. Only the single final ldexp can overflow/underflow, and only
+    when the true mathematical ratio itself is not representable.
+
+    NOTE: this reconstructs the ratio itself as a standalone float64. If
+    the caller's real interest is sqrt(ratio) rather than the ratio
+    itself (e.g. crossing_time()), use _scale_safe_sqrt_ratio() instead --
+    the ratio can be genuinely non-representable (too large or too small
+    for float64's exponent range) even when its square root is not, so
+    reconstructing the plain ratio first can fail a case the caller did
+    not actually need to succeed.
+    """
+    ratio_m, ratio_e = _scale_safe_ratio_mantissa_exponent(numerator, *denominator_factors)
+    # math.ldexp raises a raw OverflowError (rather than saturating to
+    # inf the way multiplication does) when the reconstructed magnitude
+    # is too large to represent -- exactly the "true ratio is not
+    # representable" case every call site already checks for via an
+    # isfinite()/_require_positive() postcondition, so it is converted
+    # to a signed inf here instead of propagating as an uncaught
+    # exception.
+    try:
+        return math.ldexp(ratio_m, ratio_e)
+    except OverflowError:
+        return math.inf if ratio_m > 0.0 else -math.inf
+
+
+def _scale_safe_sqrt_ratio(numerator, *denominator_factors):
+    """
+    Scale-safe ``sqrt(numerator / (denominator_factors[0] *
+    denominator_factors[1] * ...))`` for plain Python floats -- the
+    square root is taken IN EXPONENT SPACE, on the (mantissa, exponent)
+    decomposition from _scale_safe_ratio_mantissa_exponent(), before the
+    ratio is ever reconstructed as a standalone float64.
+
+    This matters because the plain ratio can be non-representable (its
+    magnitude can exceed float64's ~1.8e308 ceiling, or underflow below
+    its ~4.9e-324 floor) even when the SQUARE ROOT of that same ratio is
+    comfortably representable -- taking a square root roughly halves a
+    value's exponent, so a ratio whose true magnitude is, say, 1e620 is
+    itself far outside float64's range, but its square root, about
+    1e310, might still be only modestly out of range, or (for a less
+    extreme example) a ratio of about 3e333 is not representable at all,
+    while its square root, about 5.5e166, is. crossing_time() needs
+    exactly this: t_cross = r * sqrt(r / (G*M)), and a total_mass_kg near
+    the smallest representable positive float64 makes the intermediate
+    ratio r/(G*M) itself overflow even though t_cross is finite.
+
+    Reconstructing sqrt(mantissa * 2**exponent) requires care when
+    ``exponent`` is odd, since 2**(exponent/2) is then not itself an
+    integer power of two: this rewrites mantissa * 2**exponent as
+    (mantissa * 2) * 2**(exponent - 1) first whenever exponent is odd,
+    so the exponent handed to the square root is always even and the
+    corresponding mantissa (in [0.5, 2)) stays comfortably within an
+    ordinary, safe range for math.sqrt.
+    """
+    ratio_m, ratio_e = _scale_safe_ratio_mantissa_exponent(numerator, *denominator_factors)
+    if ratio_m < 0.0:
+        raise ValueError(
+            "_scale_safe_sqrt_ratio's ratio is negative; its square root "
+            "is not a real number."
+        )
+    if ratio_e % 2 != 0:
+        ratio_m *= 2.0
+        ratio_e -= 1
+    sqrt_m = math.sqrt(ratio_m)
+    sqrt_e = ratio_e // 2
+    try:
+        return math.ldexp(sqrt_m, sqrt_e)
+    except OverflowError:
+        return math.inf
+
+
 # ======================================================================
 # Characteristic timescales
 # ======================================================================
@@ -1624,15 +2053,30 @@ def crossing_time(half_mass_radius_m, total_mass_kg):
     # and cubing via ** can also raise a raw, uncaught OverflowError for
     # a large radius, since Python's float.__pow__ goes through C's
     # pow(), which signals ERANGE as OverflowError rather than silently
-    # saturating to inf the way plain multiplication does). Dividing
-    # r/(G*M) FIRST keeps that ratio (and its square root) in an
-    # ordinary range even when r itself is extreme, and the single
-    # remaining multiplication by r at the end is the only place the
-    # true result's own magnitude appears -- exactly where it belongs if
-    # the true answer is itself representable.
-    ratio = half_mass_radius_m / (G * total_mass_kg)
-    ratio = _require_positive("half_mass_radius_m / (G * total_mass_kg)", ratio)
-    t_cross = half_mass_radius_m * math.sqrt(ratio)
+    # saturating to inf the way plain multiplication does).
+    #
+    # A plain r/(G*M) ratio -- even computed via the exponent-aware
+    # _scale_safe_scalar_ratio() -- can STILL be non-representable on
+    # its own (e.g. r=1, M at the smallest
+    # representable positive float64: the true ratio is about 3.06e333,
+    # which does not fit in float64) even though sqrt(r/(G*M)) (about
+    # 5.53e166 here) and the final t_cross ARE representable. The fix is
+    # to take the square root IN EXPONENT SPACE via
+    # _scale_safe_sqrt_ratio(), which never reconstructs the plain ratio
+    # as a standalone float64 at all, only its square root -- and only
+    # THAT single reconstruction can overflow/underflow, exactly when
+    # sqrt(r/(G*M)) itself is not representable. The final multiplication
+    # by r uses _scaled_product(), not a plain ``*``, for the same reason
+    # every other fused pairwise/scalar formula in this module does: r
+    # and sqrt_ratio are each already normal-range values at this point,
+    # but a genuinely extreme r (this function's own contract allows any
+    # positive finite radius) should not reintroduce a standalone-
+    # multiplication overflow right at the last step.
+    sqrt_ratio = _scale_safe_sqrt_ratio(half_mass_radius_m, G, total_mass_kg)
+    sqrt_ratio = _require_positive(
+        "sqrt(half_mass_radius_m / (G * total_mass_kg))", sqrt_ratio
+    )
+    t_cross = float(_scaled_product(half_mass_radius_m, sqrt_ratio))
     if not math.isfinite(t_cross):
         raise ValueError(
             "crossing time overflowed; check that half_mass_radius_m and "
@@ -2105,14 +2549,28 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
     direct summation, deliberately, as a high-accuracy diagnostic
     reference -- see its own docstring) at every single step, which would
     reintroduce an O(N^2) cost per step regardless of stride, exactly what
-    snapshot_stride exists to avoid. Wvir_proxy is mathematically IDENTICAL
-    to virial_force_term()'s sum_i r_i . F_i (translation-invariant since
-    the net force sums to zero; verified to agree with virial_force_term()
-    to machine precision under method="direct"); under method="tree" it
-    inherits that step's tree-approximation force error, exactly as the
-    dynamics themselves already do. This is a self-consistent classification
+    snapshot_stride exists to avoid. r_i in Wvir_proxy is measured from the
+    INSTANTANEOUS center of mass (not raw positions): for exact, antisymmetric
+    pairwise forces (method="direct") the net force sums to zero and the
+    COM-subtraction is a no-op, so Wvir_proxy is mathematically IDENTICAL to
+    virial_force_term()'s sum_i r_i . F_i there (verified to agree with
+    virial_force_term() to machine precision under method="direct"); under
+    method="tree", Barnes-Hut's monopole-approximated forces are NOT exactly
+    antisymmetric in general, so the net force does not sum to exactly zero,
+    and using raw (non-COM-relative) positions would make Wvir_proxy silently
+    translation-dependent. Measuring from the instantaneous COM keeps it
+    translation-invariant under both methods; it still inherits that step's
+    tree-approximation force error under method="tree", exactly as the
+    dynamics themselves already do. The dense kinetic-energy term that
+    virial_ratio_dense is formed from likewise uses velocities relative to
+    the instantaneous center-of-mass velocity, not raw velocities, so a
+    uniform (Galilean-boost) velocity added to every body -- which would
+    otherwise add boost-dependent bulk kinetic energy unrelated to the
+    system's internal virial state -- leaves both r50_dense and
+    virial_ratio_dense unchanged. This is a self-consistent classification
     proxy, not a replacement for the officially reported, always-exact
-    virial_work/virial_ratio snapshot series, which is unchanged.
+    kinetic/virial_work/virial_ratio snapshot series (which remain in the
+    lab frame the caller supplied, unchanged).
 
     dt must be strictly positive; see leapfrog_step's docstring for why a
     negative (reversed-time) dt is rejected rather than silently
@@ -2155,6 +2613,7 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
     pos_hist = np.empty((n_snapshots, n_bodies, 3))
     vel_hist = np.empty((n_snapshots, n_bodies, 3))
     kin_hist = np.empty(n_snapshots)
+    kin_com_hist = np.empty(n_snapshots)
     pot_hist = np.empty(n_snapshots)
     vir_hist = np.empty(n_snapshots)
     mom_hist = np.empty((n_snapshots, 3))
@@ -2167,6 +2626,27 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
         pos_hist[k] = pos
         vel_hist[k] = vel
         kin_hist[k] = kinetic_energy(vel, masses)
+        # A SEPARATE COM-relative (internal) kinetic energy, used only
+        # as the virial-ratio numerator (see
+        # _virial_track's callers in run_cluster/run_galaxy below) -- not
+        # a replacement for kin_hist/"kinetic" above, which stays the raw
+        # lab-frame kinetic energy so that "energy" (=kinetic+potential)
+        # remains the quantity the integrator actually conserves and
+        # kinetic_J + potential_J == energy_J stays exactly true in the
+        # CSV regardless of the frame velocities happen to be reported
+        # in. The scalar virial theorem 2T = -Wvir concerns only the
+        # system's INTERNAL kinetic energy: a uniform bulk boost added to
+        # every velocity changes kin_hist (lab-frame KE gains bulk
+        # translational energy having nothing to do with internal virial
+        # balance) but leaves the true internal dynamics, and therefore
+        # the correct virial ratio, unchanged. Without this correction, a
+        # boosted-but-otherwise-identical run reports a wildly different
+        # (and physically meaningless) official virial_ratio even though
+        # the system's internal state is identical -- see
+        # _record_dense's matching comment below, which already applies
+        # the identical correction to the dense proxy.
+        vel_rel = vel - center_of_mass_velocity(vel, masses)
+        kin_com_hist[k] = kinetic_energy(vel_rel, masses)
         pot_hist[k] = potential_energy(pos, masses, softening)
         # Wvir (virial_force_term), not U (potential_energy), is the correct
         # denominator for the virial ratio once softening is nonzero -- see
@@ -2179,8 +2659,50 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
         # Cheap, O(N) proxy -- see integrate_nbody()'s own docstring for why
         # this is used instead of virial_force_term() at every step.
         r50_dense[idx] = half_mass_radius(pos, masses)
-        kinetic = kinetic_energy(vel, masses)
-        wvir_proxy = float(np.sum(masses[:, None] * pos * accel))
+        # Both r and v are measured relative to the INSTANTANEOUS center of
+        # mass (position and velocity), not used raw, before this proxy is
+        # formed. Two independent reasons:
+        #  - Under method="tree" (theta > 0) the per-body accelerations come
+        #    from a Barnes-Hut monopole approximation whose implied pairwise
+        #    forces are not exactly antisymmetric, so sum_i m_i * a_i (the
+        #    net "force") is not exactly zero the way it is for exact/direct
+        #    forces -- and sum_i m_i * (r_i . a_i) computed from RAW
+        #    positions would then silently pick up a translation-dependent
+        #    offset of (constant shift) . sum_i m_i * a_i.
+        #  - The kinetic term is not Galilean-boost-invariant when computed
+        #    from raw (lab-frame) velocities: a uniform velocity added to
+        #    every body adds bulk translational kinetic energy that has
+        #    nothing to do with the system's internal virial state, which
+        #    would bias this classifier proxy toward whatever frame the
+        #    caller happened to report velocities in.
+        # Subtracting the instantaneous COM position and velocity removes
+        # both dependences regardless of method, at no extra asymptotic
+        # cost (center_of_mass/center_of_mass_velocity are each O(N)); all
+        # of this program's own initial-condition generators already
+        # recenter to a zero COM velocity, so this is a robustness/
+        # correctness fix rather than a change in real reported behavior.
+        pos_rel = pos - center_of_mass(pos, masses)
+        vel_rel = vel - center_of_mass_velocity(vel, masses)
+        kinetic = kinetic_energy(vel_rel, masses)
+        # mass * pos_rel * accel is now fused in one _scaled_product()
+        # call per (body, component) -- not a
+        # sequential mass[:,None] * pos_rel * accel chain, whose first
+        # partial product (mass * pos_rel) can itself overflow or
+        # underflow for an extreme-but-representable mass/position/
+        # acceleration combination even though the fully combined term is
+        # comfortably representable -- and the two-stage reduction
+        # (components, then bodies) uses _scale_safe_sum() rather than
+        # np.sum(), for the same partial-sum-overflow reason
+        # center_of_mass() and _build_octree() already need it.
+        terms = _scaled_product(masses[:, None], pos_rel, accel)
+        per_body = _scale_safe_sum(terms, axis=1)
+        wvir_proxy = float(_scale_safe_sum(per_body, axis=0))
+        if not math.isfinite(wvir_proxy):
+            raise ValueError(
+                "the dense virial-proxy sum overflowed even after "
+                "scale-safe, fused evaluation; check that positions, "
+                "masses and softening are physically reasonable."
+            )
         qvir_dense[idx] = virial_ratio(kinetic, wvir_proxy)
 
     pos, vel = positions.copy(), velocities.copy()
@@ -2207,7 +2729,8 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
 
     result = dict(
         t=t_hist, positions=pos_hist, velocities=vel_hist,
-        kinetic=kin_hist, potential=pot_hist, virial_work=vir_hist,
+        kinetic=kin_hist, kinetic_com=kin_com_hist,
+        potential=pot_hist, virial_work=vir_hist,
         energy=kin_hist + pot_hist,
         momentum=mom_hist, n_steps_taken=n_steps, masses=masses,
         softening=softening, method=method, theta=theta, dt=dt,
@@ -2302,8 +2825,34 @@ def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
     relative_perturbation = _require_positive(
         "relative_perturbation", relative_perturbation
     )
-    centroid = positions.mean(axis=0)
-    rms_radius = math.sqrt(float(np.mean(np.sum((positions - centroid) ** 2, axis=1))))
+    # Every RMS/centroid reduction below goes through this module's own
+    # scale-safe helpers
+    # (_scale_safe_sum/_scale_safe_vector_norm/_scale_safe_rms), not raw
+    # mean/sum/**2/sqrt -- this function makes exactly the same
+    # extreme-but-representable-scale promises the rest of the module
+    # does (chaos mode's positions can be at pc-to-kpc-in-meters scale,
+    # and EXP-12 explicitly asks students to push relative_perturbation
+    # toward representability limits), so it must not silently overflow
+    # a partial sum-of-squares or a naive centroid sum that the fully
+    # combined, representable result never would.
+    # Each body's position is divided by n BEFORE the scale-safe sum, not
+    # after: _scale_safe_sum() rescues a sum whose true, fully-combined
+    # value is itself representable, but for many extreme-but-
+    # individually-finite coordinates of the same sign (e.g. n bodies
+    # all near +1e308) the raw SUM can genuinely exceed float64's range
+    # even though the MEAN (the actual quantity needed here) does not --
+    # no rescaling after the fact can recover a true sum that was never
+    # representable to begin with. Dividing first makes the quantity
+    # actually being summed the mean's own per-body contribution, whose
+    # true total is the representable mean.
+    centroid = _scale_safe_sum(positions / positions.shape[0], axis=0)
+    # _scale_safe_vector_norm() first (per-body distance from centroid,
+    # safe against a single component's square overflowing), then
+    # _scale_safe_rms() over those already-reduced per-body distances
+    # (safe against the cross-body mean-of-squares overflowing) --
+    # together exactly reproducing sqrt(mean(sum((positions-centroid)**2,
+    # axis=1))) without ever squaring a raw, unscaled coordinate.
+    rms_radius = float(_scale_safe_rms(_scale_safe_vector_norm(positions - centroid), axis=0))
     if rms_radius == 0.0:
         rms_radius = 1.0
     rng = np.random.default_rng(seed)
@@ -2311,7 +2860,7 @@ def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
     if masses is not None:
         masses = _require_masses(masses, n_bodies=positions.shape[0])
         offset = offset - center_of_mass(offset, masses)
-    achieved_rms = math.sqrt(float(np.mean(np.sum(offset ** 2, axis=1))))
+    achieved_rms = float(_scale_safe_rms(_scale_safe_vector_norm(offset), axis=0))
     if achieved_rms == 0.0:
         raise RuntimeError(
             "the random offset draw was degenerate (all-zero, including "
@@ -2320,11 +2869,25 @@ def perturb_positions(positions, relative_perturbation, masses=None, seed=None):
             "supported degenerate case -- retry with a different seed."
         )
     target_rms = relative_perturbation * rms_radius
-    offset = offset * (target_rms / achieved_rms)
+    if not math.isfinite(target_rms):
+        raise ValueError(
+            "the target RMS displacement (relative_perturbation * "
+            "rms_radius) overflowed; check that relative_perturbation "
+            "and positions are physically reasonable."
+        )
+    scale_factor = target_rms / achieved_rms
+    if not math.isfinite(scale_factor):
+        raise ValueError(
+            "the perturbation scaling factor (target_rms / achieved_rms) "
+            "overflowed or is not representable; check that "
+            "relative_perturbation and positions are physically "
+            "reasonable."
+        )
+    offset = offset * scale_factor
 
     new_positions = positions + offset
     realized_displacement = new_positions - positions
-    realized_rms = math.sqrt(float(np.mean(np.sum(realized_displacement ** 2, axis=1))))
+    realized_rms = float(_scale_safe_rms(_scale_safe_vector_norm(realized_displacement), axis=0))
     relative_error = (
         abs(realized_rms - target_rms) / target_rms if target_rms > 0.0 else float("inf")
     )
@@ -2403,11 +2966,15 @@ def position_space_divergence(positions_a, positions_b, masses=None):
         # exactly as it does in center_of_mass().
         max_mass = float(np.max(masses))
         weight_sum = np.sum(masses / max_mass)
-        com_a = np.sum(
+        # _scale_safe_sum, not a plain np.sum, over the per-body axis --
+        # see center_of_mass()'s docstring for why a partial sum across
+        # bodies can overflow even when the true, cancellation-involving
+        # COM total is representable.
+        com_a = _scale_safe_sum(
             _scaled_product_over(max_mass, masses[:, None], positions_a),
             axis=-2, keepdims=True,
         ) / weight_sum
-        com_b = np.sum(
+        com_b = _scale_safe_sum(
             _scaled_product_over(max_mass, masses[:, None], positions_b),
             axis=-2, keepdims=True,
         ) / weight_sum
@@ -2771,7 +3338,12 @@ def _energy_drift(energy):
 
 
 LATE_WINDOW_FRACTION = 0.20
-LATE_WINDOW_MIN_SNAPSHOTS = 5
+#: Minimum number of DENSE (every-integration-step, not stored-snapshot)
+#: diagnostic samples required inside the late-time window; named for
+#: what it actually counts (see _late_time_window_stats's own
+#: min_samples parameter) rather than the stored/CSV snapshot cadence
+#: target_snapshots controls, which is unrelated to this threshold.
+LATE_WINDOW_MIN_DENSE_SAMPLES = 5
 LATE_WINDOW_R50_RANGE_THRESHOLD = 0.30
 LATE_WINDOW_Q_RANGE_THRESHOLD = 0.60
 #: Bound on abs(r50_relative_drift) (a best-fit linear trend over the late
@@ -2802,11 +3374,26 @@ LATE_WINDOW_Q_CENTER_TOLERANCE = 0.25
 #: above the ratio for a run that has not yet turned around (the real
 #: N=20/n_freefall=0.75 counterexample sits at 1.06x).
 LATE_WINDOW_REBOUND_RATIO = 1.10
+#: Maximum global-minimum-r50 / initial-r50 ratio still allowed to call
+#: the run's global minimum a genuine COLLAPSE rather than merely "the
+#: smallest value seen so far," which a purely monotonically EXPANDING
+#: r50 series also satisfies at its very first sample (global_min_idx=0,
+#: technically "before" any window that starts later). Requiring the
+#: minimum to fall at least this far below the INITIAL r50 (not merely
+#: to occur at some index > 0) additionally rejects a series that dips by
+#: a negligible amount and immediately resumes expanding -- collapse
+#: implies a MATERIAL contraction, not an arbitrarily small one. 0.90
+#: (a required >=10% contraction) sits comfortably below the contraction
+#: measured in genuine seeded galaxy collapses (typically shrinking to a
+#: small fraction of the initial radius) and rejects a synthetic series
+#: that only ever expands (10 -> 12.8 pc, ratio 1.0, i.e. no contraction
+#: at all).
+LATE_WINDOW_MIN_COLLAPSE_CONTRACTION = 0.90
 
 
 def _late_time_window_stats(t, r50_series, virial_series,
                              window_fraction=LATE_WINDOW_FRACTION,
-                             min_samples=LATE_WINDOW_MIN_SNAPSHOTS):
+                             min_samples=LATE_WINDOW_MIN_DENSE_SAMPLES):
     """
     Summarize the LAST ``window_fraction`` (by elapsed time, not sample
     count) of a run's own half-mass-radius and virial-ratio history, as
@@ -2827,10 +3414,19 @@ def _late_time_window_stats(t, r50_series, virial_series,
 
     A settled verdict requires ALL of the following:
       1. A genuine collapse before the window: the global minimum of
-         r50 over the ENTIRE run (not just the window) must occur
+         r50 over the ENTIRE run (not just the window) must (a) occur
          strictly before the window starts -- a run whose smallest
          radius is still its most recent one has not turned around yet,
-         regardless of how flat its own tail looks.
+         regardless of how flat its own tail looks -- AND (b) occur at
+         an index strictly after the FIRST sample, at a value at least
+         LATE_WINDOW_MIN_COLLAPSE_CONTRACTION below the initial r50.
+         Without (b), a purely monotonically EXPANDING r50 series
+         satisfies a bare "minimum occurs before the window" test
+         trivially, at its own first sample (global_min_idx=0 is
+         "before" any later window) -- that is the smallest value SEEN
+         SO FAR, not a collapse; genuine collapse requires the radius to
+         have first contracted materially below where it started, not
+         merely to have never yet been smaller than it is right now.
       2. A material rebound: the window-mean r50 must exceed that global
          minimum by at least LATE_WINDOW_REBOUND_RATIO -- otherwise a
          minimum reached one sample before the window, followed by
@@ -2861,7 +3457,16 @@ def _late_time_window_stats(t, r50_series, virial_series,
                                     value over the WHOLE run (not just the
                                     window).
       collapse_before_window    -- True iff that global minimum occurs
-                                    strictly before the window starts.
+                                    strictly before the window starts,
+                                    strictly after the run's first
+                                    sample, and at least
+                                    LATE_WINDOW_MIN_COLLAPSE_CONTRACTION
+                                    below the initial r50 -- i.e. a
+                                    genuine, material contraction, not
+                                    merely "the smallest value seen so
+                                    far" (which a monotonically
+                                    expanding series also satisfies,
+                                    trivially, at its own first sample).
       r50_rebound_ratio         -- window-mean r50 divided by the global
                                     minimum r50; how far the run has
                                     recovered from its deepest collapse.
@@ -2928,8 +3533,23 @@ def _late_time_window_stats(t, r50_series, virial_series,
     if np.all(np.isfinite(r50_series)) and r50_series.size > 0:
         global_min_idx = int(np.argmin(r50_series))
         global_min_r50 = float(r50_series[global_min_idx])
+        r50_initial = float(r50_series[0])
         out["global_min_r50_myr"] = float(t[global_min_idx] / MYR)
-        out["collapse_before_window"] = bool(global_min_idx < window_start_idx)
+        # Three conditions, all required: the minimum occurs before the
+        # window (a run whose smallest radius is still its most recent
+        # one has not turned around yet); it occurs strictly after the
+        # very first sample (index 0 trivially satisfies "before the
+        # window" for ANY series, collapsing or not); and it sits
+        # materially below the initial r50 (not merely a negligible dip
+        # immediately followed by more expansion). See
+        # LATE_WINDOW_MIN_COLLAPSE_CONTRACTION's own comment for why (b)
+        # and (c) are both needed to reject a purely, monotonically
+        # expanding r50 series.
+        out["collapse_before_window"] = bool(
+            0 < global_min_idx < window_start_idx
+            and r50_initial > 0.0
+            and global_min_r50 <= LATE_WINDOW_MIN_COLLAPSE_CONTRACTION * r50_initial
+        )
         r50_win_mean = float(np.mean(r50_win))
         if global_min_r50 > 0.0:
             out["r50_rebound_ratio"] = float(r50_win_mean / global_min_r50)
@@ -3086,7 +3706,14 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
                            method=method, theta=theta, snapshot_stride=stride)
 
     lagrangian = _lagrangian_track(sim["positions"], masses, lagrangian_fractions)
-    virial = _virial_track(sim["kinetic"], sim["virial_work"])
+    # The OFFICIAL virial ratio (reported, plotted, and written to the
+    # CSV) is computed from the COM-relative ("internal") kinetic
+    # energy series, not the raw
+    # lab-frame one -- see integrate_nbody()'s _record() for why. A
+    # uniform velocity boost applied to every body no longer changes
+    # this virial ratio, matching the Help file's description of it as
+    # an indicator of internal contraction/expansion/balance.
+    virial = _virial_track(sim["kinetic_com"], sim["virial_work"])
     n_unbound = np.array([
         int(np.sum(identify_unbound(sim["positions"][k], sim["velocities"][k],
                                      masses, softening)))
@@ -3131,7 +3758,8 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
                 lagrangian_radii=lagrangian, virial_ratio=virial,
                 n_unbound=n_unbound, high_velocity_fraction=fast_fraction,
                 energy=sim["energy"],
-                kinetic=sim["kinetic"], potential=sim["potential"],
+                kinetic=sim["kinetic"], kinetic_com=sim["kinetic_com"],
+                potential=sim["potential"],
                 virial_work=sim["virial_work"],
                 momentum=sim["momentum"], softening=softening,
                 summary=summary)
@@ -3220,7 +3848,9 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
                            track_dense=True)
 
     lagrangian = _lagrangian_track(sim["positions"], masses, lagrangian_fractions)
-    virial = _virial_track(sim["kinetic"], sim["virial_work"])
+    # See run_cluster()'s matching comment -- the official virial ratio
+    # uses the COM-relative kinetic series.
+    virial = _virial_track(sim["kinetic_com"], sim["virial_work"])
     energy_drift = _energy_drift(sim["energy"])
     if energy_drift > 0.02:
         warnings.append(
@@ -3268,8 +3898,14 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
         virial_ratio_at_deepest_collapse=virial_at_collapse,
         late_window_fraction=late_window["window_fraction"],
         late_window_start_myr=late_window["window_start_myr"],
-        late_window_n_snapshots=late_window["n_samples"],
-        late_window_has_enough_snapshots=late_window["has_enough_samples"],
+        # Named "dense_samples", not "snapshots": these count points in
+        # the DENSE, every-integration-step diagnostic series
+        # _late_time_window_stats() actually operates on, which is
+        # entirely independent of target_snapshots (the separate,
+        # coarser stored-for-plotting/CSV sample count) -- see
+        # _late_time_window_stats()'s own docstring.
+        late_window_n_dense_samples=late_window["n_samples"],
+        late_window_has_enough_dense_samples=late_window["has_enough_samples"],
         late_window_collapse_before_window=late_window["collapse_before_window"],
         late_r50_rebound_ratio=late_window["r50_rebound_ratio"],
         late_r50_fractional_range=late_window["r50_fractional_range"],
@@ -3288,6 +3924,7 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
                 velocities=sim["velocities"], masses=masses,
                 lagrangian_radii=lagrangian, virial_ratio=virial,
                 energy=sim["energy"], kinetic=sim["kinetic"],
+                kinetic_com=sim["kinetic_com"],
                 potential=sim["potential"], virial_work=sim["virial_work"],
                 momentum=sim["momentum"],
                 softening=softening, summary=summary)
