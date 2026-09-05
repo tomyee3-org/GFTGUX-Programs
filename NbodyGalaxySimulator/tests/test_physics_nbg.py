@@ -601,15 +601,152 @@ the resulting technical behavior only, timelessly.
     exactly once this round under the default interpreter, plus the
     flattened-layout discovery smoke test only.
     281 tests (from 268). BUILD_ID: ea04a3ec3a17.
+
+  2026-09-05  Claude, responding to Audit9 (Codex, Copilot, Gemini and
+    Grok; all four participated). Codex found three further instances of
+    last round's same "every input finite, true result representable,
+    an intermediate is not" pattern, each surviving because it lay
+    beyond the specific counterexamples Audit8 had already closed: (a)
+    _scale_safe_sum()'s rescale-by-largest-magnitude step, introduced
+    last round to fix a different failure mode, can itself round a
+    genuinely nonzero small-magnitude term to exactly 0.0 by dividing it
+    below the smallest representable subnormal, before Neumaier
+    compensation -- which can only repair rounding error from additions,
+    not resurrect a term already destroyed by the division that
+    precedes them -- ever sees it; fixed by detecting exactly which
+    reduction slices lose a term this way and recomputing only those
+    exactly, via Python's arbitrary-precision Fraction (new
+    _exact_axis_sum() helper), leaving the fast rescale+Neumaier path
+    unchanged everywhere else. (b) compute_accelerations_direct()'s
+    fast-path row reduction still formed the complete UNSCALED source
+    sum before multiplying by G at the very end, so 21 bodies with
+    finite per-source coefficients and a finite, representable final
+    acceleration could still overflow at that intermediate sum -- fixed
+    by folding G into each source's coefficient first (provably safe,
+    since |G|<<1 only ever shrinks an already-finite magnitude) and
+    trying the ordinary vectorized reduction on the now-scaled terms
+    before paying for the fused/scale-safe fallback, mirroring
+    _phi_and_speed2()'s existing pattern for specific potential energy;
+    an initial version that instead always paid for the fused fallback
+    was numerically correct but regressed a real multi-step integration
+    workload's wall time significantly, traced (via cProfile and a
+    same-input baseline-vs-fixed timing comparison against the
+    delivered Audit8 source) to superfluous per-body np.errstate context
+    managers rather than to the fallback path itself, which the fast
+    path successfully avoids in ordinary runs; trimming one provably-
+    unneeded errstate call brought the affected workload back within
+    roughly 10-15% of the unfixed baseline's own wall time. (c)
+    integrate_nbody()'s COM-relative kinetic-energy path (the
+    kinetic_com diagnostic Audit8 added) and its dense virial proxy's
+    position term both materialized a raw v_i - v_COM or pos_i - COM
+    difference directly, which can overflow for two individually finite,
+    opposite-sign endpoints even when the resulting internal kinetic
+    energy or position-relative term is itself representable -- fixed by
+    a halving trick (h = 0.5*a - 0.5*b, finite for any two finite
+    float64 endpoints, then a fused 2*m*h^2 or 2*m*h*accel evaluation),
+    applied via a new _com_relative_kinetic_energy() helper and inline
+    in the dense proxy. All three were reproduced against Codex's exact
+    inputs before fixing and are now regression-tested with Fraction- or
+    Decimal-based independent oracles, including permutation checks
+    where Codex specifically requested one. Addressed Codex's finding
+    that the Audit8 fix consolidating the max-tree-depth warning per
+    tree build still let the identical warning repeat once per
+    leapfrog step across a multi-step integration -- the original
+    run-level flood the per-build consolidation alone did not reach --
+    by rate-limiting that one specific warning shape at integrate_nbody()
+    scope: the first occurrence during a run is still reported
+    individually (so a caller filtering warnings as errors still sees
+    and can act on it), every later occurrence in the same run is
+    tallied instead of repeated, and a single end-of-run summary reports
+    the tally; every other warning, from anywhere in the same call, is
+    re-emitted completely unaffected, and method="direct" runs (which
+    never build a tree) are unaffected by the wrapper entirely. Fixed
+    integrate_nbody()'s docstring, which omitted kinetic_com from its
+    returned-key list and still claimed the officially reported
+    kinetic/virial_work/virial_ratio series "remain in the lab frame the
+    caller supplied, unchanged" -- no longer true since Audit8 made the
+    official virial_ratio COM-relative; Grok independently reported the
+    identical stale sentence. Moved two more pieces of development-time
+    calibration prose out of physics_nbg.py per Codex's finding that the
+    existing phrase-blacklist leak check cannot catch generic dev-
+    history shapes it has no specific entry for: a comment justifying
+    perturb_positions()'s representability tolerance by citing a
+    specific 100-seed calibration run's exact observed ratio range and
+    per-seed acceptance percentages (reworded to explain the general
+    floating-point-resolution rationale without citing that specific
+    run), and a comment in estimate_lyapunov_exponent()'s curvature
+    check referring the reader to "the measured before/after numbers"
+    for a claim the referenced docstring text does not actually state in
+    those terms (reworded to point at the actual present-tense
+    explanation already there). Addressed Copilot's finding that the
+    consolidated tree-depth warning's total-bodies count cannot
+    distinguish one pathological large clump from several small ones by
+    adding the single largest clump's own size to the warning message,
+    alongside the existing total and bucket count. Verified, against
+    Copilot's separate finding that last round's response document gave
+    self-contradictory prose about _phi_and_speed2()'s G-fusion fix, that
+    the shipped code has folded G into each source term before reduction
+    since Audit8 and does so now; the contradiction was confined to that
+    round's response-document wording. Took no source action on
+    Copilot's remaining two findings (a machine-generated test-manifest
+    idea, and a preference for invariant-based over categorical-seed
+    chaos tests), both explicitly offered as future-consideration
+    suggestions rather than required corrections. Verified Gemini's
+    claim that an explicit softening=0.0 bypasses validation and reaches
+    a ZeroDivisionError singularity is inaccurate: _require_positive()
+    already rejects exactly 0.0 (value <= 0.0, not value < 0.0) before
+    any division, confirmed by direct reproduction and an existing
+    passing regression test covering that exact input; declined as
+    inaccurate rather than actioned. Declined Gemini's suggestion of a
+    hard bounding box or freeze-radius for escaping particles: this
+    program's existing finite-value validation contract (every public
+    state-mutating call revalidates positions/velocities and every
+    force evaluation checks its own result) already converts an
+    escaping particle's eventual non-representable state into a clean
+    ValueError at the point it first occurs, rather than letting a
+    NaN/inf silently propagate into a later center-of-mass or tree
+    calculation -- confirmed by direct reproduction of a body driven to
+    an overflowing state, which raised cleanly rather than corrupting
+    the run; adding a bounding-box deletion/freeze mechanism would
+    change this program's physical output for ordinary in-range runs
+    for a hazard that is already caught, not fixed, so no such change
+    was made. Declined Gemini's suggestion to reset the new run-level
+    warning tally every simulation step: doing so would reproduce
+    exactly the per-step repetition Codex's finding this round required
+    removing, so a caller wants the opposite of a per-step reset here;
+    kept the run-scoped tally as specified above. Took no action on
+    Grok's three carried-over P3 observations (0 P1, re-confirmed the
+    same 1 P2 as Codex's stale-docstring finding above, addressed
+    together) or on its process-note about a mismatch between last
+    round's response-document prose and the Help file's actual EXP-17
+    softening-pinning mechanism (Grok itself judged the Help file
+    correct and called for no student-facing fix). Ran the full suite
+    exactly once this round under a real Python 3.10 interpreter
+    (Python 3.10.20, NumPy 2.2.6, Matplotlib 3.10.9) per Codex's
+    request, satisfying the minimum-runtime verification and the
+    one-round rule in the same invocation, plus the flattened-layout
+    discovery smoke test only; per Codex's tightened process finding
+    that enumerating every TestCase class individually during
+    development is itself a disguised second full sweep, development
+    verification this round was scoped to the specific class(es) and
+    individual methods exercising whichever fix was currently in
+    progress -- at most a small, directly-related handful together
+    (e.g. the direct/tree/energy/metamorphic classes together, once,
+    right after the two force-calculation fixes those classes all
+    exercise), never all 22 classes, and never every class run
+    individually in sequence.
+    287 tests (from 281). BUILD_ID: 353540c6724c.
 """
 
 import ast
 from collections import Counter
 import contextlib
 import decimal
+from fractions import Fraction
 import hashlib
 from html.parser import HTMLParser
 import io
+import itertools
 import math
 import os
 from pathlib import Path
@@ -1679,6 +1816,72 @@ class TestDirectAcceleration(unittest.TestCase):
         self.assertAlmostEqual(acc_direct[0, 0], -acc_direct[2, 0], places=20)
         self.assertEqual(acc_direct[1, 0], 0.0)
 
+    def test_direct_acceleration_folds_g_in_before_reducing_finite_source_terms(self):
+        """
+        Audit9 regression (Codex P1-2): the old fast path formed the full
+        UNSCALED row sum first (row_sum = G * np.sum(coeff[:, None] * d,
+        axis=0)) and applied G only at the very end. For 21 bodies (body 0
+        at the origin, 20 others all at x=0.1) with mass 2.8e305 each and
+        softening 0.1, every per-source coefficient and every individual
+        coeff*d term is comfortably finite, and the true, fully-G-scaled
+        acceleration on body 0 (about 1.321e298 m/s^2) is comfortably
+        representable -- but the 20 UNSCALED coeff*d terms sum to about
+        1.98e308, which overflows before G (~6.67e-11) is ever folded in,
+        previously raising ValueError for a perfectly physical state. G
+        must be folded into each source's coefficient before the
+        multiply-then-reduce, exactly as _phi_and_speed2() already does
+        for specific potential energy.
+
+        The 20 non-origin bodies are exactly coincident, which legitimately
+        triggers build_octree's (unrelated, expected) max-tree-depth
+        warning; that one warning is filtered out here so every OTHER
+        warning -- in particular any overflow warning from the direct
+        summation itself -- still escalates to an error.
+        """
+        n = 21
+        positions = np.zeros((n, 3))
+        positions[1:, 0] = 0.1
+        masses = np.full(n, 2.8e305)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc_direct = phys.compute_accelerations_direct(positions, masses, 0.1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            warnings.filterwarnings(
+                "ignore",
+                message=r"build_octree:.*could not be separated",
+                category=RuntimeWarning,
+            )
+            acc_tree = phys.compute_accelerations_tree(positions, masses, 0.0, 0.1)
+
+        decimal.getcontext().prec = 60
+        G = decimal.Decimal(repr(phys.G))
+        m = decimal.Decimal(repr(2.8e305))
+        dx = decimal.Decimal(repr(0.1))
+        eps = decimal.Decimal(repr(0.1))
+        s = (dx * dx + eps * eps).sqrt()
+        expected = float(20 * G * m * dx / (s * s * s))
+
+        self.assertTrue(np.all(np.isfinite(acc_direct)))
+        self.assertAlmostEqual(acc_direct[0, 0] / expected, 1.0, places=10)
+        np.testing.assert_allclose(acc_tree, acc_direct, rtol=1e-8, atol=0.0)
+
+        # Permutation check: the same physical configuration, relabeled,
+        # must give the same per-body forces (mapped back through the
+        # permutation), independent of the fast-path/fallback split any
+        # particular body order happens to trigger.
+        rng = np.random.default_rng(0)
+        order = rng.permutation(n)
+        inverse = np.argsort(order)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            acc_perm = phys.compute_accelerations_direct(
+                positions[order], masses[order], 0.1
+            )
+        np.testing.assert_allclose(
+            acc_perm[inverse], acc_direct, rtol=1e-9, atol=0.0
+        )
+
 
 # ======================================================================
 class TestOctreeAndTreeAcceleration(unittest.TestCase):
@@ -1862,6 +2065,29 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
         self.assertIn("9 bodies", message)
         self.assertIn("3 separate", message)
 
+    def test_max_tree_depth_warning_reports_the_largest_clump_separately_from_the_total(self):
+        """
+        Audit9 regression (Copilot A9-2): the consolidated warning above
+        reports only the combined total-bodies-in-buckets count, so a
+        caller cannot tell one pathological 100-body clump apart from ten
+        independent 10-body clumps from the message alone, even though
+        those are very different severities. One 5-body clump plus one
+        2-body clump (7 bodies, 2 buckets) must report the 5-body clump's
+        own size, not merely repeat the 7-body total or the 2-bucket
+        count.
+        """
+        positions = np.array([[0.0, 0.0, 0.0]] * 5 + [[1.0e10, 0.0, 0.0]] * 2)
+        masses = np.ones(7)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            phys.build_octree(positions, masses)
+        runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        self.assertEqual(len(runtime_warnings), 1)
+        message = str(runtime_warnings[0].message)
+        self.assertIn("7 bodies", message)
+        self.assertIn("2 separate", message)
+        self.assertIn("largest 5 bodies", message)
+
     def test_well_separated_bodies_emit_no_max_tree_depth_warning(self):
         """Negative control for the warning above: ordinary, well-
         separated bodies must build a tree without any RuntimeWarning."""
@@ -1874,6 +2100,69 @@ class TestOctreeAndTreeAcceleration(unittest.TestCase):
         messages = [str(w.message) for w in caught
                     if issubclass(w.category, RuntimeWarning)]
         self.assertEqual(messages, [])
+
+    def test_max_tree_depth_warning_is_rate_limited_across_an_integration_run(self):
+        """
+        Audit9 regression (Codex P2-1): the Audit8 fix above consolidates
+        every bucket LEAF within a single build_octree() call into one
+        warning, but integrate_nbody() rebuilds the tree once per
+        leapfrog step, so the identical warning shape previously still
+        fired once per step -- the original run-level flood the per-build
+        consolidation alone did not address. Three permanently-coincident
+        bodies (they never separate, so every step's tree build hits the
+        same bucket condition) integrated for 5 steps under method="tree"
+        used to emit 6 RuntimeWarnings (1 initial force evaluation + 5
+        steps); it must now emit exactly 2 -- the first occurrence
+        (reported individually, so a caller filtering warnings as errors
+        still sees and can act on it) plus one end-of-run summary
+        counting the remaining 5 occurrences -- not 6, and not 0 (the
+        condition is real and must not be silently dropped either).
+        """
+        positions = np.zeros((3, 3))
+        velocities = np.zeros((3, 3))
+        masses = np.ones(3)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            phys.integrate_nbody(
+                positions, velocities, masses, dt=0.1, n_steps=5,
+                softening=1.0, method="tree", theta=0.5, snapshot_stride=5,
+            )
+        runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
+        self.assertEqual(
+            len(runtime_warnings), 2,
+            f"expected exactly 2 RuntimeWarnings (first occurrence + one "
+            f"end-of-run summary) across a 5-step run where every step "
+            f"hits the bucket condition; got {len(runtime_warnings)}: "
+            f"{[str(w.message) for w in runtime_warnings]!r}"
+        )
+        self.assertIn("could not be separated", str(runtime_warnings[0].message))
+        self.assertIn("recurred on 5 additional", str(runtime_warnings[1].message))
+
+        # A caller who filters warnings as errors (this project's own test
+        # convention throughout) must still see the first occurrence raise,
+        # not have it silently absorbed by the rate limiter.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with self.assertRaises(RuntimeWarning):
+                phys.integrate_nbody(
+                    positions, velocities, masses, dt=0.1, n_steps=5,
+                    softening=1.0, method="tree", theta=0.5, snapshot_stride=5,
+                )
+
+        # Negative control: a method="direct" run over the same
+        # permanently-coincident bodies never touches build_octree at all,
+        # so the rate limiter must be a complete no-op for it (0 warnings,
+        # not spuriously rate-limited or otherwise affected).
+        with warnings.catch_warnings(record=True) as caught_direct:
+            warnings.simplefilter("always")
+            phys.integrate_nbody(
+                positions, velocities, masses, dt=0.1, n_steps=5,
+                softening=1.0, method="direct", snapshot_stride=5,
+            )
+        self.assertEqual(
+            [w for w in caught_direct if issubclass(w.category, RuntimeWarning)],
+            [],
+        )
 
     def test_theta_zero_tree_is_translation_covariant_at_extreme_coordinates(self):
         """
@@ -2515,6 +2804,68 @@ class TestEnergyMomentumAndVirial(unittest.TestCase):
             acc_tree0 = phys.compute_accelerations_tree(positions, masses, 0.0, 1.0)
         self.assertTrue(np.all(np.isfinite(acc_direct)))
         np.testing.assert_allclose(acc_tree0, acc_direct, rtol=1e-9, atol=0.0)
+
+    def test_scale_safe_sum_no_longer_loses_a_residual_underflowed_by_its_own_rescale(self):
+        """
+        Audit9 regression (Codex P1-1): _scale_safe_sum() rescales every
+        term by the largest-magnitude term along the axis, THEN applies
+        Neumaier compensated summation. Compensation can only recover
+        rounding error introduced by the additions that follow; it cannot
+        resurrect a term the rescale division itself already rounded to
+        exactly 0.0. For a maximum term of 1e308, any other term smaller
+        than about 4.94e-16 in magnitude is divided down below the
+        smallest representable subnormal (~4.9e-324) and becomes exactly
+        0.0 before Neumaier ever sees it -- even though the true,
+        fully-combined sum (after the two 1e308-magnitude terms cancel)
+        is that small term exactly, and is perfectly representable on its
+        own. [1e308, -1e308, 1e-100] previously returned 0.0 instead of
+        1e-100; the same failure recurs at 1e-20 (already below the
+        rescale floor) and 1e-300 (deep in subnormal territory). The
+        affected reduction slices are now recomputed exactly via Python's
+        arbitrary-precision Fraction (see _exact_axis_sum's docstring),
+        which cannot lose a term to underflow at any magnitude.
+        """
+        for residual in (1.0e-20, 1.0e-100, 1.0e-300):
+            values = np.array([1.0e308, -1.0e308, residual])
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                got = phys._scale_safe_sum(values, axis=0)
+            self.assertEqual(
+                got, residual,
+                f"residual {residual!r} was lost during _scale_safe_sum's "
+                "own rescale step",
+            )
+
+            positions = np.zeros((3, 3))
+            positions[:, 0] = values
+            masses = np.ones(3)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                com = phys.center_of_mass(positions, masses)
+            expected_com_x = float(
+                (Fraction(1.0e308) - Fraction(1.0e308) + Fraction(residual)) / 3
+            )
+            self.assertTrue(np.all(np.isfinite(com)))
+            self.assertEqual(com[0], expected_com_x)
+            self.assertEqual(com[1], 0.0)
+            self.assertEqual(com[2], 0.0)
+
+        # Permute all 6 orderings of the reported (1e-100) case: a
+        # cancellation-sensitive residual recovered by exact rational
+        # arithmetic must not depend on which order the terms are summed
+        # in, exactly like the ordinary Neumaier path it falls back from.
+        base = [1.0e308, -1.0e308, 1.0e-100]
+        seen = set()
+        for perm in itertools.permutations(range(3)):
+            values = np.array([base[i] for i in perm])
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                got = phys._scale_safe_sum(values, axis=0)
+            seen.add(float(got))
+        self.assertEqual(
+            seen, {1.0e-100},
+            "the underflow-during-rescale fix is not permutation-invariant",
+        )
 
 
 # ======================================================================
@@ -3399,6 +3750,97 @@ class TestLeapfrogAndIntegration(unittest.TestCase):
         q_expected = phys.virial_ratio(kinetic_expected, wvir_expected)
         self.assertAlmostEqual(sim["virial_ratio_dense"][0] / q_expected, 1.0,
                                 places=6)
+
+    def test_com_relative_kinetic_energy_survives_overflowing_raw_velocity_difference(self):
+        """
+        Audit9 regression (Codex P1-3): _record()/_record_dense() form
+        kinetic_com (the internal, COM-relative kinetic energy that the
+        officially reported virial_ratio is built from) from v_i - v_COM.
+        Three bodies with velocities [1e308, -1e308, -1e308] (all
+        individually finite) and correspondingly tiny masses [1e-308,
+        5e-324, 5e-324] (the smallest positive subnormal) have a lab-frame
+        kinetic energy of about 5.0e307 J and a COM-relative kinetic
+        energy of about 1.976e293 J -- both finite and representable --
+        but v_COM is about 9.9999...e307 m/s, and body 0's raw difference
+        v_0 - v_COM is representable (~2e293) while body 1 and body 2's
+        raw differences (-1e308 - 9.9999...e307) each individually
+        overflow to -inf. Materializing that raw difference previously
+        made integrate_nbody() raise ValueError while recording even the
+        INITIAL snapshot, before any integration step could run, even
+        though both the old lab-frame energy and the new internal energy
+        it was computing are representable. The halving trick (h_i =
+        0.5*v_i - 0.5*v_COM, which is always finite for finite endpoints,
+        then a fused 2*m_i*h_i^2) must recover the true value instead.
+        """
+        tiny = float(np.nextafter(0.0, 1.0))
+        positions = np.array([[-1.0, 0.0, 0.0],
+                               [0.0, 0.0, 0.0],
+                               [1.0, 0.0, 0.0]])
+        velocities = np.array([[1.0e308, 0.0, 0.0],
+                                [-1.0e308, 0.0, 0.0],
+                                [-1.0e308, 0.0, 0.0]])
+        masses = np.array([1.0e-308, tiny, tiny])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            sim = phys.integrate_nbody(
+                positions, velocities, masses,
+                dt=1.0e-308, n_steps=1, softening=1.0,
+                method="direct", track_dense=True,
+            )
+
+        # Independent oracle via Python's exact-rational Fraction (every
+        # finite float64 value is represented exactly; unlike Decimal(repr(...))
+        # round-tripping, this cannot lose precision to the delicate
+        # near-cancellation between v_0 and v_COM below).
+        m = [Fraction(float(x)) for x in masses]
+        v = [Fraction(float(x)) for x in velocities[:, 0]]
+        lab_ke = Fraction(1, 2) * sum(mi * vi * vi for mi, vi in zip(m, v))
+        v_com = sum(mi * vi for mi, vi in zip(m, v)) / sum(m)
+        internal_ke = Fraction(1, 2) * sum(
+            mi * (vi - v_com) * (vi - v_com) for mi, vi in zip(m, v)
+        )
+        lab_ke = float(lab_ke)
+        internal_ke = float(internal_ke)
+
+        self.assertTrue(np.all(np.isfinite(sim["kinetic"])))
+        self.assertTrue(np.all(np.isfinite(sim["kinetic_com"])))
+        self.assertEqual(sim["n_steps_taken"], 1)
+        self.assertAlmostEqual(sim["kinetic"][0] / lab_ke, 1.0, places=10)
+        self.assertAlmostEqual(sim["kinetic_com"][0] / internal_ke, 1.0, places=10)
+        # track_dense=True exercises _record_dense()'s own COM-relative
+        # kinetic energy and position-relative halving-trick term on this
+        # same fixture; the isfinite(kinetic_com) check above already
+        # covers it (this fixture's virial_ratio_dense is separately nan
+        # here, a near-zero-potential edge case unrelated to this fix).
+
+    def test_integrate_nbody_docstring_names_kinetic_com_and_its_frame(self):
+        """
+        Audit9 regression (Codex P2-2 / Grok P2-1): integrate_nbody()'s
+        docstring previously omitted kinetic_com from its returned-key
+        list entirely, and separately claimed the officially reported
+        "kinetic/virial_work/virial_ratio snapshot series ... remain in
+        the lab frame the caller supplied, unchanged" -- which directly
+        contradicted the module's own official virial-ratio
+        implementation (run_cluster()/run_galaxy() build virial_ratio
+        from kinetic_com, not kinetic) and the Help file's own CSV
+        documentation. A direct caller reading only this docstring would
+        be told both the wrong set of returned keys and the wrong frame
+        for the quantity the official virial ratio actually uses.
+        """
+        doc = phys.integrate_nbody.__doc__
+        self.assertIn("kinetic_com", doc)
+        self.assertNotIn(
+            "remain in the lab frame the caller supplied, unchanged", doc,
+            "the stale lab-frame claim was reintroduced",
+        )
+        result = phys.integrate_nbody(
+            np.array([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+            np.array([[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 0.0]]),
+            np.array([1.0, 1.0, 1.0]), dt=0.01, n_steps=2, softening=1.0,
+        )
+        self.assertIn("kinetic_com", result)
+        self.assertIn("kinetic", result)
+        self.assertEqual(result["kinetic_com"].shape, result["kinetic"].shape)
 
     def test_dense_classifier_diagnostics_are_translation_invariant(self):
         """
