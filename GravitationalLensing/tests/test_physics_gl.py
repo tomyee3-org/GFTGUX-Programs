@@ -24,11 +24,11 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -204,13 +204,16 @@ class TestSISShear(unittest.TestCase):
         self.assertGreater(float(sy.max()), 0.0)
         self.assertLess(float(sy.min()), 0.0)
 
-    def test_source_outside_diamond_has_two_images(self):
+    def test_source_between_diamond_and_pseudo_caustic_has_two_images(self):
         theta_e = phys.default_sis_theta_e(300.0)
         gamma = 0.25
         cx, cy = phys.critical_curve_sis_shear(theta_e, gamma)
         sx, sy = phys.caustic_from_critical(cx, cy, theta_e, gamma)
-        outside = 1.4 * float(sx.max())
-        images = phys.images_sis_shear(outside, 0.0, theta_e, gamma)
+        diamond = float(np.max(np.hypot(sx, sy)))
+        mid = 0.5 * (diamond + theta_e)
+        self.assertGreater(mid, diamond)
+        self.assertLess(mid, theta_e)
+        images = phys.images_sis_shear(mid, 0.0, theta_e, gamma)
         self.assertEqual(len(images), 2)
 
     def test_source_inside_diamond_has_four_images(self):
@@ -242,14 +245,11 @@ class TestRendering(unittest.TestCase):
 class TestSideRays(unittest.TestCase):
     def test_on_axis_einstein_ray_hits_the_observer(self):
         theta_e = 1.0e-5
-        bundle = phys.thin_lens_side_rays(
-            np.array([-theta_e, theta_e]), 0.0, theta_e, model="point",
-        )
-        for ray in bundle["rays"]:
-            self.assertAlmostEqual(ray["points"][-1, 1], 0.0, places=12)
-            # Source-plane height of an on-axis Einstein ray is zero:
-            # beta = theta - alpha = theta - theta_E^2/theta = 0.
-            self.assertAlmostEqual(ray["points"][0, 1], 0.0, places=12)
+        for th in (-theta_e, theta_e):
+            ray = phys.forward_point_mass_ray(0.0, th, theta_e)
+            self.assertTrue(ray["hits"])
+            self.assertAlmostEqual(ray["y_src"], 0.0, places=12)
+            self.assertAlmostEqual(ray["y_obs"], 0.0, places=12)
 
     def test_forward_rays_share_one_source(self):
         theta_e = 1.0e-5
@@ -328,14 +328,141 @@ class TestHelpFile(unittest.TestCase):
 
     def test_version_build_element_matches_physics_module(self):
         raw = self.help_path.read_text(encoding="utf-8")
-        self.assertIn('id="version_build"', raw)
-        self.assertIn(f"Version {phys.MODEL_VERSION}", raw)
-        self.assertIn(f"Build {phys.BUILD_ID}", raw)
+        match = re.search(
+            r'id="version_build"[^>]*>(.*?)</p>', raw, flags=re.S
+        )
+        self.assertIsNotNone(match)
+        text = re.sub(r"\s+", " ", match.group(1))
+        self.assertIn(f"Version {phys.MODEL_VERSION}", text)
+        self.assertIn(f"Build {phys.BUILD_ID}", text)
+        stale = text.replace(phys.MODEL_VERSION, "0.0.0")
+        self.assertNotIn(f"Version {phys.MODEL_VERSION}", stale)
 
     def test_help_names_every_mode(self):
         text = self.help_path.read_text(encoding="utf-8")
         for mode in driver.MODES:
             self.assertIn(mode, text)
+
+
+class TestAudit1Fixes(unittest.TestCase):
+    def test_analytic_critical_radius_and_closure(self):
+        theta_e = phys.default_sis_theta_e(300.0)
+        for gamma in (-0.8, -0.25, 0.0, 0.25, 0.8):
+            n = 361
+            cx, cy = phys.critical_curve_sis_shear(theta_e, gamma, n_theta=n)
+            self.assertEqual(cx.size, n)
+            self.assertAlmostEqual(float(cx[0]), float(cx[-1]), places=10)
+            self.assertAlmostEqual(float(cy[0]), float(cy[-1]), places=10)
+            phis = np.linspace(0.0, 2.0 * math.pi, n)
+            for i, phi in enumerate(phis[::30]):
+                r_exp = phys.critical_radius_sis_shear(float(phi), theta_e, gamma)
+                r_got = math.hypot(float(cx[i * 30]), float(cy[i * 30]))
+                self.assertAlmostEqual(r_got, r_exp, places=8)
+                det = phys.jacobian_det_sis_shear(cx[i * 30], cy[i * 30],
+                                                  theta_e, gamma)
+                self.assertAlmostEqual(float(det), 0.0, places=6)
+
+    def test_high_shear_is_rejected_at_unity(self):
+        theta_e = 1.0e-5
+        with self.assertRaises(ValueError):
+            phys.critical_curve_sis_shear(theta_e, 1.0)
+        with self.assertRaises(ValueError):
+            phys.images_sis_shear(0.0, 0.0, theta_e, -1.0)
+
+    def test_remote_source_has_one_image_that_solves_the_lens_equation(self):
+        theta_e = phys.default_sis_theta_e(300.0)
+        gamma = 0.25
+        beta_x = 2.0 * phys.arcsec_to_rad(2.0)
+        # 2 arcsec is already outside theta_E ~ 1.3"; use 2" explicitly.
+        beta_x = phys.arcsec_to_rad(2.0)
+        images = phys.images_sis_shear(beta_x, 0.0, theta_e, gamma)
+        self.assertEqual(len(images), 1)
+        bx, by = phys.map_sis_shear(images[0][0], images[0][1], theta_e, gamma)
+        self.assertAlmostEqual(float(bx), float(beta_x), places=7)
+        self.assertAlmostEqual(float(by), 0.0, places=7)
+
+    def test_returned_images_map_back_to_the_source(self):
+        theta_e = phys.default_sis_theta_e(300.0)
+        gamma = 0.25
+        for bx, by in ((0.05 * theta_e, 0.03 * theta_e),
+                       (0.7 * theta_e, 0.0),
+                       (1.5 * theta_e, 0.0)):
+            images = phys.images_sis_shear(bx, by, theta_e, gamma)
+            self.assertGreaterEqual(len(images), 1)
+            for ix, iy in images:
+                mx, my = phys.map_sis_shear(ix, iy, theta_e, gamma)
+                self.assertAlmostEqual(float(mx), float(bx), places=6)
+                self.assertAlmostEqual(float(my), float(by), places=6)
+
+    def test_fold_crossing_changes_image_count_from_two_to_four(self):
+        theta_e = phys.default_sis_theta_e(300.0)
+        gamma = 0.25
+        cx, cy = phys.critical_curve_sis_shear(theta_e, gamma)
+        sx, sy = phys.caustic_from_critical(cx, cy, theta_e, gamma)
+        edge = float(sx.max())
+        outside = phys.images_sis_shear(min(1.15 * edge, 0.90 * theta_e),
+                                        0.0, theta_e, gamma)
+        inside = phys.images_sis_shear(0.4 * edge, 0.0, theta_e, gamma)
+        self.assertEqual(len(outside), 2)
+        self.assertEqual(len(inside), 4)
+
+    def test_centered_zero_shear_is_an_einstein_ring_not_dots(self):
+        theta_e = phys.default_sis_theta_e(300.0)
+        self.assertTrue(phys.is_einstein_ring_case(0.0, 0.0, 0.0, theta_e))
+        self.assertEqual(phys.images_sis_shear(0.0, 0.0, theta_e, 0.0), [])
+
+    def test_signed_rays_mirror(self):
+        theta_e = phys.default_point_mass_theta_e(12.0)
+        beta = phys.arcsec_to_rad(0.35)
+        up = phys.forward_point_mass_bundle(beta, theta_e)
+        down = phys.forward_point_mass_bundle(-beta, theta_e)
+        self.assertAlmostEqual(up["y_src"], -down["y_src"])
+        self.assertEqual(len(up["hits"]), 2)
+        self.assertEqual(len(down["hits"]), 2)
+
+    def test_r_eff_is_half_light_radius(self):
+        r_eff = 1.0
+        sigma = phys.sigma_from_r_eff(r_eff)
+        # Enclosed fraction of a circular 2-D Gaussian inside R_e is 1/2.
+        enclosed = 1.0 - math.exp(-(r_eff ** 2) / (2.0 * sigma ** 2))
+        self.assertAlmostEqual(enclosed, 0.5, places=12)
+
+    def test_nonfinite_values_are_rejected(self):
+        with self.assertRaises(ValueError):
+            phys.validate_user_value("beta_x", float("nan"))
+        with self.assertRaises(ValueError):
+            phys.validate_user_value("beta_y", float("inf"))
+        with self.assertRaises(ValueError):
+            phys.validate_user_value("gamma", 1.0, exclusive_max=1.0)
+
+    def test_build_id_changes_when_a_core_file_changes(self):
+        original = recompute_build_id(MODULE_DIR)
+        self.assertEqual(original, phys.BUILD_ID)
+        target = MODULE_DIR / "physics_gl.py"
+        text = target.read_text(encoding="utf-8")
+        try:
+            target.write_text(text + "\n# audit-sensitivity\n", encoding="utf-8")
+            mutated = recompute_build_id(MODULE_DIR)
+            self.assertNotEqual(mutated, original)
+        finally:
+            target.write_text(text, encoding="utf-8")
+
+    def test_cli_rejects_nonfinite_beta(self):
+        result = run_cli(["--mode", "point", "--beta_x", "inf"])
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_help_examples_fit_in_the_adapted_field(self):
+        theta_e = phys.default_point_mass_theta_e(12.5)
+        fov = phys.adapted_fov_arcsec(theta_e, 6.0)
+        self.assertGreater(fov / 2.0, float(phys.rad_to_arcsec(theta_e)))
+
+    def test_shear_provenance_records_gamma(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, saved = driver.run_shear(outdir=tmp, show=False, dpi=60,
+                                           gamma=0.25)
+            text = Path(saved[:-4] + ".provenance.txt").read_text(encoding="utf-8")
+            self.assertIn("gamma =", text)
+            self.assertIn("beta_x_arcsec =", text)
 
 
 if __name__ == "__main__":

@@ -109,8 +109,31 @@ def _defaults_for(mode, args):
     return bx, by
 
 
+def _validate_args(args):
+    physics_gl.validate_user_value("logM", args.logM)
+    physics_gl.validate_user_value("sigma_v", args.sigma_v, positive=True)
+    physics_gl.validate_user_value("gamma", args.gamma, exclusive_max=1.0)
+    if args.gamma <= -1.0:
+        raise ValueError(f"gamma must satisfy |gamma| < 1, got {args.gamma:g}")
+    physics_gl.validate_user_value("r_eff", args.r_eff, positive=True)
+    physics_gl.validate_user_value("q", args.q, min_value=1.0e-12, max_value=1.0)
+    physics_gl.validate_user_value("phi", args.phi)
+    physics_gl.validate_user_value("fov", args.fov, positive=True)
+    physics_gl.validate_user_value("dpi", args.dpi, positive=True)
+    if args.n_pix != int(args.n_pix) or int(args.n_pix) < 9:
+        raise ValueError("n_pix must be an integer >= 9")
+    if args.beta_x is not None:
+        physics_gl.validate_user_value("beta_x", args.beta_x)
+    if args.beta_y is not None:
+        physics_gl.validate_user_value("beta_y", args.beta_y)
+
+
 def main():
     args = parse_args()
+    try:
+        _validate_args(args)
+    except ValueError as exc:
+        raise SystemExit(f"GravitationalLensing: {exc}") from exc
     bx, by = _defaults_for(args.mode, args)
     show = args.interactive or args.outdir is None
     if os.environ.get("MPLBACKEND", "").lower() == "agg":

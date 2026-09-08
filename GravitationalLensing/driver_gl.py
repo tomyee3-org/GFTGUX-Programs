@@ -25,17 +25,14 @@ def _show_wanted(show, interactive):
     return bool(show) or bool(interactive)
 
 
-def run_rays(beta_arcsec=0.35, n_rays=9, outdir=None, dpi=140,
+def run_rays(beta_arcsec=0.35, outdir=None, dpi=140,
              show=True, interactive=False):
     # Forward thin-lens rays.  Heights are angles times schematic
     # distances D_l = D_ls = 1, D_s = 2, so the y-axis is in radians.
-    del n_rays
+    # beta_arcsec is signed: positive is above the axis.
     theta_e = phys.default_point_mass_theta_e(12.0)
     on = phys.forward_point_mass_bundle(0.0, theta_e)
-    # A source ~0.4 Einstein radii off axis splits the ring into two images.
-    beta = -abs(phys.arcsec_to_rad(beta_arcsec))
-    if abs(beta) < 1.0e-16:
-        beta = -0.40 * theta_e
+    beta = phys.arcsec_to_rad(beta_arcsec)
     off = phys.forward_point_mass_bundle(beta, theta_e)
     return plotting.plot_rays(on, off, outdir=outdir, dpi=dpi,
                               show=_show_wanted(show, interactive))
@@ -44,11 +41,12 @@ def run_rays(beta_arcsec=0.35, n_rays=9, outdir=None, dpi=140,
 def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
               n_pix=181, fov_arcsec=6.0, outdir=None, dpi=140,
               show=True, interactive=False):
-    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     theta_e = phys.default_point_mass_theta_e(log10_m)
+    fov_arcsec = phys.adapted_fov_arcsec(theta_e, fov_arcsec)
+    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
-    sigma = max(theta_e / 8.0, phys.arcsec_to_rad(0.05))
+    sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
     title = (rf"Point-mass lens (false colour)  |  "
@@ -63,8 +61,9 @@ def run_blob(log10_m=12.0, beta_x_arcsec=0.15, beta_y_arcsec=0.05,
              r_eff_arcsec=0.25, q=0.60, phi_deg=30.0,
              n_pix=181, fov_arcsec=6.0, outdir=None, dpi=140,
              show=True, interactive=False):
-    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     theta_e = phys.default_point_mass_theta_e(log10_m)
+    fov_arcsec = phys.adapted_fov_arcsec(theta_e, fov_arcsec)
+    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     image = phys.render_point_mass_extended(
         theta_x, theta_y, theta_e,
         phys.arcsec_to_rad(beta_x_arcsec),
@@ -85,17 +84,17 @@ def run_blob(log10_m=12.0, beta_x_arcsec=0.15, beta_y_arcsec=0.05,
 
 
 def run_critical(log10_m=12.0, beta_x_arcsec=0.00, beta_y_arcsec=0.00,
-                 n_pix=181, fov_arcsec=6.0, n_rays=11,
+                 n_pix=181, fov_arcsec=6.0,
                  outdir=None, dpi=140, show=True, interactive=False):
-    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     theta_e = phys.default_point_mass_theta_e(log10_m)
+    fov_arcsec = phys.adapted_fov_arcsec(theta_e, fov_arcsec)
+    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
-    sigma = max(theta_e / 8.0, phys.arcsec_to_rad(0.06))
+    sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
     det_a = phys.jacobian_det_point_mass(theta_x, theta_y, theta_e)
-    del n_rays
     # Side view is a vertical slice.  Height is beta_y; beta_x is
     # perpendicular to that page.
     bundle = phys.forward_point_mass_bundle(beta_y, theta_e)
@@ -119,14 +118,14 @@ def run_shear(sigma_v_kms=300.0, gamma=0.25,
         crit_x, crit_y, cau_x, cau_y, images,
         phys.arcsec_to_rad(beta_x_arcsec),
         phys.arcsec_to_rad(beta_y_arcsec),
-        theta_e, outdir=outdir, dpi=dpi,
+        theta_e, gamma=gamma, outdir=outdir, dpi=dpi,
         show=_show_wanted(show, interactive),
     )
 
 
 def run_arcs(sigma_v_kms=300.0, gamma=0.25,
              beta_x_arcsec=0.18, beta_y_arcsec=0.00,
-             r_eff_arcsec=0.16, q=0.65, phi_deg=20.0,
+             r_eff_arcsec=0.25, q=0.60, phi_deg=30.0,
              n_pix=181, fov_arcsec=6.0,
              outdir=None, dpi=140, show=True, interactive=False):
     theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)

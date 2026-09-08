@@ -14,7 +14,7 @@ from datetime import datetime
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle, Ellipse
+from matplotlib.patches import Circle
 
 import physics_gl as phys
 
@@ -240,32 +240,46 @@ def plot_critical(image, det_a, theta_x, theta_y, theta_e,
 
 
 def plot_shear(crit_x, crit_y, cau_x, cau_y, images, beta_x, beta_y, theta_e,
-               outdir=None, dpi=140, show=True):
+               gamma=0.25, outdir=None, dpi=140, show=True):
     fig, axes = plt.subplots(1, 2, figsize=(10.4, 5.0))
     te = float(phys.rad_to_arcsec(theta_e))
+    ring = phys.is_einstein_ring_case(beta_x, beta_y, gamma, theta_e)
+    pseudo = float(phys.rad_to_arcsec(phys.pseudo_caustic_radius_sis_shear(theta_e)))
 
     ax = axes[0]
     ax.plot(phys.rad_to_arcsec(crit_x), phys.rad_to_arcsec(crit_y),
             color=C_CRIT, lw=2.0, label="critical curve")
     ax.plot(0.0, 0.0, "k.", ms=5)
-    colors = ["#1d3557", "#e63939", "#2a9d8f", "#f4a261", "#9b5de5"]
-    for k, (ix, iy) in enumerate(images):
-        ax.plot(phys.rad_to_arcsec(ix), phys.rad_to_arcsec(iy), "o",
-                color=colors[k % len(colors)], ms=8, zorder=5)
-        ax.text(phys.rad_to_arcsec(ix) + 0.04, phys.rad_to_arcsec(iy) + 0.04,
-                str(k + 1), color=colors[k % len(colors)], fontsize=8)
+    if ring:
+        ax.add_patch(Circle((0.0, 0.0), te, fill=False, color=C_RING, lw=2.0,
+                            label="Einstein ring"))
+        title = "Image plane  (Einstein ring)"
+    else:
+        colors = ["#1d3557", "#e63939", "#2a9d8f", "#f4a261", "#9b5de5"]
+        for k, (ix, iy) in enumerate(images):
+            ax.plot(phys.rad_to_arcsec(ix), phys.rad_to_arcsec(iy), "o",
+                    color=colors[k % len(colors)], ms=8, zorder=5)
+            ax.text(phys.rad_to_arcsec(ix) + 0.04, phys.rad_to_arcsec(iy) + 0.04,
+                    str(k + 1), color=colors[k % len(colors)], fontsize=8)
+        title = f"Image plane  ({len(images)} image(s))"
     ax.set_aspect("equal")
-    ax.set_title(f"Image plane  ({len(images)} image(s))")
+    ax.set_title(title)
     ax.set_xlabel(r"$\theta_x$ [arcsec]")
     ax.set_ylabel(r"$\theta_y$ [arcsec]")
     ax.legend(loc="upper right", fontsize=8)
-    lim = te * 2.4
+    img_span = [te]
+    if images:
+        img_span.extend(abs(phys.rad_to_arcsec(v)) for ix, iy in images for v in (ix, iy))
+    img_span.extend(abs(phys.rad_to_arcsec(v)) for v in list(crit_x) + list(crit_y))
+    lim = max(img_span) * 1.25
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
 
     ax = axes[1]
     ax.plot(phys.rad_to_arcsec(cau_x), phys.rad_to_arcsec(cau_y),
-            color=C_CAUS, lw=2.0, label="caustic")
+            color=C_CAUS, lw=2.0, label="tangential caustic")
+    ax.add_patch(Circle((0.0, 0.0), pseudo, fill=False, color="0.45",
+                        lw=1.2, ls="--", label="pseudo-caustic"))
     ax.plot(phys.rad_to_arcsec(beta_x), phys.rad_to_arcsec(beta_y),
             marker="*", color=C_SRC, ms=16, markeredgecolor="k",
             markeredgewidth=0.4, zorder=6, label="source")
@@ -274,9 +288,12 @@ def plot_shear(crit_x, crit_y, cau_x, cau_y, images, beta_x, beta_y, theta_e,
     ax.set_xlabel(r"$\beta_x$ [arcsec]")
     ax.set_ylabel(r"$\beta_y$ [arcsec]")
     ax.legend(loc="upper right", fontsize=8)
-    slim = max(float(np.max(np.abs(phys.rad_to_arcsec(cau_x)))),
+    slim = max(pseudo,
+               float(np.max(np.abs(phys.rad_to_arcsec(cau_x)))),
                float(np.max(np.abs(phys.rad_to_arcsec(cau_y)))),
-               0.3) * 1.4
+               abs(float(phys.rad_to_arcsec(beta_x))),
+               abs(float(phys.rad_to_arcsec(beta_y))),
+               0.3) * 1.35
     ax.set_xlim(-slim, slim)
     ax.set_ylim(-slim, slim)
 
@@ -284,8 +301,11 @@ def plot_shear(crit_x, crit_y, cau_x, cau_y, images, beta_x, beta_y, theta_e,
     saved = _finish(fig, outdir, "shear", dpi,
                     provenance={
                         "mode": "shear",
-                        "n_images": str(len(images)),
+                        "n_images": "ring" if ring else str(len(images)),
                         "theta_e_arcsec": f"{te:.6f}",
+                        "gamma": f"{float(gamma):.6f}",
+                        "beta_x_arcsec": f"{float(phys.rad_to_arcsec(beta_x)):.6f}",
+                        "beta_y_arcsec": f"{float(phys.rad_to_arcsec(beta_y)):.6f}",
                     })
     if show:
         plt.show()
@@ -326,7 +346,7 @@ def plot_kappa(kappa, theta_x, theta_y, theta_e, outdir=None, dpi=140, show=True
                    norm=LogNorm(vmin=positive.min(), vmax=positive.max()))
     te = float(phys.rad_to_arcsec(theta_e))
     ax.add_patch(Circle((0.0, 0.0), te, fill=False, color=C_CRIT, lw=2.0,
-                        label=rf"critical curve  $\theta_E={te:.2f}''$"))
+                        label=rf"$\kappa=1/2$  (critical curve, $\theta_E={te:.2f}''$)"))
     ax.set_aspect("equal")
     ax.set_title(r"SIS convergence $\kappa$ (false colour)")
     ax.set_xlabel(r"$\theta_x$ [arcsec]")

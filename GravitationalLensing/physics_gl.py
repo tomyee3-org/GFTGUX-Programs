@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.1.4"
+MODEL_VERSION = "0.2.0"
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
@@ -237,32 +237,50 @@ def jacobian_matrix_sis_shear(theta_x, theta_y, theta_e, gamma):
                      [-g2, 1.0 - kap + g1]], dtype=float)
 
 
-def critical_curve_sis_shear(theta_e, gamma, n_theta=361, r_max=3.0):
-    """Sample det A = 0 on a polar grid and return (theta_x, theta_y)."""
+def critical_radius_sis_shear(phi, theta_e, gamma):
+    """Analytic tangential critical radius for this shear convention.
+
+    r(phi) = theta_E [1 - gamma cos(2 phi)] / (1 - gamma^2).
+    Maximum is theta_E / (1 - |gamma|).
+    """
     theta_e = _require_positive("theta_e", theta_e)
     gamma = _require_finite("gamma", gamma)
-    phis = np.linspace(0.0, 2.0 * math.pi, int(n_theta), endpoint=True)
-    rs = np.linspace(0.05 * theta_e, r_max * theta_e, 400)
-    xs = []
-    ys = []
-    for phi in phis:
-        c, s = math.cos(phi), math.sin(phi)
-        det_vals = jacobian_det_sis_shear(rs * c, rs * s, theta_e, gamma)
-        sign = np.sign(det_vals)
-        crossings = np.where(sign[1:] * sign[:-1] <= 0.0)[0]
-        if crossings.size == 0:
-            continue
-        i = int(crossings[0])
-        d0, d1 = float(det_vals[i]), float(det_vals[i + 1])
-        if d1 == d0:
-            r_c = rs[i]
-        else:
-            r_c = rs[i] - d0 * (rs[i + 1] - rs[i]) / (d1 - d0)
-        xs.append(r_c * c)
-        ys.append(r_c * s)
-    if len(xs) < 8:
-        raise RuntimeError("failed to trace a closed critical curve")
-    return np.asarray(xs), np.asarray(ys)
+    if abs(gamma) >= 1.0:
+        raise ValueError("shear |gamma| must be less than 1")
+    phi = _require_finite("phi", phi)
+    return theta_e * (1.0 - gamma * math.cos(2.0 * phi)) / (1.0 - gamma * gamma)
+
+
+def critical_curve_sis_shear(theta_e, gamma, n_theta=361, r_max=None):
+    """Closed tangential critical curve from the analytic radius."""
+    del r_max
+    theta_e = _require_positive("theta_e", theta_e)
+    gamma = _require_finite("gamma", gamma)
+    if abs(gamma) >= 1.0:
+        raise ValueError("shear |gamma| must be less than 1")
+    n_theta = int(n_theta)
+    if n_theta < 16:
+        raise ValueError("n_theta must be at least 16")
+    phis = np.linspace(0.0, 2.0 * math.pi, n_theta, endpoint=True)
+    rs = np.array([critical_radius_sis_shear(float(phi), theta_e, gamma)
+                   for phi in phis], dtype=float)
+    return rs * np.cos(phis), rs * np.sin(phis)
+
+
+def pseudo_caustic_radius_sis_shear(theta_e):
+    """Radius of the circular pseudo-caustic (image of the SIS singularity)."""
+    return float(_require_positive("theta_e", theta_e))
+
+
+def is_einstein_ring_case(beta_x, beta_y, gamma, theta_e=1.0):
+    """Centered source, no shear: the image is the Einstein ring, not dots."""
+    beta_x = _require_finite("beta_x", beta_x)
+    beta_y = _require_finite("beta_y", beta_y)
+    gamma = _require_finite("gamma", gamma)
+    theta_e = _require_positive("theta_e", theta_e)
+    scale = max(theta_e, 1.0e-16)
+    return (abs(gamma) < 1.0e-12
+            and math.hypot(beta_x, beta_y) < 1.0e-12 * scale)
 
 
 def caustic_from_critical(theta_x, theta_y, theta_e, gamma):
@@ -271,23 +289,57 @@ def caustic_from_critical(theta_x, theta_y, theta_e, gamma):
 
 
 def images_sis_shear(beta_x, beta_y, theta_e, gamma,
-                     n_start=24, r_max=2.5, tol=1.0e-10):
-    """Newton solve of beta(theta) = beta_src from a polar ring of starts."""
+                     n_start=24, r_max=None, tol=1.0e-10):
+    """Newton solve of beta(theta) = beta_src.
+
+    Returns discrete images.  The centered gamma=0 Einstein ring is a
+    continuum and is reported as an empty list; call
+    ``is_einstein_ring_case`` to distinguish that degeneracy from a
+    genuine zero-image failure.
+
+    The radial search adapts to |beta| so a source outside the
+    pseudo-caustic still yields its one remaining image.
+    """
     beta_x = _require_finite("beta_x", beta_x)
     beta_y = _require_finite("beta_y", beta_y)
     theta_e = _require_positive("theta_e", theta_e)
     gamma = _require_finite("gamma", gamma)
+    if abs(gamma) >= 1.0:
+        raise ValueError("shear |gamma| must be less than 1")
+    if is_einstein_ring_case(beta_x, beta_y, gamma, theta_e):
+        return []
+    beta_r = math.hypot(beta_x, beta_y)
+    far = (beta_r + theta_e) / max(1.0e-6, 1.0 - abs(gamma))
+    if r_max is None:
+        r_lim = max(8.0 * theta_e, 2.0 * far)
+    else:
+        r_lim = float(r_max) * theta_e
     starts = []
-    for r_fac in (0.3, 0.7, 1.1, 1.6, 2.2):
+    r_facs = (0.25, 0.55, 0.85, 1.15, 1.6, 2.2, 3.0,
+              far / theta_e, 1.2 * far / theta_e)
+    for r_fac in r_facs:
+        r0 = abs(r_fac) * theta_e
+        if r0 < 0.05 * theta_e:
+            continue
         for k in range(int(n_start)):
             phi = 2.0 * math.pi * k / n_start
-            starts.append((r_fac * theta_e * math.cos(phi),
-                           r_fac * theta_e * math.sin(phi)))
+            starts.append((r0 * math.cos(phi), r0 * math.sin(phi)))
+    # Analytic on-axis guesses for this shear convention.
+    den = 1.0 - gamma
+    if abs(den) > 1.0e-12:
+        r_plus = (beta_x + theta_e) / den
+        r_minus = (-beta_x + theta_e) / den
+        if r_plus > 0.0:
+            starts.append((r_plus, 0.0))
+        if r_minus > 0.0:
+            starts.append((-r_minus, 0.0))
     images = []
     for sx, sy in starts:
         th = np.array([sx, sy], dtype=float)
         ok = False
-        for _ in range(25):
+        for _ in range(40):
+            if math.hypot(th[0], th[1]) < 1.0e-8 * theta_e:
+                break
             bx, by = map_sis_shear(th[0], th[1], theta_e, gamma)
             f = np.array([bx - beta_x, by - beta_y], dtype=float)
             J = jacobian_matrix_sis_shear(th[0], th[1], theta_e, gamma)
@@ -301,12 +353,12 @@ def images_sis_shear(beta_x, beta_y, theta_e, gamma,
                 break
         if not ok:
             continue
+        if math.hypot(th[0], th[1]) > r_lim:
+            continue
         bx, by = map_sis_shear(th[0], th[1], theta_e, gamma)
-        if math.hypot(bx - beta_x, by - beta_y) > 1.0e-6:
+        if math.hypot(bx - beta_x, by - beta_y) > 1.0e-7 * max(theta_e, beta_r, 1.0e-16):
             continue
-        if math.hypot(th[0], th[1]) > r_max * theta_e * 1.2:
-            continue
-        if all(math.hypot(th[0] - a, th[1] - b) > 0.04 * theta_e
+        if all(math.hypot(th[0] - a, th[1] - b) > 0.03 * theta_e
                for a, b in images):
             images.append((float(th[0]), float(th[1])))
     images.sort(key=lambda p: math.atan2(p[1], p[0]))
@@ -319,20 +371,31 @@ def gaussian_source(beta_x, beta_y, beta_x0, beta_y0, sigma):
                   / (2.0 * sigma**2))
 
 
+def sigma_from_r_eff(r_eff):
+    """Gaussian sigma implied by a 2-D half-light / effective radius.
+
+    For I = exp[-r^2 / (2 sigma^2)], half the light lies inside
+    R_e = sigma * sqrt(2 ln 2).
+    """
+    r_eff = _require_positive("r_eff", r_eff)
+    return r_eff / math.sqrt(2.0 * math.log(2.0))
+
+
 def elliptical_source(beta_x, beta_y, beta_x0, beta_y0, r_eff, q, phi):
-    """Elliptical Gaussian; q is the axis ratio in (0, 1]."""
+    """Elliptical Gaussian; r_eff is the half-light radius along the major axis."""
     r_eff = _require_positive("r_eff", r_eff)
     q = _require_finite("q", q)
     if q <= 0.0 or q > 1.0:
         raise ValueError("axis ratio q must lie in (0, 1]")
     phi = _require_finite("phi", phi)
+    sigma = sigma_from_r_eff(r_eff)
     c, s = math.cos(phi), math.sin(phi)
     dx = beta_x - beta_x0
     dy = beta_y - beta_y0
     xr = dx * c + dy * s
     yr = -dx * s + dy * c
     rr = np.sqrt(xr**2 + (yr / q)**2)
-    return np.exp(-(rr**2) / (2.0 * r_eff**2))
+    return np.exp(-(rr**2) / (2.0 * sigma**2))
 
 
 def render_point_mass_source(theta_x, theta_y, theta_e,
@@ -351,54 +414,6 @@ def render_sis_shear_extended(theta_x, theta_y, theta_e, gamma,
                               beta_x0, beta_y0, r_eff, q, phi):
     bx, by = map_sis_shear(theta_x, theta_y, theta_e, gamma)
     return elliptical_source(bx, by, beta_x0, beta_y0, r_eff, q, phi)
-
-
-def thin_lens_side_rays(thetas, beta, theta_e, model="point", gamma=0.0,
-                        d_l=1.0, d_s=2.0):
-    """Polyline rays in a side-view cartoon (optical axis along x).
-
-    Heights are angular coordinates times the relevant distance, so the
-    drawing is dimensionally a small-angle unwrapping of the thin-lens
-    geometry rather than a full geodesic integration.
-
-    Each ray is the triple
-        source plane  ->  lens plane (height = image angle * D_l)
-                      ->  observer (height 0).
-    The kink at the lens *is* the deflection.  For ``model='point'`` the
-    family of rays that reach the observer from an on-axis source is the
-    Einstein cone.  Mapping the same family back into the source plane
-    shows how a caustic is the envelope of those incoming rays.
-    """
-    theta_e = _require_positive("theta_e", theta_e)
-    beta = _require_finite("beta", beta)
-    d_l = _require_positive("d_l", d_l)
-    d_s = _require_positive("d_s", d_s)
-    if d_s <= d_l:
-        raise ValueError("d_s must exceed d_l")
-    d_ls = d_s - d_l
-    thetas = np.asarray(thetas, dtype=float)
-    rays = []
-    for th in thetas:
-        if model == "point":
-            ax, ay = deflection_point_mass(0.0, th, theta_e)
-        elif model == "shear":
-            ax, ay = deflection_sis_shear(0.0, th, theta_e, gamma)
-        else:
-            raise ValueError(f"unknown model {model!r}")
-        # Lens-plane height and the source-plane height implied by the
-        # lens equation, y_s = (theta - alpha) * D_s.
-        y_lens = float(th) * d_l
-        y_src = float(th - ay) * d_s
-        rays.append({
-            "theta": float(th),
-            "alpha": float(ay),
-            "points": np.array([
-                [0.0, y_src],
-                [d_ls, y_lens],
-                [d_s, 0.0],
-            ], dtype=float),
-        })
-    return {"d_l": d_l, "d_s": d_s, "d_ls": d_ls, "beta": beta, "rays": rays}
 
 
 def default_point_mass_theta_e(log10_m_over_msun=12.0):
@@ -484,8 +499,25 @@ def forward_point_mass_bundle(beta, theta_e, thetas=None, d_l=1.0, d_s=2.0):
     }
 
 
-def schematic_forward_rays(offset=False):
-    """Deprecated alias kept so older tests still import a name."""
-    theta_e = default_point_mass_theta_e(12.0)
-    beta = 0.0 if not offset else -0.40 * theta_e
-    return forward_point_mass_bundle(beta, theta_e)
+COMPACT_SOURCE_SIGMA_ARCSEC = 0.08
+
+
+def adapted_fov_arcsec(theta_e, fov_arcsec, pad=2.6):
+    """Grow the field so a critical curve of radius theta_E still fits."""
+    fov_arcsec = _require_positive("fov_arcsec", fov_arcsec)
+    te = float(rad_to_arcsec(_require_positive("theta_e", theta_e)))
+    return max(fov_arcsec, pad * te)
+
+
+def validate_user_value(name, value, *, positive=False, min_value=None,
+                        max_value=None, exclusive_max=None):
+    value = _require_finite(name, value)
+    if positive and value <= 0.0:
+        raise ValueError(f"{name} must be greater than zero, got {value:g}")
+    if min_value is not None and value < min_value:
+        raise ValueError(f"{name} must be >= {min_value:g}, got {value:g}")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{name} must be <= {max_value:g}, got {value:g}")
+    if exclusive_max is not None and value >= exclusive_max:
+        raise ValueError(f"{name} must be < {exclusive_max:g}, got {value:g}")
+    return value
