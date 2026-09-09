@@ -26,30 +26,32 @@ def _show_wanted(show, interactive):
     return bool(show) or bool(interactive)
 
 
-def _plan_grid(theta_e, fov_arcsec, n_pix, extras, scale_arcsec, remedy=None):
+def _plan_grid(theta_e, fov_arcsec, n_pix, extras, scale_arcsec, remedy=None,
+              pixels_per_scale=None):
     fov_arcsec = phys.adapted_fov_arcsec(theta_e, fov_arcsec, extras=extras)
-    n_pix = phys.adapted_n_pix(n_pix, fov_arcsec, scale_arcsec, remedy=remedy)
+    n_pix = phys.adapted_n_pix(
+        n_pix, fov_arcsec, scale_arcsec, remedy=remedy,
+        pixels_per_scale=pixels_per_scale,
+    )
     return fov_arcsec, n_pix
 
 
 def _resolved_grid(theta_e, fov_arcsec, n_pix, extras, scale_arcsec,
-                   remedy=None):
+                   remedy=None, pixels_per_scale=None):
     fov_arcsec, n_pix = _plan_grid(
         theta_e, fov_arcsec, n_pix, extras, scale_arcsec, remedy=remedy,
+        pixels_per_scale=pixels_per_scale,
     )
     theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     return theta_x, theta_y, fov_arcsec, n_pix
 
 
-def _point_mass_grid_args(theta_e, beta_x, beta_y, source_scale, contain_radius):
-    """FOV extras and the smaller image-plane scale for a point-mass run."""
+def _point_mass_grid_args(theta_e, beta_x, beta_y, contain_radius):
+    """Image-plane radii that must fit in the field of view."""
     beta = math.hypot(beta_x, beta_y)
     plus, minus = phys.point_mass_image_radii(beta, theta_e)
     far_p, far_m = phys.point_mass_mapped_radii(beta, theta_e, contain_radius)
-    s_plus = phys.point_mass_image_plane_scale(plus, theta_e, source_scale)
-    s_minus = phys.point_mass_image_plane_scale(minus, theta_e, source_scale)
-    extras = (beta_x, beta_y, plus, minus, far_p, far_m, contain_radius)
-    return extras, min(s_plus, s_minus)
+    return (beta_x, beta_y, plus, minus, far_p, far_m, contain_radius)
 
 
 def run_rays(beta_arcsec=0.35, outdir=None, dpi=140,
@@ -72,8 +74,8 @@ def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-    extras, _scale = _point_mass_grid_args(
-        theta_e, beta_x, beta_y, sigma, 3.0 * sigma,
+    extras = _point_mass_grid_args(
+        theta_e, beta_x, beta_y, 3.0 * sigma,
     )
     fov_arcsec, n_pix = _plan_grid(
         theta_e, fov_arcsec, n_pix, extras,
@@ -108,13 +110,14 @@ def run_blob(log10_m=12.0, beta_x_arcsec=0.15, beta_y_arcsec=0.05,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     r_eff = phys.arcsec_to_rad(r_eff_arcsec)
-    extras, _scale = _point_mass_grid_args(
-        theta_e, beta_x, beta_y, r_eff * q, r_eff,
+    extras = _point_mass_grid_args(
+        theta_e, beta_x, beta_y, r_eff,
     )
     fov_arcsec, n_pix = _plan_grid(
         theta_e, fov_arcsec, n_pix, extras,
         max(r_eff_arcsec * q, 0.05),
-        remedy="Move the source closer or use a smaller --r_eff / larger --q.",
+        remedy="Move the source closer, or use a larger --r_eff / --q "
+               "so the source is wider on the grid.",
     )
     phys.require_resolved_point_mass_images(
         theta_e, math.hypot(beta_x, beta_y), r_eff * q, fov_arcsec, n_pix,
@@ -148,8 +151,8 @@ def run_critical(log10_m=12.0, beta_x_arcsec=0.00, beta_y_arcsec=0.00,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-    extras, _scale = _point_mass_grid_args(
-        theta_e, beta_x, beta_y, sigma, 3.0 * sigma,
+    extras = _point_mass_grid_args(
+        theta_e, beta_x, beta_y, 3.0 * sigma,
     )
     fov_arcsec, n_pix = _plan_grid(
         theta_e, fov_arcsec, n_pix, extras,
@@ -208,7 +211,8 @@ def run_arcs(sigma_v_kms=300.0, gamma=0.25,
         theta_e, fov_arcsec, n_pix,
         extras=(r_crit_max, r_img),
         scale_arcsec=r_eff_arcsec * q,
-        remedy="Move the source closer or use a smaller --r_eff.",
+        remedy="Move the source closer, or use a larger --r_eff so the "
+               "source is wider on the grid.",
     )
     image = phys.render_sis_shear_extended(
         theta_x, theta_y, theta_e, gamma,
@@ -237,8 +241,9 @@ def run_kappa(sigma_v_kms=300.0, n_pix=181, fov_arcsec=6.0,
     te_as = float(phys.rad_to_arcsec(theta_e))
     fov_arcsec, n_pix = _plan_grid(
         theta_e, fov_arcsec, n_pix, extras=(),
-        scale_arcsec=max(te_as / 8.0, te_as / phys.KAPPA_MIN_EINSTEIN_INTERVALS),
+        scale_arcsec=te_as / phys.KAPPA_MIN_EINSTEIN_INTERVALS,
         remedy="Use a larger --sigma_v so the Einstein circle is resolved.",
+        pixels_per_scale=1.0,
     )
     phys.require_resolved_kappa(theta_e, fov_arcsec, n_pix)
     theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)

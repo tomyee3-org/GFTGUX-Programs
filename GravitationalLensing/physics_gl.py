@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.6.0"
+MODEL_VERSION = "1.0.0"
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
@@ -606,7 +606,7 @@ def sis_shear_outer_image_radius(beta_x, beta_y, source_radius, theta_e, gamma):
 
 
 def adapted_n_pix(n_pix, fov_arcsec, smallest_scale_arcsec,
-                  max_n_pix=None, remedy=None):
+                  max_n_pix=None, remedy=None, pixels_per_scale=None):
     """Raise n_pix so spacing FOV/(n_pix-1) is no larger than scale/PIXELS.
 
     ``smallest_scale_arcsec`` is the scale used to *build* the grid
@@ -623,7 +623,10 @@ def adapted_n_pix(n_pix, fov_arcsec, smallest_scale_arcsec,
                                               smallest_scale_arcsec)
     if max_n_pix is None:
         max_n_pix = N_PIX_AUTO_MAX
-    pixel_need = smallest_scale_arcsec / PIXELS_PER_SIGMA
+    if pixels_per_scale is None:
+        pixels_per_scale = PIXELS_PER_SIGMA
+    pixels_per_scale = _require_positive("pixels_per_scale", pixels_per_scale)
+    pixel_need = smallest_scale_arcsec / pixels_per_scale
     n_intervals = int(math.ceil(fov_arcsec / pixel_need))
     n_need = n_intervals + 1
     if n_need % 2 == 0:

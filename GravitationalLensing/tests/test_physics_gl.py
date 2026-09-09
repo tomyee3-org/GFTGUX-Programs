@@ -8,15 +8,36 @@ Development history (audit trail -- developers only; never surfaced to
 students in the Help file or in main.py/driver_gl.py/physics_gl.py/
 plot_gl.py docstrings or output):
 
-  2026-09-07  Grok (principal developer).  Kickoff submission.  First
-    program and first unittest suite.  Version 0.1.0.  BUILD_ID is
-    computed from the four core modules after this file is written; the
-    Help file's #version_build element is filled to match.  Coverage in
-    this round is the thin-lens invariants a later audit will lean on:
-    Einstein-radius units, the analytic two-image formula, det A = 0 on
-    the Einstein ring, SIS kappa = 1/2 on that ring, image-count change
-    across an SIS+shear diamond, CLI --version agreement, and Help-file
-    version/build consistency.
+  2026-09-07  Grok.  Kickoff.  Version 0.1.0.  Thin-lens invariants.
+    Artifact: GravitationalLensing-Grok-Kickoff-20260908.txt
+
+  2026-09-08  Codex+Copilot Audit1 / Grok Response.  Version 0.2.0.
+    SIS+shear finder, analytic critical curve, |gamma|<1/3 scope later.
+    Artifacts: *-Codex-Audit1-20260908.txt, *-Copilot-Audit1-20260908.txt,
+    *-Grok-Response-to-Audit1-20260908.txt
+
+  2026-09-08  Audit2 / Response.  Version 0.3.0.
+    Teaching domain |gamma|<1/3; FOV extras; BUILD_ID temp-dir test.
+    Artifacts: *-Audit2-20260908.txt, *-Response-to-Audit2-20260908.txt
+
+  2026-09-09  Audit3 / Response.  Version 0.4.0.
+    FOV-vs-resolution contract; n_pix grows; large offsets rejected.
+    Artifacts: *-Codex-Audit3-20260909.txt, *-Response-to-Audit3-20260908.txt
+
+  2026-09-09  Audit4 / Response.  Version 0.5.0.
+    Image-plane visibility of the point-mass double; mapped half-light.
+    Artifacts: *-Codex-Audit4-20260909.txt, *-Response-to-Audit4-20260908.txt
+
+  2026-09-09  Audit5 / Response.  Version 0.6.0.
+    SIS+shear off-axis FOV bound; honest 0.8-interval visibility floor.
+    Artifacts: *-Codex-Audit5-20260909.txt, *-Response-to-Audit5-20260908.txt
+
+  2026-09-08  Audit6 / Response.  Version 1.0.0 release candidate.
+    Reversed r_eff remedy; kappa interval contract; developer trail.
+    Artifacts: *-Codex-Audit6-20260909.txt, *-Copilot-Audit6-20260908.txt,
+    *-Grok-Response-to-Audit6-20260908.txt
+    Complete texts live with the other GFTGUX audit records on GitHub;
+    these lines are locators only.
 """
 
 from __future__ import annotations
@@ -517,8 +538,8 @@ class TestAudit1Fixes(unittest.TestCase):
         theta_e = phys.default_point_mass_theta_e(12.0)
         beta = phys.arcsec_to_rad(0.50)
         sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-        extras, scale = driver._point_mass_grid_args(
-            theta_e, beta, 0.0, sigma, 3.0 * sigma,
+        extras = driver._point_mass_grid_args(
+            theta_e, beta, 0.0, 3.0 * sigma,
         )
         fov = phys.adapted_fov_arcsec(theta_e, 6.0, extras=extras)
         n_pix = phys.adapted_n_pix(181, fov, phys.COMPACT_SOURCE_SIGMA_ARCSEC)
@@ -546,8 +567,17 @@ class TestAudit1Fixes(unittest.TestCase):
         theta_e = phys.default_point_mass_theta_e(12.0)
         r_eff = phys.arcsec_to_rad(2.0)
         far_p, _far_m = phys.point_mass_mapped_radii(0.0, theta_e, r_eff)
-        fov = phys.adapted_fov_arcsec(theta_e, 6.0, extras=(far_p,))
-        self.assertGreater(0.5 * fov, float(phys.rad_to_arcsec(far_p)))
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, saved = driver.run_blob(
+                beta_x_arcsec=0.0, beta_y_arcsec=0.0,
+                r_eff_arcsec=2.0, q=1.0,
+                outdir=tmp, show=False, dpi=40,
+            )
+            text = Path(saved[:-4] + ".provenance.txt").read_text(encoding="utf-8")
+            fov_run = float(next(ln.split("=")[1]
+                                 for ln in text.splitlines()
+                                 if "fov_arcsec" in ln))
+        self.assertGreater(0.5 * fov_run, float(phys.rad_to_arcsec(far_p)))
 
     def test_arcs_field_contains_off_axis_image(self):
         theta_e = phys.default_sis_theta_e(300.0)
@@ -572,10 +602,35 @@ class TestAudit1Fixes(unittest.TestCase):
                                 for ln in text.splitlines()
                                 if "fov_arcsec" in ln))
             self.assertGreater(0.5 * fov_run, float(phys.rad_to_arcsec(r_img)))
+        n_pix = phys.adapted_n_pix(181, fov, 0.25 * 0.60)
+        gx, gy = phys.make_grid(n_pix=n_pix, fov_arcsec=fov)
+        image = phys.render_sis_shear_extended(
+            gx, gy, theta_e, gamma, beta_x, 0.0, r_eff, 0.60, 0.0,
+        )
+        self.assertGreater(float(image.max()), 0.5)
 
     def test_small_sigma_v_is_rejected_by_kappa(self):
         with self.assertRaises(ValueError):
             driver.run_kappa(sigma_v_kms=10.0, show=False)
+
+    def test_galaxy_scale_sigma_v_is_accepted_by_kappa(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, saved = driver.run_kappa(
+                sigma_v_kms=180.0, outdir=tmp, show=False, dpi=40,
+            )
+            self.assertTrue(saved.endswith(".png"))
+
+    def test_larger_r_eff_can_rescue_a_rejected_blob(self):
+        with self.assertRaises(ValueError) as ctx:
+            driver.run_blob(beta_x_arcsec=2.0, r_eff_arcsec=0.05,
+                            q=0.60, show=False)
+        self.assertIn("larger --r_eff", str(ctx.exception))
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, saved = driver.run_blob(
+                beta_x_arcsec=2.0, r_eff_arcsec=0.25, q=0.60,
+                outdir=tmp, show=False, dpi=40,
+            )
+            self.assertTrue(saved.endswith(".png"))
 
     def test_critical_provenance_records_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
