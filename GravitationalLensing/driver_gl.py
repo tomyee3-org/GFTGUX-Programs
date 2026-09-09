@@ -26,9 +26,17 @@ def _show_wanted(show, interactive):
     return bool(show) or bool(interactive)
 
 
-def _resolved_grid(theta_e, fov_arcsec, n_pix, extras, scale_arcsec):
+def _plan_grid(theta_e, fov_arcsec, n_pix, extras, scale_arcsec, remedy=None):
     fov_arcsec = phys.adapted_fov_arcsec(theta_e, fov_arcsec, extras=extras)
-    n_pix = phys.adapted_n_pix(n_pix, fov_arcsec, scale_arcsec)
+    n_pix = phys.adapted_n_pix(n_pix, fov_arcsec, scale_arcsec, remedy=remedy)
+    return fov_arcsec, n_pix
+
+
+def _resolved_grid(theta_e, fov_arcsec, n_pix, extras, scale_arcsec,
+                   remedy=None):
+    fov_arcsec, n_pix = _plan_grid(
+        theta_e, fov_arcsec, n_pix, extras, scale_arcsec, remedy=remedy,
+    )
     theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     return theta_x, theta_y, fov_arcsec, n_pix
 
@@ -64,17 +72,18 @@ def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-    extras, scale = _point_mass_grid_args(
+    extras, _scale = _point_mass_grid_args(
         theta_e, beta_x, beta_y, sigma, 3.0 * sigma,
     )
-    theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
-        theta_e, fov_arcsec, n_pix,
-        extras=extras,
-        scale_arcsec=phys.COMPACT_SOURCE_SIGMA_ARCSEC,
+    fov_arcsec, n_pix = _plan_grid(
+        theta_e, fov_arcsec, n_pix, extras,
+        phys.COMPACT_SOURCE_SIGMA_ARCSEC,
+        remedy="Move the source closer to the lens.",
     )
     phys.require_resolved_point_mass_images(
         theta_e, math.hypot(beta_x, beta_y), sigma, fov_arcsec, n_pix,
     )
+    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
     title = (rf"Point-mass lens (false colour)  |  "
@@ -99,14 +108,18 @@ def run_blob(log10_m=12.0, beta_x_arcsec=0.15, beta_y_arcsec=0.05,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     r_eff = phys.arcsec_to_rad(r_eff_arcsec)
-    extras, scale = _point_mass_grid_args(
+    extras, _scale = _point_mass_grid_args(
         theta_e, beta_x, beta_y, r_eff * q, r_eff,
     )
-    theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
-        theta_e, fov_arcsec, n_pix,
-        extras=extras,
-        scale_arcsec=max(r_eff_arcsec * q, 0.05),
+    fov_arcsec, n_pix = _plan_grid(
+        theta_e, fov_arcsec, n_pix, extras,
+        max(r_eff_arcsec * q, 0.05),
+        remedy="Move the source closer or use a smaller --r_eff / larger --q.",
     )
+    phys.require_resolved_point_mass_images(
+        theta_e, math.hypot(beta_x, beta_y), r_eff * q, fov_arcsec, n_pix,
+    )
+    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     image = phys.render_point_mass_extended(
         theta_x, theta_y, theta_e,
         beta_x, beta_y, r_eff, q, np.deg2rad(phi_deg),
@@ -135,17 +148,18 @@ def run_critical(log10_m=12.0, beta_x_arcsec=0.00, beta_y_arcsec=0.00,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-    extras, scale = _point_mass_grid_args(
+    extras, _scale = _point_mass_grid_args(
         theta_e, beta_x, beta_y, sigma, 3.0 * sigma,
     )
-    theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
-        theta_e, fov_arcsec, n_pix,
-        extras=extras,
-        scale_arcsec=phys.COMPACT_SOURCE_SIGMA_ARCSEC,
+    fov_arcsec, n_pix = _plan_grid(
+        theta_e, fov_arcsec, n_pix, extras,
+        phys.COMPACT_SOURCE_SIGMA_ARCSEC,
+        remedy="Move the source closer to the lens.",
     )
     phys.require_resolved_point_mass_images(
         theta_e, math.hypot(beta_x, beta_y), sigma, fov_arcsec, n_pix,
     )
+    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
     det_a = phys.jacobian_det_point_mass(theta_x, theta_y, theta_e)
@@ -186,13 +200,15 @@ def run_arcs(sigma_v_kms=300.0, gamma=0.25,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     r_eff = phys.arcsec_to_rad(r_eff_arcsec)
+    r_img = phys.sis_shear_outer_image_radius(
+        beta_x, beta_y, r_eff, theta_e, gamma,
+    )
     r_crit_max = theta_e / (1.0 - abs(gamma))
     theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
         theta_e, fov_arcsec, n_pix,
-        extras=(r_crit_max + r_eff,
-                math.hypot(beta_x, beta_y) + r_eff,
-                r_eff),
+        extras=(r_crit_max, r_img),
         scale_arcsec=r_eff_arcsec * q,
+        remedy="Move the source closer or use a smaller --r_eff.",
     )
     image = phys.render_sis_shear_extended(
         theta_x, theta_y, theta_e, gamma,
@@ -219,11 +235,13 @@ def run_kappa(sigma_v_kms=300.0, n_pix=181, fov_arcsec=6.0,
               outdir=None, dpi=140, show=True, interactive=False):
     theta_e = phys.default_sis_theta_e(sigma_v_kms)
     te_as = float(phys.rad_to_arcsec(theta_e))
-    theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
-        theta_e, fov_arcsec, n_pix,
-        extras=(),
-        scale_arcsec=max(te_as / 8.0, 0.05),
+    fov_arcsec, n_pix = _plan_grid(
+        theta_e, fov_arcsec, n_pix, extras=(),
+        scale_arcsec=max(te_as / 8.0, te_as / phys.KAPPA_MIN_EINSTEIN_INTERVALS),
+        remedy="Use a larger --sigma_v so the Einstein circle is resolved.",
     )
+    phys.require_resolved_kappa(theta_e, fov_arcsec, n_pix)
+    theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     kappa = phys.convergence_sis(theta_x, theta_y, theta_e)
     return plotting.plot_kappa(kappa, theta_x, theta_y, theta_e,
                                outdir=outdir, dpi=dpi,

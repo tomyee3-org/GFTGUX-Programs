@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.5.0"
+MODEL_VERSION = "0.6.0"
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
@@ -104,6 +104,14 @@ PIXELS_PER_SIGMA = 3.0
 
 # Automatic n_pix cap.  Wider fields need an explicit --n_pix.
 N_PIX_AUTO_MAX = 401
+
+# Fewest samples across a lensed image-plane scale for the image to be
+# treated as visible on a uniform grid.  This is a detectability floor,
+# not a morphology-resolution guarantee.
+IMAGE_DETECT_SAMPLES = 0.8
+
+# Smallest Einstein radius, in grid intervals, accepted by kappa mode.
+KAPPA_MIN_EINSTEIN_INTERVALS = 4.0
 
 
 def _require_finite(name, value):
@@ -577,14 +585,33 @@ def adapted_fov_arcsec(theta_e, fov_arcsec, extras=(), margin=None):
     return max(fov_arcsec, 2.0 * margin * max(half))
 
 
-def adapted_n_pix(n_pix, fov_arcsec, smallest_scale_arcsec,
-                  max_n_pix=None):
-    """Raise n_pix so a pixel is no larger than scale / PIXELS_PER_SIGMA.
+def sis_shear_outer_image_radius(beta_x, beta_y, source_radius, theta_e, gamma):
+    """Conservative image-plane radius that contains the source contour.
 
-    If that would exceed ``max_n_pix`` (default N_PIX_AUTO_MAX), raise
-    ValueError naming the required --n_pix.  Passing n_pix already at or
-    above the requirement is accepted even when it exceeds the automatic
-    cap, so a student can opt into a heavy grid.
+    For this shear convention a bound valid throughout |gamma| < 1 is
+    (|beta| + R + theta_E) / (1 - |gamma|).
+    """
+    beta_x = _require_finite("beta_x", beta_x)
+    beta_y = _require_finite("beta_y", beta_y)
+    source_radius = _require_positive("source_radius", source_radius)
+    theta_e = _require_positive("theta_e", theta_e)
+    gamma = _require_finite("gamma", gamma)
+    if abs(gamma) >= GAMMA_MAX:
+        raise ValueError(
+            f"shear |gamma| must be < {GAMMA_MAX:g} so the diamond "
+            f"stays inside the pseudo-caustic, got {gamma:g}"
+        )
+    return ((math.hypot(beta_x, beta_y) + source_radius + theta_e)
+            / (1.0 - abs(gamma)))
+
+
+def adapted_n_pix(n_pix, fov_arcsec, smallest_scale_arcsec,
+                  max_n_pix=None, remedy=None):
+    """Raise n_pix so spacing FOV/(n_pix-1) is no larger than scale/PIXELS.
+
+    ``smallest_scale_arcsec`` is the scale used to *build* the grid
+    (usually a source-plane width).  It is not itself an image-plane
+    proof that every lensed image is resolved.
     """
     n_pix = int(n_pix)
     if n_pix < 9:
@@ -605,21 +632,21 @@ def adapted_n_pix(n_pix, fov_arcsec, smallest_scale_arcsec,
     if n_pix >= n_need:
         return n_pix
     if n_need > max_n_pix:
+        hint = remedy or (
+            "Move the source closer to the lens or use a smaller source."
+        )
         raise ValueError(
-            f"field {fov_arcsec:.2f}\" with image-plane scale "
+            f"field {fov_arcsec:.2f}\" with sampling scale "
             f"{smallest_scale_arcsec:.4f}\" needs {n_need} pixels "
             f"({PIXELS_PER_SIGMA:g} samples per scale; spacing is "
-            f"FOV/(n_pix-1)). Automatic grids stop at {max_n_pix}. "
-            f"This offset or source size is outside the teaching domain "
-            f"in which both images stay resolved. Move the source closer "
-            f"to the lens or use a smaller --r_eff."
+            f"FOV/(n_pix-1)). Automatic grids stop at {max_n_pix}. {hint}"
         )
     return n_need
 
 
 def require_resolved_point_mass_images(theta_e, beta, source_scale,
                                        fov_arcsec, n_pix,
-                                       min_samples=0.8):
+                                       min_samples=None):
     """Reject a grid that cannot show both members of the point-mass double.
 
     ``min_samples`` is the fewest pixels allowed across each image-plane
@@ -631,6 +658,8 @@ def require_resolved_point_mass_images(theta_e, beta, source_scale,
     beta = _require_finite("beta", beta)
     source_scale = _require_positive("source_scale", source_scale)
     fov_arcsec = _require_positive("fov_arcsec", fov_arcsec)
+    if min_samples is None:
+        min_samples = IMAGE_DETECT_SAMPLES
     n_pix = int(n_pix)
     spacing = fov_arcsec / max(n_pix - 1, 1)
     plus, minus = point_mass_image_radii(abs(beta), theta_e)
@@ -646,6 +675,22 @@ def require_resolved_point_mass_images(theta_e, beta, source_scale,
                 f"that offset is outside the teaching domain. "
                 f"Move the source closer to the lens."
             )
+
+
+def require_resolved_kappa(theta_e, fov_arcsec, n_pix):
+    """Reject a kappa map whose Einstein circle is smaller than a few pixels."""
+    te = float(rad_to_arcsec(_require_positive("theta_e", theta_e)))
+    fov_arcsec = _require_positive("fov_arcsec", fov_arcsec)
+    n_pix = int(n_pix)
+    spacing = fov_arcsec / max(n_pix - 1, 1)
+    intervals = te / spacing
+    if intervals < KAPPA_MIN_EINSTEIN_INTERVALS:
+        raise ValueError(
+            f"theta_E = {te:.4f}\" spans only {intervals:.2f} grid "
+            f"intervals. kappa mode needs at least "
+            f"{KAPPA_MIN_EINSTEIN_INTERVALS:g} intervals so the "
+            f"kappa=1/2 circle is visible. Use a larger --sigma_v."
+        )
 
 
 def patch_help_version(html_path):

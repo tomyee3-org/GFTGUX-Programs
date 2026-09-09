@@ -507,8 +507,11 @@ class TestAudit1Fixes(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             driver.run_point(beta_x_arcsec=20.0, show=False)
         msg = str(ctx.exception)
-        self.assertIn("teaching domain", msg)
         self.assertNotIn("pass --n_pix", msg)
+        self.assertNotIn("--r_eff", msg)
+        self.assertTrue(
+            "teaching domain" in msg or "Move the source closer" in msg
+        )
 
     def test_default_point_resolves_both_images(self):
         theta_e = phys.default_point_mass_theta_e(12.0)
@@ -525,11 +528,13 @@ class TestAudit1Fixes(unittest.TestCase):
         gx, gy = phys.make_grid(n_pix=n_pix, fov_arcsec=fov)
         image = phys.render_point_mass_source(gx, gy, theta_e, beta, 0.0, sigma)
         plus, minus = phys.point_mass_image_radii(beta, theta_e)
-        dx = gx[0, 1] - gx[0, 0]
+        spacing = fov / (n_pix - 1)
+        inner = float(phys.rad_to_arcsec(
+            phys.point_mass_image_plane_scale(minus, theta_e, sigma)
+        ))
+        self.assertGreaterEqual(inner / spacing, phys.IMAGE_DETECT_SAMPLES - 1e-9)
+
         def peak_near(th):
-            ix = int(round((th - gx[0, 0]) / dx))
-            iy = int(round((0.0 - gy[0, 0]) / dx)) if False else image.shape[0] // 2
-            # gy rows: y = gy[:,0]
             iy = int(np.argmin(np.abs(gy[:, 0] - 0.0)))
             ix = int(np.argmin(np.abs(gx[0, :] - th)))
             sl = image[max(0, iy - 2):iy + 3, max(0, ix - 2):ix + 3]
@@ -543,6 +548,42 @@ class TestAudit1Fixes(unittest.TestCase):
         far_p, _far_m = phys.point_mass_mapped_radii(0.0, theta_e, r_eff)
         fov = phys.adapted_fov_arcsec(theta_e, 6.0, extras=(far_p,))
         self.assertGreater(0.5 * fov, float(phys.rad_to_arcsec(far_p)))
+
+    def test_arcs_field_contains_off_axis_image(self):
+        theta_e = phys.default_sis_theta_e(300.0)
+        gamma = 0.25
+        beta_x = phys.arcsec_to_rad(2.0)
+        r_eff = phys.arcsec_to_rad(0.25)
+        r_img = phys.sis_shear_outer_image_radius(
+            beta_x, 0.0, r_eff, theta_e, gamma,
+        )
+        fov = phys.adapted_fov_arcsec(theta_e, 6.0, extras=(r_img,))
+        self.assertGreater(0.5 * fov, float(phys.rad_to_arcsec(r_img)))
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, saved = driver.run_arcs(
+                beta_x_arcsec=2.0, beta_y_arcsec=0.0,
+                r_eff_arcsec=0.25, q=0.60, phi_deg=0.0,
+                outdir=tmp, show=False, dpi=60,
+            )
+            text = Path(saved[:-4] + ".provenance.txt").read_text(encoding="utf-8")
+            self.assertIn("theta_e_arcsec =", text)
+            self.assertIn("sigma_v_kms =", text)
+            fov_run = float(next(ln.split("=")[1]
+                                for ln in text.splitlines()
+                                if "fov_arcsec" in ln))
+            self.assertGreater(0.5 * fov_run, float(phys.rad_to_arcsec(r_img)))
+
+    def test_small_sigma_v_is_rejected_by_kappa(self):
+        with self.assertRaises(ValueError):
+            driver.run_kappa(sigma_v_kms=10.0, show=False)
+
+    def test_critical_provenance_records_grid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, saved = driver.run_critical(outdir=tmp, show=False, dpi=60)
+            text = Path(saved[:-4] + ".provenance.txt").read_text(encoding="utf-8")
+            self.assertIn("n_pix =", text)
+            self.assertIn("fov_arcsec =", text)
+            self.assertIn("sigma_src_arcsec =", text)
 
     def test_help_examples_fit_in_the_adapted_field(self):
         theta_e = phys.default_point_mass_theta_e(12.5)
