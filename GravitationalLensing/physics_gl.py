@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.2.0"
+MODEL_VERSION = "0.3.0"
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
@@ -36,27 +36,28 @@ BUILD_ID_COVERS = (
 )
 
 
-def _compute_build_id():
-    """Return a short identifier derived from the four core source files.
+def compute_build_id_from_directory(directory):
+    """Hash the four covered files found in ``directory``.
 
-    MODEL_VERSION is the declared release.  BUILD_ID distinguishes source
-    revisions that keep the same declared version.  The hash is independent
-    of LF versus CRLF and frames each file with its name and length.
-
-    Return ``"unknown"`` rather than preventing the program from running if
-    the source files cannot be located.
+    Tests copy those files into a temporary folder and call this; they
+    must not write the live source tree.
     """
+    digest = hashlib.sha256()
+    for name in BUILD_ID_COVERS:
+        path = os.path.join(directory, name)
+        with open(path, "r", encoding="utf-8", newline=None) as source:
+            content = source.read().encode("utf-8")
+        digest.update(name.encode("utf-8"))
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()[:12]
+
+
+def _compute_build_id():
+    """Return a short identifier derived from the four core source files."""
     try:
         here = os.path.dirname(os.path.abspath(__file__))
-        digest = hashlib.sha256()
-        for name in BUILD_ID_COVERS:
-            with open(os.path.join(here, name), "r", encoding="utf-8",
-                      newline=None) as source:
-                content = source.read().encode("utf-8")
-            digest.update(name.encode("utf-8"))
-            digest.update(len(content).to_bytes(8, "big"))
-            digest.update(content)
-        return digest.hexdigest()[:12]
+        return compute_build_id_from_directory(here)
     except (OSError, UnicodeDecodeError):
         return "unknown"
 
@@ -79,6 +80,17 @@ D_S_DEFAULT = 2.0 * GPC
 
 # Soft floor so a pixel sitting on the lens centre does not divide by zero.
 _R_FLOOR_FRAC = 1.0e-6
+
+# Beginner shear range: keep the diamond inside the SIS pseudo-caustic.
+# At |gamma| = 1/3 the long-axis cusps touch |beta| = theta_E; above that
+# they become naked cusps and a three-image region appears.
+GAMMA_MAX = 1.0 / 3.0
+
+# Cluster Newton roots only when they sit closer than this fraction of
+# theta_E.  3% of theta_E was large enough to merge distinct images just
+# inside a fold or cusp; solver accuracy is ~1e-10 rad, so 1e-4 theta_E
+# still treats genuine duplicates as one image.
+IMAGE_DEDUP_FRAC = 1.0e-4
 
 
 def _require_finite(name, value):
@@ -191,8 +203,11 @@ def deflection_sis_shear(theta_x, theta_y, theta_e, gamma):
     """
     theta_e = _require_positive("theta_e", theta_e)
     gamma = _require_finite("gamma", gamma)
-    if abs(gamma) >= 1.0:
-        raise ValueError("shear |gamma| must be less than 1")
+    if abs(gamma) >= GAMMA_MAX:
+        raise ValueError(
+            f"shear |gamma| must be < {GAMMA_MAX:g} so the diamond "
+            f"stays inside the pseudo-caustic, got {gamma:g}"
+        )
     r = _radius(theta_x, theta_y)
     ax = theta_e * theta_x / r + gamma * theta_x
     ay = theta_e * theta_y / r - gamma * theta_y
@@ -245,19 +260,24 @@ def critical_radius_sis_shear(phi, theta_e, gamma):
     """
     theta_e = _require_positive("theta_e", theta_e)
     gamma = _require_finite("gamma", gamma)
-    if abs(gamma) >= 1.0:
-        raise ValueError("shear |gamma| must be less than 1")
+    if abs(gamma) >= GAMMA_MAX:
+        raise ValueError(
+            f"shear |gamma| must be < {GAMMA_MAX:g} so the diamond "
+            f"stays inside the pseudo-caustic, got {gamma:g}"
+        )
     phi = _require_finite("phi", phi)
     return theta_e * (1.0 - gamma * math.cos(2.0 * phi)) / (1.0 - gamma * gamma)
 
 
-def critical_curve_sis_shear(theta_e, gamma, n_theta=361, r_max=None):
+def critical_curve_sis_shear(theta_e, gamma, n_theta=361):
     """Closed tangential critical curve from the analytic radius."""
-    del r_max
     theta_e = _require_positive("theta_e", theta_e)
     gamma = _require_finite("gamma", gamma)
-    if abs(gamma) >= 1.0:
-        raise ValueError("shear |gamma| must be less than 1")
+    if abs(gamma) >= GAMMA_MAX:
+        raise ValueError(
+            f"shear |gamma| must be < {GAMMA_MAX:g} so the diamond "
+            f"stays inside the pseudo-caustic, got {gamma:g}"
+        )
     n_theta = int(n_theta)
     if n_theta < 16:
         raise ValueError("n_theta must be at least 16")
@@ -304,8 +324,11 @@ def images_sis_shear(beta_x, beta_y, theta_e, gamma,
     beta_y = _require_finite("beta_y", beta_y)
     theta_e = _require_positive("theta_e", theta_e)
     gamma = _require_finite("gamma", gamma)
-    if abs(gamma) >= 1.0:
-        raise ValueError("shear |gamma| must be less than 1")
+    if abs(gamma) >= GAMMA_MAX:
+        raise ValueError(
+            f"shear |gamma| must be < {GAMMA_MAX:g} so the diamond "
+            f"stays inside the pseudo-caustic, got {gamma:g}"
+        )
     if is_einstein_ring_case(beta_x, beta_y, gamma, theta_e):
         return []
     beta_r = math.hypot(beta_x, beta_y)
@@ -358,7 +381,7 @@ def images_sis_shear(beta_x, beta_y, theta_e, gamma,
         bx, by = map_sis_shear(th[0], th[1], theta_e, gamma)
         if math.hypot(bx - beta_x, by - beta_y) > 1.0e-7 * max(theta_e, beta_r, 1.0e-16):
             continue
-        if all(math.hypot(th[0] - a, th[1] - b) > 0.03 * theta_e
+        if all(math.hypot(th[0] - a, th[1] - b) > IMAGE_DEDUP_FRAC * theta_e
                for a, b in images):
             images.append((float(th[0]), float(th[1])))
     images.sort(key=lambda p: math.atan2(p[1], p[0]))
@@ -502,11 +525,18 @@ def forward_point_mass_bundle(beta, theta_e, thetas=None, d_l=1.0, d_s=2.0):
 COMPACT_SOURCE_SIGMA_ARCSEC = 0.08
 
 
-def adapted_fov_arcsec(theta_e, fov_arcsec, pad=2.6):
-    """Grow the field so a critical curve of radius theta_E still fits."""
+def adapted_fov_arcsec(theta_e, fov_arcsec, extras=(), pad=2.4):
+    """Grow the field so theta_E and any extra angular radii still fit.
+
+    ``fov_arcsec`` is a minimum side length.  The returned value is at
+    least ``pad`` times twice the largest of theta_E and the extras
+    (all extras are in radians).
+    """
     fov_arcsec = _require_positive("fov_arcsec", fov_arcsec)
-    te = float(rad_to_arcsec(_require_positive("theta_e", theta_e)))
-    return max(fov_arcsec, pad * te)
+    half = [float(rad_to_arcsec(_require_positive("theta_e", theta_e)))]
+    for extra in extras:
+        half.append(abs(float(rad_to_arcsec(extra))))
+    return max(fov_arcsec, pad * 2.0 * max(half))
 
 
 def validate_user_value(name, value, *, positive=False, min_value=None,

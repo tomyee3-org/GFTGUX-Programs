@@ -347,7 +347,7 @@ class TestHelpFile(unittest.TestCase):
 class TestAudit1Fixes(unittest.TestCase):
     def test_analytic_critical_radius_and_closure(self):
         theta_e = phys.default_sis_theta_e(300.0)
-        for gamma in (-0.8, -0.25, 0.0, 0.25, 0.8):
+        for gamma in (-0.30, -0.25, 0.0, 0.25, 0.30):
             n = 361
             cx, cy = phys.critical_curve_sis_shear(theta_e, gamma, n_theta=n)
             self.assertEqual(cx.size, n)
@@ -362,12 +362,14 @@ class TestAudit1Fixes(unittest.TestCase):
                                                   theta_e, gamma)
                 self.assertAlmostEqual(float(det), 0.0, places=6)
 
-    def test_high_shear_is_rejected_at_unity(self):
+    def test_high_shear_is_rejected_at_the_naked_cusp_bound(self):
         theta_e = 1.0e-5
         with self.assertRaises(ValueError):
-            phys.critical_curve_sis_shear(theta_e, 1.0)
+            phys.critical_curve_sis_shear(theta_e, phys.GAMMA_MAX)
         with self.assertRaises(ValueError):
-            phys.images_sis_shear(0.0, 0.0, theta_e, -1.0)
+            phys.images_sis_shear(0.0, 0.0, theta_e, -phys.GAMMA_MAX)
+        with self.assertRaises(ValueError):
+            phys.deflection_sis_shear(1.0, 0.0, 1.0, 0.8)
 
     def test_remote_source_has_one_image_that_solves_the_lens_equation(self):
         theta_e = phys.default_sis_theta_e(300.0)
@@ -397,14 +399,31 @@ class TestAudit1Fixes(unittest.TestCase):
     def test_fold_crossing_changes_image_count_from_two_to_four(self):
         theta_e = phys.default_sis_theta_e(300.0)
         gamma = 0.25
-        cx, cy = phys.critical_curve_sis_shear(theta_e, gamma)
-        sx, sy = phys.caustic_from_critical(cx, cy, theta_e, gamma)
-        edge = float(sx.max())
-        outside = phys.images_sis_shear(min(1.15 * edge, 0.90 * theta_e),
-                                        0.0, theta_e, gamma)
-        inside = phys.images_sis_shear(0.4 * edge, 0.0, theta_e, gamma)
+        phi = 0.25 * math.pi
+        r = phys.critical_radius_sis_shear(phi, theta_e, gamma)
+        tx, ty = r * math.cos(phi), r * math.sin(phi)
+        bx, by = phys.map_sis_shear(tx, ty, theta_e, gamma)
+        # The fold point is off-axis.  Step along the source-plane radius.
+        rad = math.hypot(float(bx), float(by))
+        ux, uy = float(bx) / rad, float(by) / rad
+        outside = phys.images_sis_shear(1.12 * rad * ux, 1.12 * rad * uy,
+                                        theta_e, gamma)
+        inside = phys.images_sis_shear(0.70 * rad * ux, 0.70 * rad * uy,
+                                       theta_e, gamma)
         self.assertEqual(len(outside), 2)
         self.assertEqual(len(inside), 4)
+        seps = []
+        for i, (ix, iy) in enumerate(inside):
+            for jx, jy in inside[i + 1:]:
+                seps.append(math.hypot(ix - jx, iy - jy))
+        self.assertGreater(min(seps), phys.IMAGE_DEDUP_FRAC * theta_e)
+
+    def test_images_just_inside_a_cusp_stay_four(self):
+        theta_e = phys.default_sis_theta_e(300.0)
+        gamma = 0.25
+        cusp = 2.0 * theta_e * abs(gamma) / (1.0 + abs(gamma))
+        images = phys.images_sis_shear(0.995 * cusp, 0.0, theta_e, gamma)
+        self.assertEqual(len(images), 4)
 
     def test_centered_zero_shear_is_an_einstein_ring_not_dots(self):
         theta_e = phys.default_sis_theta_e(300.0)
@@ -419,6 +438,10 @@ class TestAudit1Fixes(unittest.TestCase):
         self.assertAlmostEqual(up["y_src"], -down["y_src"])
         self.assertEqual(len(up["hits"]), 2)
         self.assertEqual(len(down["hits"]), 2)
+        up_th = sorted(r["theta"] for r in up["hits"])
+        down_th = sorted(r["theta"] for r in down["hits"])
+        self.assertAlmostEqual(up_th[0], -down_th[1], places=10)
+        self.assertAlmostEqual(up_th[1], -down_th[0], places=10)
 
     def test_r_eff_is_half_light_radius(self):
         r_eff = 1.0
@@ -436,16 +459,23 @@ class TestAudit1Fixes(unittest.TestCase):
             phys.validate_user_value("gamma", 1.0, exclusive_max=1.0)
 
     def test_build_id_changes_when_a_core_file_changes(self):
-        original = recompute_build_id(MODULE_DIR)
+        original = phys.compute_build_id_from_directory(MODULE_DIR)
         self.assertEqual(original, phys.BUILD_ID)
-        target = MODULE_DIR / "physics_gl.py"
-        text = target.read_text(encoding="utf-8")
-        try:
-            target.write_text(text + "\n# audit-sensitivity\n", encoding="utf-8")
-            mutated = recompute_build_id(MODULE_DIR)
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp)
+            for name in phys.BUILD_ID_COVERS:
+                (dest / name).write_text(
+                    (MODULE_DIR / name).read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            before = phys.compute_build_id_from_directory(dest)
+            self.assertEqual(before, original)
+            target = dest / "physics_gl.py"
+            target.write_text(target.read_text(encoding="utf-8")
+                              + "\n# audit-sensitivity\n",
+                              encoding="utf-8")
+            mutated = phys.compute_build_id_from_directory(dest)
             self.assertNotEqual(mutated, original)
-        finally:
-            target.write_text(text, encoding="utf-8")
 
     def test_cli_rejects_nonfinite_beta(self):
         result = run_cli(["--mode", "point", "--beta_x", "inf"])
@@ -453,8 +483,19 @@ class TestAudit1Fixes(unittest.TestCase):
 
     def test_help_examples_fit_in_the_adapted_field(self):
         theta_e = phys.default_point_mass_theta_e(12.5)
-        fov = phys.adapted_fov_arcsec(theta_e, 6.0)
-        self.assertGreater(fov / 2.0, float(phys.rad_to_arcsec(theta_e)))
+        beta = phys.arcsec_to_rad(0.3 * math.sqrt(2.0))
+        plus, minus = phys.point_mass_image_radii(beta, theta_e)
+        fov = phys.adapted_fov_arcsec(
+            theta_e, 6.0, extras=(plus, minus, phys.arcsec_to_rad(0.3)),
+        )
+        half = 0.5 * fov
+        self.assertGreater(half, float(phys.rad_to_arcsec(theta_e)))
+        self.assertGreater(half, abs(float(phys.rad_to_arcsec(plus))))
+        self.assertGreater(half, abs(float(phys.rad_to_arcsec(minus))))
+
+    def test_cli_rejects_naked_cusp_shear(self):
+        result = run_cli(["--mode", "shear", "--gamma", "0.8"])
+        self.assertNotEqual(result.returncode, 0)
 
     def test_shear_provenance_records_gamma(self):
         with tempfile.TemporaryDirectory() as tmp:

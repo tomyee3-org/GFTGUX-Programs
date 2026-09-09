@@ -22,11 +22,6 @@ C_RING = "#00bcd4"
 C_CRIT = "#c1121f"
 C_CAUS = "#0077b6"
 C_SRC = "#6a4c93"
-C_FOLD = "#2a9d8f"
-C_CUSP = "#f77f00"
-C_RAY_IN = "#e63939"
-C_RAY_OUT = "#1d3557"
-C_RAY_MISS = "#9aa5b1"
 
 
 def _timestamp_name(prefix):
@@ -123,10 +118,11 @@ def plot_rays(bundle_on, bundle_off, outdir=None, dpi=140, show=True):
         axes[0], bundle_on,
         "On axis: only the Einstein cone hits the observer",
     )
-    _draw_forward_bundle(
-        axes[1], bundle_off,
-        "Off axis: two rays (two images) reach the observer",
-    )
+    if abs(bundle_off["beta"]) < 1.0e-16 * max(bundle_off["theta_e"], 1.0e-16):
+        off_title = "On axis: the two red rays are a slice of the Einstein cone"
+    else:
+        off_title = "Off axis: two rays (two images) reach the observer"
+    _draw_forward_bundle(axes[1], bundle_off, off_title)
     axes[1].set_xlabel("distance along the line of sight (schematic)")
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "rays", dpi,
@@ -194,12 +190,14 @@ def plot_critical(image, det_a, theta_x, theta_y, theta_e,
 
     ax = axes[1]
     ax.set_aspect("equal")
-    ax.set_xlim(-te * 1.4, te * 1.4)
-    ax.set_ylim(-te * 1.4, te * 1.4)
+    bx_a = float(phys.rad_to_arcsec(beta_x))
+    by_a = float(phys.rad_to_arcsec(beta_y))
+    span = max(1.4 * te, 1.3 * abs(bx_a), 1.3 * abs(by_a), 0.5)
+    ax.set_xlim(-span, span)
+    ax.set_ylim(-span, span)
     ax.plot(0.0, 0.0, marker="*", color=C_CAUS, ms=16, zorder=5)
-    ax.plot(phys.rad_to_arcsec(beta_x), phys.rad_to_arcsec(beta_y),
-            marker="+", color=C_SRC, ms=12, mew=1.6, zorder=6)
-    ax.set_title("Source plane\ncaustic = one point at the origin")
+    ax.plot(bx_a, by_a, marker="+", color=C_SRC, ms=12, mew=1.6, zorder=6)
+    ax.set_title("Source plane\ncaustic = one point (symbol enlarged)")
     ax.set_xlabel(r"$\beta_x$ [arcsec]")
     ax.set_ylabel(r"$\beta_y$ [arcsec]")
     ax.axhline(0.0, color="0.85", lw=0.7)
@@ -220,8 +218,7 @@ def plot_critical(image, det_a, theta_x, theta_y, theta_e,
     ax.plot(0.0, bundle["y_src"], marker="*", color=C_SRC, ms=10, zorder=5)
     ax.plot(d_ls, 0.0, marker="o", color="k", ms=6, zorder=5)
     ax.plot(d_s, 0.0, marker="s", color="k", ms=6, zorder=5)
-    # Fixed limits so --beta_y runs keep the same aspect.
-    y_pad = 3.4 * theta_e_b * bundle["d_l"]
+    y_pad = max(3.4 * theta_e_b * bundle["d_l"], 1.3 * abs(bundle["y_src"]))
     ax.set_xlim(-0.02 * d_s, 1.02 * d_s)
     ax.set_ylim(-y_pad, y_pad)
     ax.set_box_aspect(0.72)
@@ -231,7 +228,12 @@ def plot_critical(image, det_a, theta_x, theta_y, theta_e,
 
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "critical", dpi,
-                    provenance={"mode": "critical", "theta_e_arcsec": f"{te:.6f}"})
+                    provenance={
+                        "mode": "critical",
+                        "theta_e_arcsec": f"{te:.6f}",
+                        "beta_x_arcsec": f"{float(phys.rad_to_arcsec(beta_x)):.6f}",
+                        "beta_y_arcsec": f"{float(phys.rad_to_arcsec(beta_y)):.6f}",
+                    })
     if show:
         plt.show()
     else:
@@ -329,7 +331,12 @@ def plot_arcs(image, crit_x, crit_y, theta_x, theta_y, outdir=None,
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
                  label="intensity (false colour)")
     fig.tight_layout(rect=[0, 0.03, 1, 1])
-    saved = _finish(fig, outdir, "arcs", dpi, provenance={"mode": "arcs"})
+    saved = _finish(fig, outdir, "arcs", dpi,
+                    provenance={
+                        "mode": "arcs",
+                        "fov_arcsec": f"{_extent_arcsec(theta_x, theta_y)[1]
+                                         - _extent_arcsec(theta_x, theta_y)[0]:.4f}",
+                    })
     if show:
         plt.show()
     else:
@@ -355,7 +362,12 @@ def plot_kappa(kappa, theta_x, theta_y, theta_e, outdir=None, dpi=140, show=True
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=r"$\kappa$")
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "kappa", dpi,
-                    provenance={"mode": "kappa", "theta_e_arcsec": f"{te:.6f}"})
+                    provenance={
+                        "mode": "kappa",
+                        "theta_e_arcsec": f"{te:.6f}",
+                        "fov_arcsec": f"{_extent_arcsec(theta_x, theta_y)[1]
+                                         - _extent_arcsec(theta_x, theta_y)[0]:.4f}",
+                    })
     if show:
         plt.show()
     else:

@@ -59,7 +59,8 @@ def parse_args():
     g.add_argument("--sigma_v", type=float, default=300.0, metavar="KM_S",
                    help="SIS velocity dispersion [km/s] for shear/arcs/kappa")
     g.add_argument("--gamma", type=float, default=0.25, metavar="SHEAR",
-                   help="external shear for SIS+shear modes; |gamma| < 1")
+                   help="external shear; |gamma| < 1/3 keeps the diamond "
+                        "inside the SIS pseudo-caustic")
 
     g = p.add_argument_group("Extended source")
     g.add_argument("--r_eff", type=float, default=0.25, metavar="ARCSEC",
@@ -112,9 +113,14 @@ def _defaults_for(mode, args):
 def _validate_args(args):
     physics_gl.validate_user_value("logM", args.logM)
     physics_gl.validate_user_value("sigma_v", args.sigma_v, positive=True)
-    physics_gl.validate_user_value("gamma", args.gamma, exclusive_max=1.0)
-    if args.gamma <= -1.0:
-        raise ValueError(f"gamma must satisfy |gamma| < 1, got {args.gamma:g}")
+    physics_gl.validate_user_value(
+        "gamma", args.gamma, exclusive_max=physics_gl.GAMMA_MAX,
+    )
+    if args.gamma <= -physics_gl.GAMMA_MAX:
+        raise ValueError(
+            f"gamma must satisfy |gamma| < {physics_gl.GAMMA_MAX:g}, "
+            f"got {args.gamma:g}"
+        )
     physics_gl.validate_user_value("r_eff", args.r_eff, positive=True)
     physics_gl.validate_user_value("q", args.q, min_value=1.0e-12, max_value=1.0)
     physics_gl.validate_user_value("phi", args.phi)
