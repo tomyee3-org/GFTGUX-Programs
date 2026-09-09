@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.4.0"
+MODEL_VERSION = "0.5.0"
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
@@ -188,6 +188,28 @@ def jacobian_det_point_mass(theta_x, theta_y, theta_e):
     theta_e = _require_positive("theta_e", theta_e)
     r2 = _radius(theta_x, theta_y) ** 2
     return 1.0 - (theta_e**4 / r2**2)
+
+
+def point_mass_radial_stretch(theta, theta_e):
+    """|d beta / d theta| along a radial line for a point-mass lens."""
+    theta = _require_finite("theta", theta)
+    theta_e = _require_positive("theta_e", theta_e)
+    if theta == 0.0:
+        raise ValueError("theta must be nonzero")
+    return abs(1.0 + (theta_e / theta) ** 2)
+
+
+def point_mass_image_plane_scale(theta, theta_e, source_scale):
+    """Image-plane width of a source-plane scale at image radius theta."""
+    source_scale = _require_positive("source_scale", source_scale)
+    return source_scale / point_mass_radial_stretch(theta, theta_e)
+
+
+def point_mass_mapped_radii(beta, theta_e, source_radius):
+    """Image radii of the farthest source-plane point |beta| + source_radius."""
+    beta = _require_finite("beta", beta)
+    source_radius = _require_positive("source_radius", source_radius)
+    return point_mass_image_radii(abs(beta) + source_radius, theta_e)
 
 
 def point_mass_image_radii(beta, theta_e):
@@ -575,21 +597,55 @@ def adapted_n_pix(n_pix, fov_arcsec, smallest_scale_arcsec,
     if max_n_pix is None:
         max_n_pix = N_PIX_AUTO_MAX
     pixel_need = smallest_scale_arcsec / PIXELS_PER_SIGMA
-    n_need = int(math.ceil(fov_arcsec / pixel_need))
+    n_intervals = int(math.ceil(fov_arcsec / pixel_need))
+    n_need = n_intervals + 1
     if n_need % 2 == 0:
         n_need += 1
     n_need = max(n_need, 9)
     if n_pix >= n_need:
         return n_pix
-    if n_need > max_n_pix and n_pix < n_need:
+    if n_need > max_n_pix:
         raise ValueError(
-            f"field {fov_arcsec:.2f}\" with source scale "
-            f"{smallest_scale_arcsec:.3f}\" needs n_pix >= {n_need} "
-            f"to keep {PIXELS_PER_SIGMA:g} pixels per scale length. "
-            f"Automatic grids stop at {max_n_pix}. "
-            f"Use a source closer to the lens, or pass --n_pix {n_need}."
+            f"field {fov_arcsec:.2f}\" with image-plane scale "
+            f"{smallest_scale_arcsec:.4f}\" needs {n_need} pixels "
+            f"({PIXELS_PER_SIGMA:g} samples per scale; spacing is "
+            f"FOV/(n_pix-1)). Automatic grids stop at {max_n_pix}. "
+            f"This offset or source size is outside the teaching domain "
+            f"in which both images stay resolved. Move the source closer "
+            f"to the lens or use a smaller --r_eff."
         )
     return n_need
+
+
+def require_resolved_point_mass_images(theta_e, beta, source_scale,
+                                       fov_arcsec, n_pix,
+                                       min_samples=0.8):
+    """Reject a grid that cannot show both members of the point-mass double.
+
+    ``min_samples`` is the fewest pixels allowed across each image-plane
+    scale.  A uniform grid that would need tens of thousands of pixels
+    to resolve a highly demagnified inner image is outside the teaching
+    domain; the student should move the source closer, not raise n_pix.
+    """
+    theta_e = _require_positive("theta_e", theta_e)
+    beta = _require_finite("beta", beta)
+    source_scale = _require_positive("source_scale", source_scale)
+    fov_arcsec = _require_positive("fov_arcsec", fov_arcsec)
+    n_pix = int(n_pix)
+    spacing = fov_arcsec / max(n_pix - 1, 1)
+    plus, minus = point_mass_image_radii(abs(beta), theta_e)
+    for th, name in ((plus, "outer"), (minus, "inner")):
+        scale_as = float(rad_to_arcsec(
+            point_mass_image_plane_scale(th, theta_e, source_scale)
+        ))
+        if scale_as < min_samples * spacing:
+            raise ValueError(
+                f"the {name} image is compressed to {scale_as:.4f}\" "
+                f"while the grid spacing is {spacing:.4f}\". "
+                f"This program renders both images of a point-mass double; "
+                f"that offset is outside the teaching domain. "
+                f"Move the source closer to the lens."
+            )
 
 
 def patch_help_version(html_path):

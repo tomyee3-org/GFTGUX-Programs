@@ -503,9 +503,46 @@ class TestAudit1Fixes(unittest.TestCase):
             self.assertIn("n_pix =", text)
             self.assertIn("fov_arcsec =", text)
 
-    def test_large_offset_is_rejected_unless_n_pix_is_raised(self):
-        with self.assertRaises(ValueError):
+    def test_large_offset_is_rejected_as_outside_teaching_domain(self):
+        with self.assertRaises(ValueError) as ctx:
             driver.run_point(beta_x_arcsec=20.0, show=False)
+        msg = str(ctx.exception)
+        self.assertIn("teaching domain", msg)
+        self.assertNotIn("pass --n_pix", msg)
+
+    def test_default_point_resolves_both_images(self):
+        theta_e = phys.default_point_mass_theta_e(12.0)
+        beta = phys.arcsec_to_rad(0.50)
+        sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
+        extras, scale = driver._point_mass_grid_args(
+            theta_e, beta, 0.0, sigma, 3.0 * sigma,
+        )
+        fov = phys.adapted_fov_arcsec(theta_e, 6.0, extras=extras)
+        n_pix = phys.adapted_n_pix(181, fov, phys.COMPACT_SOURCE_SIGMA_ARCSEC)
+        phys.require_resolved_point_mass_images(
+            theta_e, beta, sigma, fov, n_pix,
+        )
+        gx, gy = phys.make_grid(n_pix=n_pix, fov_arcsec=fov)
+        image = phys.render_point_mass_source(gx, gy, theta_e, beta, 0.0, sigma)
+        plus, minus = phys.point_mass_image_radii(beta, theta_e)
+        dx = gx[0, 1] - gx[0, 0]
+        def peak_near(th):
+            ix = int(round((th - gx[0, 0]) / dx))
+            iy = int(round((0.0 - gy[0, 0]) / dx)) if False else image.shape[0] // 2
+            # gy rows: y = gy[:,0]
+            iy = int(np.argmin(np.abs(gy[:, 0] - 0.0)))
+            ix = int(np.argmin(np.abs(gx[0, :] - th)))
+            sl = image[max(0, iy - 2):iy + 3, max(0, ix - 2):ix + 3]
+            return float(sl.max())
+        self.assertGreater(peak_near(plus), 0.4)
+        self.assertGreater(peak_near(minus), 0.4)
+
+    def test_mapped_half_light_sets_blob_field(self):
+        theta_e = phys.default_point_mass_theta_e(12.0)
+        r_eff = phys.arcsec_to_rad(2.0)
+        far_p, _far_m = phys.point_mass_mapped_radii(0.0, theta_e, r_eff)
+        fov = phys.adapted_fov_arcsec(theta_e, 6.0, extras=(far_p,))
+        self.assertGreater(0.5 * fov, float(phys.rad_to_arcsec(far_p)))
 
     def test_help_examples_fit_in_the_adapted_field(self):
         theta_e = phys.default_point_mass_theta_e(12.5)
@@ -519,9 +556,10 @@ class TestAudit1Fixes(unittest.TestCase):
         self.assertGreater(half, abs(float(phys.rad_to_arcsec(plus))))
         self.assertGreater(half, abs(float(phys.rad_to_arcsec(minus))))
         n_pix = phys.adapted_n_pix(181, fov, phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-        self.assertGreaterEqual(
-            n_pix / fov,
-            phys.PIXELS_PER_SIGMA / phys.COMPACT_SOURCE_SIGMA_ARCSEC - 1e-9,
+        spacing = fov / (n_pix - 1)
+        self.assertLessEqual(
+            spacing,
+            phys.COMPACT_SOURCE_SIGMA_ARCSEC / phys.PIXELS_PER_SIGMA + 1e-9,
         )
 
     def test_cli_rejects_naked_cusp_shear(self):

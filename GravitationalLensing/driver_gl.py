@@ -33,6 +33,17 @@ def _resolved_grid(theta_e, fov_arcsec, n_pix, extras, scale_arcsec):
     return theta_x, theta_y, fov_arcsec, n_pix
 
 
+def _point_mass_grid_args(theta_e, beta_x, beta_y, source_scale, contain_radius):
+    """FOV extras and the smaller image-plane scale for a point-mass run."""
+    beta = math.hypot(beta_x, beta_y)
+    plus, minus = phys.point_mass_image_radii(beta, theta_e)
+    far_p, far_m = phys.point_mass_mapped_radii(beta, theta_e, contain_radius)
+    s_plus = phys.point_mass_image_plane_scale(plus, theta_e, source_scale)
+    s_minus = phys.point_mass_image_plane_scale(minus, theta_e, source_scale)
+    extras = (beta_x, beta_y, plus, minus, far_p, far_m, contain_radius)
+    return extras, min(s_plus, s_minus)
+
+
 def run_rays(beta_arcsec=0.35, outdir=None, dpi=140,
              show=True, interactive=False):
     # Forward thin-lens rays.  Heights are angles times schematic
@@ -53,11 +64,16 @@ def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-    plus, minus = phys.point_mass_image_radii(math.hypot(beta_x, beta_y), theta_e)
+    extras, scale = _point_mass_grid_args(
+        theta_e, beta_x, beta_y, sigma, 3.0 * sigma,
+    )
     theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
         theta_e, fov_arcsec, n_pix,
-        extras=(beta_x, beta_y, plus, minus, sigma),
+        extras=extras,
         scale_arcsec=phys.COMPACT_SOURCE_SIGMA_ARCSEC,
+    )
+    phys.require_resolved_point_mass_images(
+        theta_e, math.hypot(beta_x, beta_y), sigma, fov_arcsec, n_pix,
     )
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
@@ -83,11 +99,13 @@ def run_blob(log10_m=12.0, beta_x_arcsec=0.15, beta_y_arcsec=0.05,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     r_eff = phys.arcsec_to_rad(r_eff_arcsec)
-    plus, minus = phys.point_mass_image_radii(math.hypot(beta_x, beta_y), theta_e)
+    extras, scale = _point_mass_grid_args(
+        theta_e, beta_x, beta_y, r_eff * q, r_eff,
+    )
     theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
         theta_e, fov_arcsec, n_pix,
-        extras=(beta_x, beta_y, plus, minus, r_eff),
-        scale_arcsec=r_eff_arcsec * q,
+        extras=extras,
+        scale_arcsec=max(r_eff_arcsec * q, 0.05),
     )
     image = phys.render_point_mass_extended(
         theta_x, theta_y, theta_e,
@@ -117,11 +135,16 @@ def run_critical(log10_m=12.0, beta_x_arcsec=0.00, beta_y_arcsec=0.00,
     beta_x = phys.arcsec_to_rad(beta_x_arcsec)
     beta_y = phys.arcsec_to_rad(beta_y_arcsec)
     sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
-    plus, minus = phys.point_mass_image_radii(math.hypot(beta_x, beta_y), theta_e)
+    extras, scale = _point_mass_grid_args(
+        theta_e, beta_x, beta_y, sigma, 3.0 * sigma,
+    )
     theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
         theta_e, fov_arcsec, n_pix,
-        extras=(beta_x, beta_y, plus, minus, sigma),
+        extras=extras,
         scale_arcsec=phys.COMPACT_SOURCE_SIGMA_ARCSEC,
+    )
+    phys.require_resolved_point_mass_images(
+        theta_e, math.hypot(beta_x, beta_y), sigma, fov_arcsec, n_pix,
     )
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
@@ -166,7 +189,9 @@ def run_arcs(sigma_v_kms=300.0, gamma=0.25,
     r_crit_max = theta_e / (1.0 - abs(gamma))
     theta_x, theta_y, fov_arcsec, n_pix = _resolved_grid(
         theta_e, fov_arcsec, n_pix,
-        extras=(r_crit_max, beta_x, beta_y, r_eff),
+        extras=(r_crit_max + r_eff,
+                math.hypot(beta_x, beta_y) + r_eff,
+                r_eff),
         scale_arcsec=r_eff_arcsec * q,
     )
     image = phys.render_sis_shear_extended(
@@ -179,6 +204,9 @@ def run_arcs(sigma_v_kms=300.0, gamma=0.25,
                               show=_show_wanted(show, interactive),
                               extra_prov={
                                   "gamma": f"{float(gamma):.6f}",
+                                  "sigma_v_kms": f"{sigma_v_kms:.4f}",
+                                  "theta_e_arcsec":
+                                      f"{float(phys.rad_to_arcsec(theta_e)):.6f}",
                                   "beta_x_arcsec": f"{beta_x_arcsec:.6f}",
                                   "beta_y_arcsec": f"{beta_y_arcsec:.6f}",
                                   "r_eff_arcsec": f"{r_eff_arcsec:.4f}",

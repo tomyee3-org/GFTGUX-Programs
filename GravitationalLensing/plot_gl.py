@@ -179,7 +179,8 @@ def plot_point(image, theta_x, theta_y, theta_e, beta_x, beta_y,
 
 
 def plot_critical(image, det_a, theta_x, theta_y, theta_e,
-                  beta_x, beta_y, bundle, outdir=None, dpi=140, show=True):
+                  beta_x, beta_y, bundle, outdir=None, dpi=140, show=True,
+                  extra_prov=None):
     """Image plane, source plane (caustic = a point), and side-view rays."""
     fig, axes = plt.subplots(1, 3, figsize=(13.4, 4.4))
     ext = _extent_arcsec(theta_x, theta_y)
@@ -239,6 +240,11 @@ def plot_critical(image, det_a, theta_x, theta_y, theta_e,
                         "theta_e_arcsec": f"{te:.6f}",
                         "beta_x_arcsec": f"{float(phys.rad_to_arcsec(beta_x)):.6f}",
                         "beta_y_arcsec": f"{float(phys.rad_to_arcsec(beta_y)):.6f}",
+                        "n_pix": str(image.shape[0]),
+                        "fov_arcsec": f"{(ext[1] - ext[0]):.4f}",
+                        "sigma_src_arcsec":
+                            f"{phys.COMPACT_SOURCE_SIGMA_ARCSEC:.4f}",
+                        **(extra_prov or {}),
                     })
     if show:
         plt.show()
