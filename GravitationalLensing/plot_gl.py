@@ -140,7 +140,8 @@ def plot_rays(bundle_on, bundle_off, outdir=None, dpi=140, show=True):
 
 
 def plot_point(image, theta_x, theta_y, theta_e, beta_x, beta_y,
-               outdir=None, dpi=140, show=True, title=None, mode="point"):
+               outdir=None, dpi=140, show=True, title=None, mode="point",
+               extra_prov=None):
     fig, ax = plt.subplots(figsize=(6.2, 6.2))
     im = ax.imshow(image, origin="lower", cmap="inferno",
                    extent=_extent_arcsec(theta_x, theta_y))
@@ -158,13 +159,18 @@ def plot_point(image, theta_x, theta_y, theta_e, beta_x, beta_y,
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
                  label="intensity (false colour)")
     fig.tight_layout(rect=[0, 0.03, 1, 1])
-    saved = _finish(fig, outdir, mode, dpi,
-                    provenance={
-                        "mode": mode,
-                        "theta_e_arcsec": f"{te:.6f}",
-                        "beta_x_arcsec": f"{float(phys.rad_to_arcsec(beta_x)):.6f}",
-                        "beta_y_arcsec": f"{float(phys.rad_to_arcsec(beta_y)):.6f}",
-                    })
+    prov = {
+        "mode": mode,
+        "theta_e_arcsec": f"{te:.6f}",
+        "beta_x_arcsec": f"{float(phys.rad_to_arcsec(beta_x)):.6f}",
+        "beta_y_arcsec": f"{float(phys.rad_to_arcsec(beta_y)):.6f}",
+        "n_pix": str(image.shape[0]),
+        "fov_arcsec": f"{(_extent_arcsec(theta_x, theta_y)[1]
+                          - _extent_arcsec(theta_x, theta_y)[0]):.4f}",
+    }
+    if extra_prov:
+        prov.update(extra_prov)
+    saved = _finish(fig, outdir, mode, dpi, provenance=prov)
     if show:
         plt.show()
     else:
@@ -318,7 +324,8 @@ def plot_shear(crit_x, crit_y, cau_x, cau_y, images, beta_x, beta_y, theta_e,
 
 def plot_arcs(image, crit_x, crit_y, theta_x, theta_y, outdir=None,
               dpi=140, show=True,
-              title="Extended source on an SIS + shear lens (false colour)"):
+              title="Extended source on an SIS + shear lens (false colour)",
+              extra_prov=None):
     fig, ax = plt.subplots(figsize=(6.2, 6.2))
     im = ax.imshow(image, origin="lower", cmap="inferno",
                    extent=_extent_arcsec(theta_x, theta_y))
@@ -334,8 +341,10 @@ def plot_arcs(image, crit_x, crit_y, theta_x, theta_y, outdir=None,
     saved = _finish(fig, outdir, "arcs", dpi,
                     provenance={
                         "mode": "arcs",
+                        "n_pix": str(image.shape[0]),
                         "fov_arcsec": f"{_extent_arcsec(theta_x, theta_y)[1]
                                          - _extent_arcsec(theta_x, theta_y)[0]:.4f}",
+                        **(extra_prov or {}),
                     })
     if show:
         plt.show()
@@ -344,7 +353,8 @@ def plot_arcs(image, crit_x, crit_y, theta_x, theta_y, outdir=None,
     return fig, saved
 
 
-def plot_kappa(kappa, theta_x, theta_y, theta_e, outdir=None, dpi=140, show=True):
+def plot_kappa(kappa, theta_x, theta_y, theta_e, outdir=None, dpi=140, show=True,
+               extra_prov=None):
     from matplotlib.colors import LogNorm
     fig, ax = plt.subplots(figsize=(6.2, 6.2))
     positive = np.maximum(kappa, np.nanmax(kappa) * 1.0e-6)
@@ -365,8 +375,10 @@ def plot_kappa(kappa, theta_x, theta_y, theta_e, outdir=None, dpi=140, show=True
                     provenance={
                         "mode": "kappa",
                         "theta_e_arcsec": f"{te:.6f}",
+                        "n_pix": str(kappa.shape[0]),
                         "fov_arcsec": f"{_extent_arcsec(theta_x, theta_y)[1]
                                          - _extent_arcsec(theta_x, theta_y)[0]:.4f}",
+                        **(extra_prov or {}),
                     })
     if show:
         plt.show()

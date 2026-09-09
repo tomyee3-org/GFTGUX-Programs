@@ -74,7 +74,10 @@ def parse_args():
     g.add_argument("--n_pix", type=int, default=181, metavar="N",
                    help="pixels along one side of the image-plane grid")
     g.add_argument("--fov", type=float, default=6.0, metavar="ARCSEC",
-                   help="field of view on a side")
+                   help="minimum field of view on a side; may grow to fit "
+                        "the ring and source")
+    p.add_argument("--sync-help", action="store_true",
+                   help="write MODEL_VERSION and BUILD_ID into the Help file")
     g.add_argument("--dpi", type=int, default=140, metavar="N",
                    help="PNG resolution")
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",
@@ -136,6 +139,15 @@ def _validate_args(args):
 
 def main():
     args = parse_args()
+    if args.sync_help:
+        here = os.path.dirname(os.path.abspath(__file__))
+        html = os.path.join(os.path.dirname(here), "GravitationalLensing.html")
+        try:
+            ver, bid = physics_gl.patch_help_version(html)
+        except (OSError, ValueError) as exc:
+            raise SystemExit(f"GravitationalLensing: {exc}") from exc
+        print(f"Wrote Version {ver}  Build {bid} -> {html}")
+        return
     try:
         _validate_args(args)
     except ValueError as exc:

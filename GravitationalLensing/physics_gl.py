@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.3.0"
+MODEL_VERSION = "0.4.0"
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
@@ -91,6 +91,19 @@ GAMMA_MAX = 1.0 / 3.0
 # inside a fold or cusp; solver accuracy is ~1e-10 rad, so 1e-4 theta_E
 # still treats genuine duplicates as one image.
 IMAGE_DEDUP_FRAC = 1.0e-4
+
+# Fractional distance to a fold or cusp inside which Newton image counts
+# are not a promised teaching output.  Failures appear around 1e-8.
+CAUSTIC_COUNT_BUFFER = 1.0e-4
+
+# FOV half-width = FOV_MARGIN * largest required radius.
+FOV_MARGIN = 1.2
+
+# Keep at least this many pixels across one compact-source sigma.
+PIXELS_PER_SIGMA = 3.0
+
+# Automatic n_pix cap.  Wider fields need an explicit --n_pix.
+N_PIX_AUTO_MAX = 401
 
 
 def _require_finite(name, value):
@@ -525,18 +538,77 @@ def forward_point_mass_bundle(beta, theta_e, thetas=None, d_l=1.0, d_s=2.0):
 COMPACT_SOURCE_SIGMA_ARCSEC = 0.08
 
 
-def adapted_fov_arcsec(theta_e, fov_arcsec, extras=(), pad=2.4):
-    """Grow the field so theta_E and any extra angular radii still fit.
+def adapted_fov_arcsec(theta_e, fov_arcsec, extras=(), margin=None):
+    """Grow the field so theta_E and extras still fit.
 
-    ``fov_arcsec`` is a minimum side length.  The returned value is at
-    least ``pad`` times twice the largest of theta_E and the extras
-    (all extras are in radians).
+    ``fov_arcsec`` is a minimum side length.  The returned value is
+    ``max(fov, 2 * margin * largest_radius)`` with margin defaulting to
+    FOV_MARGIN (1.2, a 20% border).
     """
+    if margin is None:
+        margin = FOV_MARGIN
     fov_arcsec = _require_positive("fov_arcsec", fov_arcsec)
+    margin = _require_positive("margin", margin)
     half = [float(rad_to_arcsec(_require_positive("theta_e", theta_e)))]
     for extra in extras:
         half.append(abs(float(rad_to_arcsec(extra))))
-    return max(fov_arcsec, pad * 2.0 * max(half))
+    return max(fov_arcsec, 2.0 * margin * max(half))
+
+
+def adapted_n_pix(n_pix, fov_arcsec, smallest_scale_arcsec,
+                  max_n_pix=None):
+    """Raise n_pix so a pixel is no larger than scale / PIXELS_PER_SIGMA.
+
+    If that would exceed ``max_n_pix`` (default N_PIX_AUTO_MAX), raise
+    ValueError naming the required --n_pix.  Passing n_pix already at or
+    above the requirement is accepted even when it exceeds the automatic
+    cap, so a student can opt into a heavy grid.
+    """
+    n_pix = int(n_pix)
+    if n_pix < 9:
+        raise ValueError("n_pix must be at least 9")
+    if n_pix % 2 == 0:
+        n_pix += 1
+    fov_arcsec = _require_positive("fov_arcsec", fov_arcsec)
+    smallest_scale_arcsec = _require_positive("smallest_scale_arcsec",
+                                              smallest_scale_arcsec)
+    if max_n_pix is None:
+        max_n_pix = N_PIX_AUTO_MAX
+    pixel_need = smallest_scale_arcsec / PIXELS_PER_SIGMA
+    n_need = int(math.ceil(fov_arcsec / pixel_need))
+    if n_need % 2 == 0:
+        n_need += 1
+    n_need = max(n_need, 9)
+    if n_pix >= n_need:
+        return n_pix
+    if n_need > max_n_pix and n_pix < n_need:
+        raise ValueError(
+            f"field {fov_arcsec:.2f}\" with source scale "
+            f"{smallest_scale_arcsec:.3f}\" needs n_pix >= {n_need} "
+            f"to keep {PIXELS_PER_SIGMA:g} pixels per scale length. "
+            f"Automatic grids stop at {max_n_pix}. "
+            f"Use a source closer to the lens, or pass --n_pix {n_need}."
+        )
+    return n_need
+
+
+def patch_help_version(html_path):
+    """Write MODEL_VERSION and BUILD_ID into the Help #version_build element."""
+    import re
+    path = os.fspath(html_path)
+    text = open(path, encoding="utf-8").read()
+    pattern = r'(id="version_build"[^>]*>)(.*?)(</p>)'
+    replacement = (
+        rf'\1\n    Version {MODEL_VERSION}&nbsp;&nbsp;&nbsp;&nbsp;'
+        rf'Build {BUILD_ID}\n  \3'
+    )
+    new, n = re.subn(pattern, replacement, text, count=1, flags=re.S)
+    if n != 1:
+        raise ValueError("could not find #version_build in Help file")
+    if new != text:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(new)
+    return MODEL_VERSION, BUILD_ID
 
 
 def validate_user_value(name, value, *, positive=False, min_value=None,

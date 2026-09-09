@@ -374,8 +374,6 @@ class TestAudit1Fixes(unittest.TestCase):
     def test_remote_source_has_one_image_that_solves_the_lens_equation(self):
         theta_e = phys.default_sis_theta_e(300.0)
         gamma = 0.25
-        beta_x = 2.0 * phys.arcsec_to_rad(2.0)
-        # 2 arcsec is already outside theta_E ~ 1.3"; use 2" explicitly.
         beta_x = phys.arcsec_to_rad(2.0)
         images = phys.images_sis_shear(beta_x, 0.0, theta_e, gamma)
         self.assertEqual(len(images), 1)
@@ -422,7 +420,8 @@ class TestAudit1Fixes(unittest.TestCase):
         theta_e = phys.default_sis_theta_e(300.0)
         gamma = 0.25
         cusp = 2.0 * theta_e * abs(gamma) / (1.0 + abs(gamma))
-        images = phys.images_sis_shear(0.995 * cusp, 0.0, theta_e, gamma)
+        frac = 1.0 - 10.0 * phys.CAUSTIC_COUNT_BUFFER
+        images = phys.images_sis_shear(frac * cusp, 0.0, theta_e, gamma)
         self.assertEqual(len(images), 4)
 
     def test_centered_zero_shear_is_an_einstein_ring_not_dots(self):
@@ -481,6 +480,33 @@ class TestAudit1Fixes(unittest.TestCase):
         result = run_cli(["--mode", "point", "--beta_x", "inf"])
         self.assertNotEqual(result.returncode, 0)
 
+    def test_adapted_fov_uses_twenty_percent_margin(self):
+        te = phys.arcsec_to_rad(2.0)
+        fov = phys.adapted_fov_arcsec(te, 1.0, extras=())
+        self.assertAlmostEqual(fov, 2.0 * phys.FOV_MARGIN * 2.0, places=6)
+
+    def test_default_point_image_recovers_a_bright_peak(self):
+        theta_e = phys.default_point_mass_theta_e(12.0)
+        beta_x = phys.arcsec_to_rad(0.50)
+        sigma = phys.arcsec_to_rad(phys.COMPACT_SOURCE_SIGMA_ARCSEC)
+        plus, minus = phys.point_mass_image_radii(abs(beta_x), theta_e)
+        fov = phys.adapted_fov_arcsec(
+            theta_e, 6.0, extras=(beta_x, plus, minus, sigma),
+        )
+        n_pix = phys.adapted_n_pix(181, fov, phys.COMPACT_SOURCE_SIGMA_ARCSEC)
+        gx, gy = phys.make_grid(n_pix=n_pix, fov_arcsec=fov)
+        image = phys.render_point_mass_source(gx, gy, theta_e, beta_x, 0.0, sigma)
+        self.assertGreater(float(image.max()), 0.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, saved = driver.run_point(outdir=tmp, show=False, dpi=60)
+            text = Path(saved[:-4] + ".provenance.txt").read_text(encoding="utf-8")
+            self.assertIn("n_pix =", text)
+            self.assertIn("fov_arcsec =", text)
+
+    def test_large_offset_is_rejected_unless_n_pix_is_raised(self):
+        with self.assertRaises(ValueError):
+            driver.run_point(beta_x_arcsec=20.0, show=False)
+
     def test_help_examples_fit_in_the_adapted_field(self):
         theta_e = phys.default_point_mass_theta_e(12.5)
         beta = phys.arcsec_to_rad(0.3 * math.sqrt(2.0))
@@ -492,6 +518,11 @@ class TestAudit1Fixes(unittest.TestCase):
         self.assertGreater(half, float(phys.rad_to_arcsec(theta_e)))
         self.assertGreater(half, abs(float(phys.rad_to_arcsec(plus))))
         self.assertGreater(half, abs(float(phys.rad_to_arcsec(minus))))
+        n_pix = phys.adapted_n_pix(181, fov, phys.COMPACT_SOURCE_SIGMA_ARCSEC)
+        self.assertGreaterEqual(
+            n_pix / fov,
+            phys.PIXELS_PER_SIGMA / phys.COMPACT_SOURCE_SIGMA_ARCSEC - 1e-9,
+        )
 
     def test_cli_rejects_naked_cusp_shear(self):
         result = run_cli(["--mode", "shear", "--gamma", "0.8"])
