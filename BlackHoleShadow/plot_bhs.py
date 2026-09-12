@@ -479,14 +479,15 @@ def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0,
     return fig, saved
 
 
-def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
+def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
                fov_over_M=16.0, sample=None, parts=None,
                outdir=None, dpi=140, show=True):
     fig = plt.figure(figsize=(12.6, 6.4))
     axes = [fig.add_subplot(2, 3, i) for i in range(1, 4)]
     ax_r = fig.add_subplot(2, 1, 2)
     extent = _extent_over_M(bx, by, M)
-    vmax = max(float(np.max(img1)), 1.0e-12)
+    vmax = max(float(np.max(img1)), float(np.max(img2)),
+               float(np.max(img3)), 1.0e-12)
     titles = (
         "direct (m=1)",
         "+ lensing (m<=2)",
@@ -511,16 +512,27 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
         elif parts.shape[1] >= 3:
             ax_r.plot(b_over, parts[:, 2], color="#c1121f", lw=1.6, label="m=3")
         ax_r.axvline(phys.critical_impact_parameter(M) / M, color=C_BC, ls=":")
-        ax_r.set_xlim(phys.critical_impact_parameter(M) / M - 0.15,
-                      phys.critical_impact_parameter(M) / M + 2.2)
+        x_lo = phys.critical_impact_parameter(M) / M - 0.2
+        x_hi = phys.critical_impact_parameter(M) / M + 2.4
+        if peaks:
+            finite = [p / M for p in peaks if p is not None]
+            if finite:
+                x_lo = min(x_lo, min(finite) - 0.4)
+                x_hi = max(x_hi, max(finite) + 0.6)
+                for p in finite:
+                    ax_r.axvline(p, color="0.7", ls="--", lw=0.7)
+        ax_r.set_xlim(x_lo, x_hi)
         ax_r.set_xlabel(r"$b/M$")
         ax_r.set_ylabel(r"$I_m(b)$  (pointwise)")
-        ax_r.set_title("Radial profile (adaptive table). Narrow peaks may miss a pixel centre.")
+        ax_r.set_title(
+            "Radial I(b) from the source-aware table. "
+            "Narrow peaks may miss a pixel centre."
+        )
         ax_r.legend(loc="upper right", fontsize=8)
     fig.suptitle(
         r"Beat 5 · Point-sampled face-on image  "
         r"$I_{\mathrm{obs}}\approx\sum_{m=1}^{4} g^4 I_{\mathrm{em}}$"
-        "  (static emitters; m>=5 omitted)",
+        r"  (static emitters; m>=5 omitted)",
         fontsize=11,
     )
     fig.tight_layout(rect=[0, 0.03, 1, 0.92])
@@ -529,9 +541,13 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
         "M": repr(M),
         "r_hot": repr(r_hot),
         "r_hot_over_M": repr(r_hot / M),
-        "b_hot": "None" if b_hot is None else repr(b_hot),
+        "b_m_over_M": repr(
+            None if peaks is None else
+            [None if p is None else p / M for p in peaks]
+        ),
         "width_over_M": repr(phys.HOT_RING_WIDTH_DEFAULT),
         "n_pix": str(bx.shape[0]),
+        "n_samples": "None" if sample is None else str(len(sample)),
         "fov_over_M": repr(fov_over_M),
         "I_obs": "sum_{m=1..4} g^4 I_em; m>=5 omitted",
         "pixel_contract": "point sample at pixel centre from adaptive I(b)",

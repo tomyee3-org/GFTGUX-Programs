@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.5.0"
+MODEL_VERSION = "0.6.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # m>=5 is omitted; the figure must say so.
@@ -40,6 +40,10 @@ MAX_IMAGE_M = 4
 # program; the copy exists so a BlackHoleShadow zip runs standalone.
 PHOTONORBIT_SYNC_VERSION = "1.4.0"
 
+# Tom's explicit intent: the live build id hashes only the four program
+# modules.  Help and tests are versioned separately and are not part of
+# BUILD_ID.  Changing BlackHoleShadow.html or the suite must not rewrite
+# the student-facing build stamp.
 BUILD_ID_COVERS = (
     "physics_bhs.py",
     "driver_bhs.py",
@@ -722,31 +726,38 @@ def _R_of_u(u, b, M):
     return 1.0 / (b * b) - u * u + 2.0 * M * u * u * u
 
 
+def _R_hat(x, beta):
+    """Dimensionless first integral: x = M u, beta = b/M."""
+    return 1.0 / (beta * beta) - x * x + 2.0 * x * x * x
+
+
 def _phi_integral(u_lo, u_hi, b, M, n=1024):
-    """∫_{u_lo}^{u_hi} du / sqrt(R(u)), R>=0 on the open interval."""
-    u_lo = float(u_lo)
-    u_hi = float(u_hi)
-    if u_hi < u_lo:
-        u_lo, u_hi = u_hi, u_lo
-    if u_hi <= u_lo:
+    """∫ du / sqrt(R) computed in scale-free (x, beta) variables."""
+    M = float(M)
+    beta = float(b) / M
+    x_lo = M * float(u_lo)
+    x_hi = M * float(u_hi)
+    if x_hi < x_lo:
+        x_lo, x_hi = x_hi, x_lo
+    if x_hi <= x_lo:
         return 0.0
     n = max(int(n), 256)
-    R_hi = float(_R_of_u(u_hi, b, M))
-    if R_hi > 1.0e-10:
-        u = np.linspace(u_lo, u_hi, n)
-        rad = np.maximum(_R_of_u(u, b, M), 0.0)
-        inv = np.zeros_like(u)
+    R_hi = float(_R_hat(x_hi, beta))
+    if R_hi > 1.0e-14:
+        x = np.linspace(x_lo, x_hi, n)
+        rad = np.maximum(_R_hat(x, beta), 0.0)
+        inv = np.zeros_like(x)
         safe = rad > 0.0
         inv[safe] = 1.0 / np.sqrt(rad[safe])
-        return float(np.trapezoid(inv, u))
-    span = u_hi - u_lo
-    t = np.linspace(0.0, math.sqrt(span), n)
-    u = u_hi - t * t
-    rad = np.maximum(_R_of_u(u, b, M), 0.0)
+        return float(np.trapezoid(inv, x))
+    span = x_hi - x_lo
+    t = np.linspace(0.0, math.sqrt(max(span, 0.0)), n)
+    x = x_hi - t * t
+    rad = np.maximum(_R_hat(x, beta), 0.0)
     piece = np.zeros_like(t)
     safe = rad > 0.0
     piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
-    dR = -2.0 * u_hi + 6.0 * M * u_hi * u_hi
+    dR = -2.0 * x_hi + 6.0 * x_hi * x_hi
     if abs(dR) > 0.0:
         piece[0] = 2.0 / math.sqrt(abs(dR))
     return float(np.trapezoid(piece, t))
@@ -800,10 +811,7 @@ def face_on_crossing_radii(b, M, max_m=4):
         # of z=0 at φ=π/2 in this construction.
         return [None] * max_m
     b_crit = critical_impact_parameter(M)
-    r_ph = photon_sphere(M)
-    if abs(b - b_crit) <= 1.0e-8 * M:
-        # Critical ray: inbound from infinity toward r=3M, never
-        # reaching it.  Every finite target angle has a root r>3M.
+    if math.isclose(b, b_crit, rel_tol=0.0, abs_tol=4.0 * math.ulp(b_crit)):
         return _critical_crossing_radii(M, max_m)
     captured = b < b_crit
     u_end = _max_inbound_u(b, M)
@@ -845,25 +853,41 @@ def _invert_phi_inbound(target_phi, b, M, u_end):
     return 0.5 * (lo + hi)
 
 
+_ATANH_ONE_OVER_SQRT3 = math.atanh(1.0 / math.sqrt(3.0))
+
+
+def critical_phi_of_x(x):
+    """Analytic inbound φ(x) on the exact critical geodesic.  x=M/r."""
+    inside = 2.0 * float(x) + 1.0 / 3.0
+    if inside <= 0.0:
+        return 0.0
+    if inside >= 1.0:
+        return float("inf")
+    return 2.0 * (math.atanh(math.sqrt(inside)) - _ATANH_ONE_OVER_SQRT3)
+
+
+def critical_x_of_phi(phi):
+    """Invert critical_phi_of_x.  Returns x=M/r in (0, 1/3)."""
+    if phi <= 0.0:
+        return 0.0
+    a = math.tanh(0.5 * float(phi) + _ATANH_ONE_OVER_SQRT3)
+    return max(0.5 * (a * a - 1.0 / 3.0), 0.0)
+
+
 def _critical_crossing_radii(M, max_m):
     """Finite-angle crossings of the exact critical geodesic.
 
-    Endpoint u = 1/(3M) is a double root of R(u); the ray approaches
-    the photon sphere from above and never plunges.  Invert each
-    target angle on u in (0, 1/(3M)).
+    Closed form from R(x)=2(x-1/3)^2(x+1/6) on beta=3√3:
+    φ(x)=2[atanh(√(2x+1/3))−atanh(1/√3)].
     """
-    u_ph = 1.0 / photon_sphere(M)
-    b = critical_impact_parameter(M)
-    # Stay off the singular endpoint; phi -> inf as u -> u_ph.
-    u_end = u_ph * (1.0 - 1.0e-10)
+    M = float(M)
     radii = []
     for m in range(1, max_m + 1):
-        target = face_on_crossing_angle(m)
-        u = _invert_phi_inbound(target, b, M, u_end)
-        if u is None or u <= 0.0:
-            radii.append(photon_sphere(M) * (1.0 + 1.0e-8))
+        x = critical_x_of_phi(face_on_crossing_angle(m))
+        if x <= 0.0 or x >= 1.0 / 3.0:
+            radii.append(None)
         else:
-            radii.append(1.0 / u)
+            radii.append(M / x)
     return radii
 
 
@@ -1012,8 +1036,28 @@ def _bisect_source_root(b_lo, b_hi, M, m, r_hot):
     return 0.5 * (lo + hi)
 
 
+def source_aware_impact_samples(M, b_max, r_hot, width, max_m=4):
+    """b nodes clustered at b_crit and at every source-image root."""
+    M = _require_positive("M", M)
+    chunks = [adaptive_impact_samples(M, b_max)]
+    roots = [
+        float(bp) for bp in source_crossing_impacts(M, r_hot, max_m=max_m)
+        if bp is not None and bp > 0.0 and bp <= b_max * 1.05
+    ]
+    if roots:
+        chunks.append(np.asarray(roots, dtype=float))
+        span = max((width / M) if width else 0.05, 0.05)
+        log_off = np.logspace(-6.0, math.log10(span), 28) * M
+        near = np.concatenate(
+            [np.concatenate([bp - log_off[::-1], bp + log_off]) for bp in roots]
+        )
+        near = near[(near > 0.0) & (near <= b_max * 1.05)]
+        chunks.append(near)
+    return np.sort(np.unique(np.concatenate(chunks)))
+
+
 def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
-    """Adaptive (b, I_m) table.  Components computed once."""
+    """Source-aware (b, I_m) table.  Components computed once."""
     M = _require_positive("M", M)
     if max_m is None:
         max_m = MAX_IMAGE_M
@@ -1021,7 +1065,7 @@ def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
         r_hot = HOT_RING_R_DEFAULT * M
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
-    sample = adaptive_impact_samples(M, b_max)
+    sample = source_aware_impact_samples(M, b_max, r_hot, width, max_m=max_m)
     parts = np.zeros((sample.size, max_m))
     for i, bv in enumerate(sample):
         comp, _ = observed_components(
@@ -1032,12 +1076,12 @@ def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
 
 
 def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
-    """Return (I_direct, I_upto2, I_total, sample, parts, b_hot).
+    """Return (I_direct, I_upto2, I_total, sample, parts, peaks).
 
     Each camera pixel is a point sample of I_obs at the pixel-centre
-    impact parameter, interpolated from the adaptive radial table.
+    impact parameter, interpolated from a source-aware radial table.
     Features narrower than the raster may miss every centre; the
-    radial I(b) table is the honest record of those peaks.
+    radial I(b) table is the record of those peaks.
     """
     M = _require_positive("M", M)
     if max_m is None:
@@ -1054,7 +1098,8 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
     bx = np.asarray(bx, dtype=float)
     by = np.asarray(by, dtype=float)
     b = np.hypot(bx, by)
-    b_max = float(np.max(b)) if b.size else 8.0 * M
+    b_pix = float(np.max(b)) if b.size else 0.0
+    b_max = max(b_pix, 1.25 * r_hot, 2.0 * critical_impact_parameter(M))
     sample, parts = intensity_table(
         M, b_max, r_hot=r_hot, width=width, max_m=max_m,
     )
@@ -1065,25 +1110,23 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
     img1 = cols[0]
     img2 = cols[0] + (cols[1] if max_m > 1 else 0.0)
     img_all = sum(cols)
-    try:
-        b_hot = impact_parameter_of_periapsis(r_hot, M)
-    except ValueError:
-        b_hot = float("nan")
-    return img1, img2, img_all, sample, parts, b_hot
+    peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
+    return img1, img2, img_all, sample, parts, peaks
 
 
 def disk_image(bx, by, M, r_hot=None, width=None, max_m=None, upto=None):
     """Face-on optically thin image.  Wrapper around disk_image_components."""
     if max_m is None:
         max_m = MAX_IMAGE_M
-    img1, img2, img_all, sample, parts, b_hot = disk_image_components(
+    img1, img2, img_all, sample, parts, peaks = disk_image_components(
         bx, by, M, r_hot=r_hot, width=width, max_m=max_m,
     )
+    marker = peaks[0] if peaks and peaks[0] is not None else float("nan")
     if upto == 1:
-        return img1, b_hot
+        return img1, marker
     if upto == 2:
-        return img2, b_hot
-    return img_all, b_hot
+        return img2, marker
+    return img_all, marker
 
 
 def odd_n_pix(n_pix):

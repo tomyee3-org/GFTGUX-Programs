@@ -300,29 +300,42 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
         M, fov_M, n_pix, extra_radius_over_M=extra,
     )
     bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
-    img1, img2, img3, sample, parts, b_hot = phys.disk_image_components(
+    img1, img2, img3, sample, parts, peaks = phys.disk_image_components(
         bx, by, M, r_hot=r_hot_abs,
     )
     photon_inc = float((img3 - img2).max())
+    peak_txt = ", ".join(
+        "—" if p is None else f"{p / M:.5g}" for p in peaks
+    )
+    g4 = (1.0 - 2.0 / r_hot_over_M) ** 2
+    t34 = float((parts[:, 2] + parts[:, 3]).max()) if parts.shape[1] > 3 else 0.0
+    t2 = float(parts[:, 1].max()) if parts.shape[1] > 1 else 0.0
+    note = []
+    if float(img2.max()) > float(img1.max()) * 1.02:
+        note.append(
+            f"lensed raster peak exceeds direct "
+            f"({float(img2.max()):.3g} vs {float(img1.max()):.3g})"
+        )
     _print_summary("image", [
         f"M                      : {M:.6g}",
         f"r_hot                  : {r_hot_over_M:.6g} M",
         f"I_em width             : {phys.HOT_RING_WIDTH_DEFAULT:.6g} M",
-        f"b_hot (periapsis) / M  : {b_hot / M:.6g}",
+        f"g^4 at r_hot           : {g4:.6g}",
+        f"b_m(r_m=r_hot)/M       : {peak_txt}",
         f"n_pix x n_pix          : {n_pix} x {n_pix}",
         f"fov                    : {fov_M:.6g} M",
-        f"adaptive I(b) samples  : {sample.size}",
+        f"I(b) sample count      : {sample.size}",
+        f"max table I_2 / I_3+4  : {t2:.4g} / {t34:.4g}",
         f"max raster m>=3 increment : {photon_inc:.4g}",
-        f"max table I_3+I_4         : {float((parts[:, 2] + parts[:, 3]).max()) if parts.shape[1] > 3 else 0.0:.4g}",
         "Pixels are point samples at cell centres.  Narrow m=3,4",
         "peaks live in the radial I(b) panel; they may miss a centre.",
         "I_obs ≈ sum_{m=1..4} g^4 I_em;  m>=5 omitted.",
         "g=sqrt(1-2M/r) for static emitters (no orbital Doppler).",
         "A captured backward ray crosses the horizon; it may hit",
         "the disk first.  The integrator stops at r=2M.",
-    ])
+    ] + note)
     return plotting.plot_image(
-        bx, by, img1, img2, img3, M=M, r_hot=r_hot_abs, b_hot=b_hot,
+        bx, by, img1, img2, img3, M=M, r_hot=r_hot_abs, peaks=peaks,
         fov_over_M=fov_M, sample=sample, parts=parts,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )

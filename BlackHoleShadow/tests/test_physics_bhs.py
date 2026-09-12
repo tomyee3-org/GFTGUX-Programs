@@ -22,6 +22,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-12  Grok.  Response to Audit4.  Version 0.5.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit4-2026091204.txt
+
+  2026-09-12  Grok.  Response to Audit5.  Version 0.6.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit5-2026091207.txt
 """
 
 from __future__ import annotations
@@ -323,11 +326,18 @@ class TestDiskImage(unittest.TestCase):
         b = phys.critical_impact_parameter(1.0)
         rs = phys.face_on_crossing_radii(b, 1.0, max_m=4)
         self.assertTrue(all(r > 3.0 for r in rs))
-        self.assertAlmostEqual(rs[0], 4.28492, places=3)
-        self.assertAlmostEqual(rs[1], 3.04375, places=3)
+        self.assertAlmostEqual(rs[0], 4.28492065, places=6)
+        self.assertAlmostEqual(rs[1], 3.04374815, places=6)
+        self.assertAlmostEqual(rs[2], 3.00187312, places=6)
+        self.assertAlmostEqual(rs[3], 3.00008091, places=6)
         self.assertGreater(rs[0], rs[1])
         self.assertGreater(rs[1], rs[2])
         self.assertGreater(rs[2], rs[3])
+        # Nearby captured/escaping rays keep their own geometry.
+        below = phys.face_on_crossing_radii(b - 1.0e-6, 1.0, max_m=2)
+        above = phys.face_on_crossing_radii(b + 1.0e-6, 1.0, max_m=2)
+        self.assertAlmostEqual(below[0], rs[0], places=4)
+        self.assertAlmostEqual(above[0], rs[0], places=4)
 
     def test_source_roots_for_default_annulus(self):
         peaks = phys.source_crossing_impacts(1.0, 6.0, max_m=4)
@@ -343,10 +353,18 @@ class TestDiskImage(unittest.TestCase):
             self.assertGreater(n3, 10, msg=f"fov={fov} n3={n3}")
 
     def test_table_photon_peak_is_physical(self):
-        _, parts = phys.intensity_table(1.0, 10.0)
-        peak = float((parts[:, 2] + parts[:, 3]).max())
-        self.assertGreater(peak, 0.2)
-        self.assertLess(peak, 0.5)
+        g4 = (1.0 - 2.0 / 6.0) ** 2
+        _, parts = phys.intensity_table(1.0, 12.0, r_hot=6.0)
+        for m in range(4):
+            self.assertAlmostEqual(float(parts[:, m].max()), g4, delta=0.02)
+
+    def test_table_resolves_documented_r_hot_8(self):
+        g4 = (1.0 - 2.0 / 8.0) ** 2
+        _, parts = phys.intensity_table(1.0, 16.0, r_hot=8.0)
+        for m in range(4):
+            self.assertAlmostEqual(
+                float(parts[:, m].max()), g4, delta=0.03, msg=f"m={m+1}",
+            )
 
     def test_raster_cannot_exceed_table_peak(self):
         bx, by, _, _ = phys.make_impact_grid(41, 16.8, 1.0)
@@ -428,6 +446,8 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn('id="version_build"', text)
         self.assertIn(phys.MODEL_VERSION, text)
         self.assertIn(phys.BUILD_ID, text)
+        self.assertIn(r"\sum_{m=1}^{4}", text)
+        self.assertIn("pixel centre", text)
 
     def test_cli_rejects_camera_inside_photon_sphere(self):
         result = run_cli(["--mode", "rays", "--r_cam", "2.5"])
@@ -460,6 +480,13 @@ class TestScaleInvariance(unittest.TestCase):
         for frac in fractions[1:]:
             self.assertAlmostEqual(frac, fractions[0], places=10)
 
+    def test_crossings_are_scale_free(self):
+        ref = phys.face_on_crossing_radii(5.3, 1.0, max_m=2)
+        for M in (1.0e-6, 1.0, 1.0e6):
+            got = phys.face_on_crossing_radii(5.3 * M, M, max_m=2)
+            self.assertAlmostEqual(got[0] / M, ref[0], places=5)
+            self.assertAlmostEqual(got[1] / M, ref[1], places=5)
+
     def test_resolved_shadow_is_M_invariant(self):
         a = phys.require_resolved_shadow(1.0, 16.0, 81)
         b = phys.require_resolved_shadow(7.0, 16.0, 81)
@@ -473,6 +500,8 @@ class TestScaleInvariance(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, msg=result.stderr)
                 pngs = list(Path(tmp).glob("*.png"))
                 self.assertTrue(pngs)
+                sides = list(Path(tmp).glob("*.provenance.txt"))
+                self.assertTrue(sides)
 
     def test_undersized_fov_is_expanded_not_blank(self):
         fov_eff, need = phys.contained_fov(6.0, 1.0)

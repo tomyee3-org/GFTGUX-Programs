@@ -69,16 +69,17 @@ def parse_args():
                    help="RK4 step in units of M")
 
     g = p.add_argument_group("Camera grid")
-    g.add_argument("--n_pix", type=int, default=None, metavar="N",
+    g.add_argument("--n_pix", type=int, default=argparse.SUPPRESS, metavar="N",
                    help="pixels along one side; even values become the next odd. "
                         "Default 161 except pixels mode "
                         f"({physics_bhs.PIXELS_N_PIX_DEFAULT}, cap "
-                        f"{physics_bhs.PIXELS_N_PIX_MAX})")
+                        f"{physics_bhs.PIXELS_N_PIX_MAX}). "
+                        "Ignored by transfer (uses a source-aware b table).")
     g.add_argument("--fov", type=float, default=16.0, metavar="M",
                    help="field of view on a side, in units of M")
 
     g = p.add_argument_group("Source and compare")
-    g.add_argument("--r_hot", type=float, default=None, metavar="M",
+    g.add_argument("--r_hot", type=float, default=argparse.SUPPRESS, metavar="M",
                    help="emitted-annulus radius for transfer/image, in units of M "
                         f"(default {physics_bhs.HOT_RING_R_DEFAULT:g})")
     g.add_argument("--inclination", type=float, default=0.0, metavar="DEG",
@@ -95,7 +96,12 @@ def parse_args():
                    help="open the figure on screen (no-op under MPLBACKEND=Agg)")
     p.add_argument("--sync-help", action="store_true",
                    help="write MODEL_VERSION and BUILD_ID into the Help file")
-    return p.parse_args()
+    args = p.parse_args()
+    if not hasattr(args, "n_pix"):
+        args.n_pix = None
+    if not hasattr(args, "r_hot"):
+        args.r_hot = None
+    return args
 
 
 def _validate_args(args):
