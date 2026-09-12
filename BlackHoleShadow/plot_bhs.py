@@ -88,6 +88,7 @@ def _draw_bcrit(ax, M, lw=2.0):
 
 def plot_rays(traj_in, traj_out, M=1.0, r_cam=40.0, b_in=5.0, b_out=6.0,
               lambda_max=200.0, d_lambda=0.02,
+              lambda_max_over_M=None, d_lambda_over_M=None,
               outdir=None, dpi=140, show=True):
     xs_in, ys_in, info_in = traj_in
     xs_out, ys_out, info_out = traj_out
@@ -120,6 +121,8 @@ def plot_rays(traj_in, traj_out, M=1.0, r_cam=40.0, b_in=5.0, b_out=6.0,
         "b_out": repr(b_out),
         "lambda_max": repr(lambda_max),
         "d_lambda": repr(d_lambda),
+        "lambda_max_over_M": repr(lambda_max / M if lambda_max_over_M is None else lambda_max_over_M),
+        "d_lambda_over_M": repr(d_lambda / M if d_lambda_over_M is None else d_lambda_over_M),
         "status_in": info_in["status"],
         "status_out": info_out["status"],
         "delta_phi_in": repr(info_in["delta_phi"]),
@@ -144,10 +147,18 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
     _draw_bcrit(ax, M, lw=1.4)
     status_in = "captured" if phys.is_captured(b_in, M) else "escaped"
     status_out = "captured" if phys.is_captured(b_out, M) else "escaped"
-    ax.plot([b_in / M], [0.0], marker="o", color="#c1121f", ms=8, zorder=5,
-            label=rf"$b={b_in / M:g}\,M$ ({status_in})")
-    ax.plot([b_out / M], [0.0], marker="o", color="#0077b6", ms=8, zorder=5,
-            label=rf"$b={b_out / M:g}\,M$ ({status_out})")
+    axis = np.asarray(bx[0, :], dtype=float)
+    def _snap(b_abs):
+        j = int(np.argmin(np.abs(axis - b_abs)))
+        return float(axis[j]), j
+    cin, jin = _snap(b_in)
+    cout, jout = _snap(b_out)
+    ax.plot([cin / M], [0.0], marker="s", color="#c1121f", ms=9, zorder=5,
+            label=rf"cell $b={cin / M:g}\,M$ ({status_in})")
+    ax.plot([cout / M], [0.0], marker="s", color="#0077b6", ms=9, zorder=5,
+            label=rf"cell $b={cout / M:g}\,M$ ({status_out})")
+    ax.plot([b_in / M], [0.0], marker="o", color="#c1121f", ms=4, zorder=6)
+    ax.plot([b_out / M], [0.0], marker="o", color="#0077b6", ms=4, zorder=6)
     ax.set_aspect("equal")
     ax.set_xlabel(r"$b_x/M$")
     ax.set_ylabel(r"$b_y/M$")
@@ -162,9 +173,11 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
         "The left panel is a coarse camera.\n"
         "Each cell is one conserved impact\n"
         "parameter $(b_x,b_y)$.\n\n"
-        f"$b={b_in / M:g}\\,M$ is {status_in}\n"
+        f"requested $b={b_in / M:g}\\,M$ sits in the\n"
+        f"cell centred at ${cin / M:g}\\,M$ ({status_in})\n"
         f"relative to $b_\\mathrm{{crit}}={b_crit / M:.4g}\\,M$.\n\n"
-        f"$b={b_out / M:g}\\,M$ is {status_out}.\n\n"
+        f"requested $b={b_out / M:g}\\,M$ sits in the\n"
+        f"cell centred at ${cout / M:g}\\,M$ ({status_out}).\n\n"
         "PhotonOrbit already classified single rays.\n"
         "The new object is the camera map."
     )
@@ -181,6 +194,8 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
         "fov_over_M": repr(fov_over_M),
         "status_in": status_in,
         "status_out": status_out,
+        "cell_center_in": repr(cin),
+        "cell_center_out": repr(cout),
     })
     if show:
         plt.show()
@@ -270,7 +285,7 @@ def plot_radii(bx, by, captured, M=1.0, fov_over_M=16.0,
     ax.set_ylim(-4.2, 4.2)
     ax.set_xlabel(r"coordinate $x/M$")
     ax.set_ylabel(r"coordinate $y/M$")
-    ax.set_title("Spacetime diagram")
+    ax.set_title("Schwarzschild coordinate-radius cross-section")
     ax.legend(loc="upper right", fontsize=8)
 
     ax = axes[1]
@@ -281,7 +296,7 @@ def plot_radii(bx, by, captured, M=1.0, fov_over_M=16.0,
     ax.set_aspect("equal")
     ax.set_xlabel(r"$b_x/M$")
     ax.set_ylabel(r"$b_y/M$")
-    ax.set_title("Image plane (what a camera records)")
+    ax.set_title("Image plane (critical curve of a distant camera)")
     ax.legend(loc="upper right", fontsize=8)
 
     fig.suptitle("Beat 4 · Coordinate radii are not image-plane radii",
@@ -422,6 +437,7 @@ def plot_backlight(bx, by, image, M=1.0, r_hot=6.0, b_hot=None,
             color="white", va="bottom")
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "backlight", dpi, provenance={
+        "_deprecated": "use mode image",
         "mode": "backlight",
         "M": repr(M),
         "r_hot": repr(r_hot),
@@ -433,6 +449,83 @@ def plot_backlight(bx, by, image, M=1.0, r_hot=6.0, b_hot=None,
         "fov_over_M": repr(fov_over_M),
         "false_colour": "inferno display scale; not a spectrum",
         "note": "schematic periapsis overlay, not a disk or EHT image",
+    })
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig, saved
+
+
+def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0, fov_over_M=16.0,
+                  outdir=None, dpi=140, show=True):
+    fig, ax = plt.subplots(figsize=(7.6, 5.4))
+    colors = ("#0077b6", "#c9a227", "#c1121f")
+    labels = (r"$r_1/M$ (direct)", r"$r_2/M$ (lensing)", r"$r_3/M$ (photon ring)")
+    for m in range(table.shape[1]):
+        y = table[:, m]
+        ax.plot(bs / M, y, color=colors[m % 3], lw=1.8, label=labels[m])
+    ax.axvline(phys.critical_impact_parameter(M) / M, color=C_BC, ls=":",
+               label=r"$b_{\rm crit}$")
+    ax.axhline(3.0, color=C_PH, ls="--", lw=1.0, label=r"$r_{\rm ph}=3M$")
+    ax.axhline(r_hot_over_M, color="0.4", ls="-.", lw=1.0,
+               label=rf"$r_{{\rm hot}}={r_hot_over_M:g}M$")
+    ax.set_xlabel(r"$b/M$")
+    ax.set_ylabel(r"crossing radius $r_m/M$")
+    ax.set_title("Beat 4 · Face-on transfer functions $r_m(b)$")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.set_ylim(2.0, max(12.0, r_hot_over_M + 4.0))
+    fig.tight_layout(rect=[0, 0.03, 1, 1])
+    saved = _finish(fig, outdir, "transfer", dpi, provenance={
+        "mode": "transfer",
+        "M": repr(M),
+        "r_hot_over_M": repr(r_hot_over_M),
+        "fov_over_M": repr(fov_over_M),
+        "n_samples": str(len(bs)),
+        "max_m": str(table.shape[1]),
+        "note": "face-on equatorial crossings; optically thin source later",
+    })
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return fig, saved
+
+
+def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
+               fov_over_M=16.0, outdir=None, dpi=140, show=True):
+    fig, axes = plt.subplots(1, 3, figsize=(12.6, 4.4))
+    extent = _extent_over_M(bx, by, M)
+    vmax = max(float(np.max(img3)), 1.0e-12)
+    titles = (
+        "direct ($m=1$)",
+        "+ lensing (m <= 2)",
+        "+ photon ring (m >= 3)",
+    )
+    for ax, img, title in zip(axes, (img1, img2, img3), titles):
+        ax.imshow(img, origin="lower", cmap="inferno",
+                  extent=extent, vmin=0.0, vmax=vmax)
+        _draw_bcrit(ax, M, lw=1.1)
+        ax.set_aspect("equal")
+        ax.set_xlabel(r"$b_x/M$")
+        ax.set_title(title, fontsize=10)
+    axes[0].set_ylabel(r"$b_y/M$")
+    fig.suptitle("Face-on optically thin image  ·  "
+                 r"$I_{\mathrm{obs}}=\sum_m g(r_m)^4 I_{\mathrm{em}}(r_m)$",
+                 fontsize=12)
+    fig.tight_layout(rect=[0, 0.03, 1, 0.90])
+    saved = _finish(fig, outdir, "image", dpi, provenance={
+        "mode": "image",
+        "M": repr(M),
+        "r_hot": repr(r_hot),
+        "r_hot_over_M": repr(r_hot / M),
+        "b_hot": "None" if b_hot is None else repr(b_hot),
+        "width_over_M": repr(phys.HOT_RING_WIDTH_DEFAULT),
+        "n_pix": str(bx.shape[0]),
+        "fov_over_M": repr(fov_over_M),
+        "I_obs": "sum g^4 I_em over face-on equatorial crossings",
+        "false_colour": "inferno display scale; not a spectrum",
+        "inclination": "0 (face-on only)",
     })
     if show:
         plt.show()

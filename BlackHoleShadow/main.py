@@ -3,17 +3,18 @@ main.py
 =======
 Command-line entry point for BlackHoleShadow.
 
-Eight calculations share one program, chosen with --mode, and they follow
+Nine calculations share one program, chosen with --mode, and they follow
 the teaching beats in the Help file:
 
     rays       two PhotonOrbit-class geodesics
     pixels     two impact parameters on a coarse camera grid
     capture    geometric capture map (the shadow)
     ring       high-winding-ray overlay on that critical curve
-    radii      spacetime radii versus the image-plane critical curve
+    transfer   face-on equatorial crossing radii r_m(b)
+    image      optically thin face-on image (direct / +lensing / total)
+    radii      coordinate radii versus the image-plane critical curve
     weak       exact deflection versus the weak-field 4M/b formula
     compare    a galaxy Einstein radius versus this hole's b_crit
-    backlight  schematic periapsis overlay (false colour)
 
 Length flags (--r_cam, --b_in, --b_out, --fov, --r_hot) are in units of M.
 
@@ -61,10 +62,10 @@ def parse_args():
                    help="first impact parameter in units of M")
     g.add_argument("--b_out", type=float, default=6.0, metavar="M",
                    help="second impact parameter in units of M")
-    g.add_argument("--lambda_max", type=float, default=200.0, metavar="LAMBDA",
-                   help="maximum affine parameter for ray integrations")
-    g.add_argument("--d_lambda", type=float, default=0.02, metavar="LAMBDA",
-                   help="RK4 step for ray integrations")
+    g.add_argument("--lambda_max", type=float, default=200.0, metavar="M",
+                   help="maximum affine parameter in units of M")
+    g.add_argument("--d_lambda", type=float, default=0.02, metavar="M",
+                   help="RK4 step in units of M")
 
     g = p.add_argument_group("Camera grid")
     g.add_argument("--n_pix", type=int, default=161, metavar="N",
@@ -155,25 +156,29 @@ def main():
                 r_cam=args.r_cam, b_in=args.b_in, b_out=args.b_out,
                 lambda_max=args.lambda_max, d_lambda=args.d_lambda, **common)
         elif args.mode == "pixels":
-            n_use = min(int(args.n_pix), physics_bhs.PIXELS_N_PIX_MAX)
+            requested = int(args.n_pix)
+            n_use = (physics_bhs.PIXELS_N_PIX_DEFAULT if requested == 161
+                     else min(requested, physics_bhs.PIXELS_N_PIX_MAX))
             driver_bhs.run_pixels(
                 b_in=args.b_in, b_out=args.b_out,
-                n_pix=n_use, n_pix_requested=args.n_pix,
+                n_pix=n_use, n_pix_requested=requested,
                 fov_M=args.fov, **common)
         elif args.mode == "capture":
             driver_bhs.run_capture(n_pix=args.n_pix, fov_M=args.fov, **common)
         elif args.mode == "ring":
             driver_bhs.run_ring(n_pix=args.n_pix, fov_M=args.fov, **common)
+        elif args.mode == "transfer":
+            driver_bhs.run_transfer(
+                n_pix=args.n_pix, fov_M=args.fov, r_hot=args.r_hot, **common)
+        elif args.mode == "image":
+            driver_bhs.run_image(
+                n_pix=args.n_pix, fov_M=args.fov, r_hot=args.r_hot, **common)
         elif args.mode == "radii":
             driver_bhs.run_radii(n_pix=args.n_pix, fov_M=args.fov, **common)
         elif args.mode == "weak":
             driver_bhs.run_weak(**common)
         elif args.mode == "compare":
             driver_bhs.run_compare(logM=args.logM, **common)
-        elif args.mode == "backlight":
-            driver_bhs.run_backlight(
-                n_pix=args.n_pix, fov_M=args.fov, r_hot=args.r_hot,
-                inclination=args.inclination, **common)
     except (ValueError, RuntimeError, OSError, OverflowError,
             ZeroDivisionError) as exc:
         raise SystemExit(f"BlackHoleShadow: {exc}") from exc

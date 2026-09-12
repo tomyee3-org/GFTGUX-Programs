@@ -17,7 +17,8 @@ import os
 import physics_bhs as phys
 import plot_bhs as plotting
 
-MODES = ("rays", "pixels", "capture", "ring", "radii", "weak", "compare", "backlight")
+MODES = ("rays", "pixels", "capture", "ring", "transfer", "image",
+         "radii", "weak", "compare")
 
 
 def _show_wanted(show, interactive):
@@ -58,16 +59,22 @@ def run_rays(M=1.0, r_cam=None, b_in=5.0, b_out=6.0,
     """Beat 0: two PhotonOrbit-class rays."""
     (M, r_cam_over_M, r_cam_abs, b_in_over_M, b_in_abs,
      b_out_over_M, b_out_abs) = _ratios_to_abs(M, r_cam, b_in, b_out)
+    lam_over_M = phys.validate_user_value("lambda_max", lambda_max, positive=True)
+    dlam_over_M = phys.validate_user_value("d_lambda", d_lambda, positive=True)
+    lam_abs = phys.to_absolute_length(lam_over_M, M, "lambda_max")
+    dlam_abs = phys.to_absolute_length(dlam_over_M, M, "d_lambda")
     info_in = phys.integrate_photon_orbit(M, r_cam_abs, b_in_abs,
-                                          lambda_max, d_lambda)
+                                          lam_abs, dlam_abs)
     info_out = phys.integrate_photon_orbit(M, r_cam_abs, b_out_abs,
-                                           lambda_max, d_lambda)
+                                           lam_abs, dlam_abs)
     _print_summary("rays", [
         f"M                      : {M:.6g}",
         f"r_cam                  : {r_cam_over_M:.6g} M  ({r_cam_abs:.6g})",
         f"b_in / M               : {b_in_over_M:.6g}  -> {info_in[2]['status']}",
         f"b_out / M              : {b_out_over_M:.6g}  -> {info_out[2]['status']}",
         f"b_crit / M             : {phys.critical_impact_parameter(M) / M:.6g}",
+        f"lambda_max / M         : {lam_over_M:.6g}",
+        f"d_lambda / M           : {dlam_over_M:.6g}",
         f"Delta phi in / out     : {info_in[2]['delta_phi']:.6g} / "
         f"{info_out[2]['delta_phi']:.6g} rad",
         "Delta phi is accumulated azimuth to a finite stopping surface,",
@@ -76,7 +83,8 @@ def run_rays(M=1.0, r_cam=None, b_in=5.0, b_out=6.0,
     return plotting.plot_rays(
         info_in, info_out, M=M, r_cam=r_cam_abs,
         b_in=b_in_abs, b_out=b_out_abs,
-        lambda_max=lambda_max, d_lambda=d_lambda,
+        lambda_max=lam_abs, d_lambda=dlam_abs,
+        lambda_max_over_M=lam_over_M, d_lambda_over_M=dlam_over_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
@@ -87,7 +95,7 @@ def run_pixels(M=1.0, b_in=5.0, b_out=6.0,
     """Beat 1: two impact parameters on a coarse camera grid."""
     M = phys.validate_user_value("M", M, positive=True)
     if n_pix is None:
-        n_pix = phys.PIXELS_N_PIX_MAX
+        n_pix = phys.PIXELS_N_PIX_DEFAULT
     n_pix = phys.odd_n_pix(n_pix)
     if n_pix > phys.PIXELS_N_PIX_MAX:
         n_pix = phys.odd_n_pix(phys.PIXELS_N_PIX_MAX)
@@ -127,7 +135,7 @@ def run_capture(M=1.0, n_pix=161, fov_M=16.0,
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
     phys.validate_user_value("fov", fov_M, positive=True)
-    phys.require_resolved_shadow(M, fov_M, n_pix)
+    fov_M, need, _ = phys.require_shadow_in_frame(M, fov_M, n_pix)
     bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     captured = phys.capture_map(bx, by, M)
     b_crit = phys.critical_impact_parameter(M)
@@ -137,8 +145,10 @@ def run_capture(M=1.0, n_pix=161, fov_M=16.0,
         f"r_s / M                : {phys.event_horizon(M) / M:.6g}",
         f"r_photon / M           : {phys.photon_sphere(M) / M:.6g}",
         f"n_pix x n_pix          : {n_pix} x {n_pix}",
-        f"fov                    : {fov_M:.6g} M",
+        f"fov                    : {fov_M:.6g} M  (min to contain shadow {need:.4g} M)",
         f"captured pixels        : {int(captured.sum())} / {captured.size}",
+        "Geometric capture map.  A distant spherical screen is assumed",
+        "when this dark disk is called a shadow.",
     ])
     return plotting.plot_capture(
         bx, by, captured, M=M, fov_over_M=fov_M,
@@ -151,7 +161,11 @@ def run_ring(M=1.0, n_pix=161, fov_M=16.0,
     """Beat 3: capture map plus a high-winding-ray overlay."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
-    b_lo, b_hi = phys.require_resolved_high_winding(M, fov_M, n_pix)
+    b_lo, b_hi = phys.high_winding_b_window(M)
+    extra = b_hi / M
+    fov_M, need, _ = phys.require_shadow_in_frame(M, fov_M, n_pix,
+                                                 extra_radius_over_M=extra)
+    phys.require_resolved_high_winding(M, fov_M, n_pix)
     bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     captured = phys.capture_map(bx, by, M)
     ring = phys.photon_ring_mask(bx, by, M)
@@ -174,7 +188,7 @@ def run_radii(M=1.0, n_pix=161, fov_M=16.0,
     """Beat 4: spacetime radii versus the image-plane critical curve."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
-    phys.require_resolved_shadow(M, fov_M, n_pix)
+    fov_M, need, _ = phys.require_shadow_in_frame(M, fov_M, n_pix)
     bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     captured = phys.capture_map(bx, by, M)
     _print_summary("radii", [
@@ -182,8 +196,8 @@ def run_radii(M=1.0, n_pix=161, fov_M=16.0,
         f"r_s / M                : {phys.event_horizon(M) / M:.6g}",
         f"r_photon / M           : {phys.photon_sphere(M) / M:.6g}",
         f"b_crit / M             : {phys.critical_impact_parameter(M) / M:.6g}",
-        "Left: coordinate radii in the spacetime diagram.",
-        "Right: the only circle a camera records is b_crit.",
+        "Left: Schwarzschild coordinate-radius cross-section.",
+        "Right: image-plane critical curve (the camera's capture rim).",
     ])
     return plotting.plot_radii(
         bx, by, captured, M=M, fov_over_M=fov_M,
@@ -235,36 +249,67 @@ def run_compare(M=1.0, logM=12.0,
     )
 
 
-def run_backlight(M=1.0, n_pix=161, fov_M=16.0,
-                  r_hot=None, inclination=0.0,
-                  outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 7: schematic turning-point backlight.  Not a disk image."""
+def run_transfer(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
+                 outdir=None, dpi=140, show=True, interactive=False):
+    """Beat 4: face-on transfer functions r_m(b)."""
+    M = phys.validate_user_value("M", M, positive=True)
+    if r_hot is None:
+        r_hot_over_M = phys.HOT_RING_R_DEFAULT
+    else:
+        r_hot_over_M = phys.validate_user_value("r_hot", r_hot, positive=True)
+    fov_M, need, _ = phys.require_shadow_in_frame(
+        M, fov_M, phys.odd_n_pix(n_pix), extra_radius_over_M=0.5 * fov_M,
+    )
+    bs, table, counts, b_crit = phys.transfer_curves(
+        M, b_max_over_M=0.5 * fov_M, n=81, max_m=3,
+    )
+    _print_summary("transfer", [
+        f"M                      : {M:.6g}",
+        f"r_hot                  : {r_hot_over_M:.6g} M",
+        f"b_crit / M             : {b_crit / M:.6g}",
+        "r_1(b) = first face-on equatorial crossing (direct image)",
+        "r_2(b) = second crossing (lensing ring)",
+        "r_3(b) = third crossing (photon-ring / subring)",
+        "Face-on, optically thin, no inclination.",
+    ])
+    return plotting.plot_transfer(
+        bs, table, counts, M=M, r_hot_over_M=r_hot_over_M, fov_over_M=fov_M,
+        outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
+    )
+
+
+def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
+              outdir=None, dpi=140, show=True, interactive=False):
+    """Beat 5-7: direct, +lensing, +photon-ring contributions."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
-    phys.require_resolved_shadow(M, fov_M, n_pix)
     if r_hot is None:
         r_hot_over_M = phys.HOT_RING_R_DEFAULT
     else:
         r_hot_over_M = phys.validate_user_value("r_hot", r_hot, positive=True)
     r_hot_abs = phys.to_absolute_length(r_hot_over_M, M, "r_hot")
-    inclination = phys.validate_user_value(
-        "inclination", inclination, min_value=0.0, max_value=90.0,
+    extra = max(r_hot_over_M * 1.4, phys.critical_impact_parameter(M) / M * 1.4)
+    fov_M, need, _ = phys.require_shadow_in_frame(
+        M, fov_M, n_pix, extra_radius_over_M=extra,
     )
     bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
-    image, b_hot = phys.backlight_image(
-        bx, by, M, r_hot=r_hot_abs, inclination_deg=inclination,
-    )
-    _print_summary("backlight", [
+    img1, b_hot = phys.disk_image(bx, by, M, r_hot=r_hot_abs, upto=1)
+    img2, _ = phys.disk_image(bx, by, M, r_hot=r_hot_abs, upto=2)
+    img3, _ = phys.disk_image(bx, by, M, r_hot=r_hot_abs, upto=None)
+    _print_summary("image", [
         f"M                      : {M:.6g}",
         f"r_hot                  : {r_hot_over_M:.6g} M",
-        f"b(periapsis=r_hot) / M : {b_hot / M:.6g}",
-        f"inclination            : {inclination:.6g} deg  (display shading)",
-        "Schematic overlay keyed to periapsis.  Not a disk, not EHT.",
-        "False colour is a display scale.  The shadow is not a rainbow.",
+        f"b_hot (periapsis) / M  : {b_hot / M:.6g}",
+        f"n_pix x n_pix          : {n_pix} x {n_pix}",
+        f"fov                    : {fov_M:.6g} M",
+        "I_obs = sum_m g(r_m)^4 I_em(r_m),  g=sqrt(1-2M/r).",
+        "Panels: direct | +lensing | +photon-ring.  Face-on, thin.",
+        "False colour is a display scale.  Captured rays can still shine",
+        "if they cross the disk before the horizon.",
     ])
-    return plotting.plot_backlight(
-        bx, by, image, M=M, r_hot=r_hot_abs, b_hot=b_hot,
-        inclination=inclination, fov_over_M=fov_M,
+    return plotting.plot_image(
+        bx, by, img1, img2, img3, M=M, r_hot=r_hot_abs, b_hot=b_hot,
+        fov_over_M=fov_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
@@ -274,10 +319,11 @@ RUNNERS = {
     "pixels": run_pixels,
     "capture": run_capture,
     "ring": run_ring,
+    "transfer": run_transfer,
+    "image": run_image,
     "radii": run_radii,
     "weak": run_weak,
     "compare": run_compare,
-    "backlight": run_backlight,
 }
 
 

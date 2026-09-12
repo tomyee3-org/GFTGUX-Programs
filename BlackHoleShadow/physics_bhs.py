@@ -28,7 +28,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.2.0"
+MODEL_VERSION = "0.3.0"
 
 # RK4 null-geodesic stepper is kept in lockstep with PhotonOrbit 1.4.0
 # (GFTGUX-Programs/PhotonOrbit).  This package does not import that
@@ -98,6 +98,10 @@ PHOTON_RING_R_WINDOW = 0.35
 
 # Coarse-camera cap for pixels mode.  Dense maps use --n_pix as given.
 PIXELS_N_PIX_MAX = 41
+PIXELS_N_PIX_DEFAULT = 17
+
+# Capture/ring maps must contain b_crit with this half-width margin.
+FOV_CONTAIN_MARGIN = 1.25
 
 # compare-mode log10(M/M_sun) teaching range.
 LOGM_MIN = 6.0
@@ -249,8 +253,8 @@ def asymptotic_deflection(b, M, n_u=800):
 
     Captured rays (b <= b_crit) have no scattering deflection; this
     function raises ValueError for them.  The integrand is integrable at
-    the turning point.  Near b_crit the result grows without bound — that
-    is the photon-ring winding, not a numerical bug.
+    the turning point.  Near b_crit the result grows without bound.  That strong-deflection
+    divergence permits higher-order images; it is not itself a photon ring.
     """
     b = _require_positive("b", b)
     M = _require_positive("M", M)
@@ -335,17 +339,38 @@ def rk4_step(r, v_r, phi, L, M, d_lambda):
 def integrate_photon_orbit(M, r0, b, lambda_max=200.0, d_lambda=0.02):
     """Initially ingoing equatorial null geodesic.  PhotonOrbit's ODE.
 
-    Affine parameter normalized so E = 1, L = b.  Returns (x, y, info)
-    with status in {'captured', 'escaped', 'lambda_max'}.
+    Affine parameter normalized so E = 1, L = b.  ``lambda_max`` and
+    ``d_lambda`` are absolute lengths in the same unit as M (so they
+    scale with M when the caller treats CLI flags as multiples of M).
+    The stepper itself runs in units of M, so the dimensionless
+    trajectory is independent of the numerical value of M.
+    Returns (x, y, info) with status in {'captured', 'escaped', 'lambda_max'}.
     """
     M = _require_positive("M", M)
     r0 = _require_finite("r0", r0)
     b = _require_finite("b", b)
     lambda_max = _require_positive("lambda_max", lambda_max)
     d_lambda = _require_positive("d_lambda", d_lambda)
-    r_s = event_horizon(M)
-    r_ph = photon_sphere(M)
-    b_crit = critical_impact_parameter(M)
+    xs_hat, ys_hat, info = _integrate_photon_orbit_hat(
+        r0 / M, b / M, lambda_max / M, d_lambda / M,
+    )
+    xs = [x * M for x in xs_hat]
+    ys = [y * M for y in ys_hat]
+    info["r_s"] = event_horizon(M)
+    info["r_photon"] = photon_sphere(M)
+    info["critical_b_infinity"] = critical_impact_parameter(M)
+    info["escape_radius"] = info["escape_radius_over_M"] * M
+    info["closest_approach"] = info["closest_approach_over_M"] * M
+    info["lambda_final"] = info["lambda_final_over_M"] * M
+    return xs, ys, info
+
+
+def _integrate_photon_orbit_hat(r0, b, lambda_max, d_lambda):
+    """Integrator in units of M (internal M = 1)."""
+    M = 1.0
+    r_s = 2.0
+    r_ph = 3.0
+    b_crit = 3.0 * math.sqrt(3.0)
     if r0 <= r_s:
         raise ValueError(
             f"--r_cam must be outside the event horizon "
@@ -430,14 +455,11 @@ def integrate_photon_orbit(M, r0, b, lambda_max=200.0, d_lambda=0.02):
         min_r = min(min_r, r)
     info = {
         "status": status,
-        "closest_approach": min_r,
+        "closest_approach_over_M": min_r,
         "delta_phi": phi,
-        "lambda_final": lambda_value,
+        "lambda_final_over_M": lambda_value,
         "steps": len(xs) - 1,
-        "r_s": r_s,
-        "r_photon": r_ph,
-        "critical_b_infinity": b_crit,
-        "escape_radius": escape_radius,
+        "escape_radius_over_M": escape_radius,
         "model_version": MODEL_VERSION,
         "build_id": BUILD_ID,
     }
@@ -516,6 +538,24 @@ def require_resolved_shadow(M, fov_over_M, n_pix):
             "visible.  Use a smaller --fov or a larger --n_pix."
         )
     return intervals
+
+
+def contained_fov(fov_over_M, M, extra_radius_over_M=0.0):
+    """Grow ``fov`` so the half-width contains b_crit (and any extra radius)."""
+    fov_over_M = _require_positive("fov", fov_over_M)
+    need_half = max(
+        FOV_CONTAIN_MARGIN * critical_impact_parameter(M) / M,
+        float(extra_radius_over_M),
+    )
+    need = 2.0 * need_half
+    return max(fov_over_M, need), need
+
+
+def require_shadow_in_frame(M, fov_over_M, n_pix, extra_radius_over_M=0.0):
+    """Containment then sampling.  Returns (effective_fov, intervals)."""
+    fov_eff, need = contained_fov(fov_over_M, M, extra_radius_over_M)
+    intervals = require_resolved_shadow(M, fov_eff, n_pix)
+    return fov_eff, need, intervals
 
 
 def impact_parameter_of_periapsis(r_min, M):
@@ -642,7 +682,7 @@ def geometric_length_of_sun(m_over_msun=1.0):
 
 
 def compare_rings(log10_m_galaxy=12.0, d_l=D_L_DEFAULT, d_s=D_S_DEFAULT):
-    """Numbers that keep the Einstein ring and the photon ring apart.
+    """Numbers that keep the Einstein critical curve and b_crit apart.
 
     Returns a dict.  Lengths are metres; angles are radians and arcsec.
     The galaxy Einstein radius in units of that galaxy's own GM/c^2 is
@@ -718,6 +758,230 @@ def backlight_image(bx, by, M, r_hot=None,
     shade = np.clip(shade, 0.15, 1.85)
     image = image * shade
     image = np.where(escaped, image, 0.0)
+    return image, b_hot
+
+
+def _R_of_u(u, b, M):
+    """(du/dφ)^2 = 1/b^2 - u^2 + 2 M u^3."""
+    return 1.0 / (b * b) - u * u + 2.0 * M * u * u * u
+
+
+def _phi_integral(u_lo, u_hi, b, M, n=512):
+    """∫_{u_lo}^{u_hi} du / sqrt(R(u)), R>=0 on the open interval."""
+    u_lo = float(u_lo)
+    u_hi = float(u_hi)
+    if u_hi < u_lo:
+        u_lo, u_hi = u_hi, u_lo
+    if u_hi <= u_lo:
+        return 0.0
+    # t^2 substitution from the upper end in case R(u_hi)~0 (turning point).
+    span = u_hi - u_lo
+    t = np.linspace(0.0, math.sqrt(span), int(n))
+    u = u_hi - t * t
+    rad = _R_of_u(u, b, M)
+    rad = np.maximum(rad, 0.0)
+    piece = np.zeros_like(t)
+    safe = rad > 0.0
+    piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
+    # Endpoint slope of R at a turning point.
+    if rad[0] <= 1.0e-18:
+        dR = -2.0 * u_hi + 6.0 * M * u_hi * u_hi
+        if abs(dR) > 0.0:
+            piece[0] = 2.0 / math.sqrt(abs(dR))
+    return float(np.trapezoid(piece, t))
+
+
+def phi_from_infinity_inbound(u_target, b, M):
+    """Orbital angle from r=∞ down to r=1/u_target, inbound, no turning."""
+    u_target = float(u_target)
+    if u_target <= 0.0:
+        return 0.0
+    return _phi_integral(0.0, u_target, b, M)
+
+
+def face_on_crossing_angle(m):
+    """Face-on equatorial crossing m=1,2,3,... occurs at this orbital angle.
+
+    Observer at infinity on +z, thin disk in z=0.  The first crossing is
+    at φ=π/2 from the incoming asymptote; later crossings add π.
+    """
+    m = int(m)
+    if m < 1:
+        raise ValueError("crossing index m starts at 1")
+    return 0.5 * math.pi + (m - 1) * math.pi
+
+
+def _max_inbound_u(b, M):
+    if is_captured(b, M):
+        return 1.0 / (event_horizon(M) * 1.0000001)
+    return 1.0 / periapsis(b, M)
+
+
+def _phi_to_turning_or_horizon(b, M):
+    return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
+
+
+def face_on_crossing_radii(b, M, max_m=4):
+    """r_m(b) for the first ``max_m`` face-on equatorial crossings.
+
+    Returns a list of length ``max_m`` with None where that crossing
+    does not occur.  Captured rays (b <= b_crit) only travel inbound;
+    they still contribute any crossings they make before the horizon.
+    Escaping rays travel inbound to periapsis and back out.
+    """
+    b = _require_finite("b", b)
+    M = _require_positive("M", M)
+    if b < 0.0:
+        raise ValueError("b must be nonnegative.")
+    if b == 0.0:
+        # Radial ray: hits the disk at the origin of the image plane
+        # only in the sense of a polar plunge; no finite-r crossing
+        # of z=0 at φ=π/2 in this construction.
+        return [None] * max_m
+    captured = is_captured(b, M)
+    u_end = _max_inbound_u(b, M)
+    phi_in = _phi_to_turning_or_horizon(b, M)
+    phi_total = phi_in if captured else 2.0 * phi_in
+    radii = []
+    for m in range(1, max_m + 1):
+        target = face_on_crossing_angle(m)
+        if target > phi_total + 1.0e-9:
+            radii.append(None)
+            continue
+        if target <= phi_in + 1.0e-12:
+            u = _invert_phi_inbound(target, b, M, u_end)
+        else:
+            remaining = target - phi_in
+            u = _invert_phi_inbound(phi_in - remaining, b, M, u_end)
+        if u is None or u <= 0.0:
+            radii.append(None)
+        else:
+            radii.append(1.0 / u)
+    return radii
+
+
+def _invert_phi_inbound(target_phi, b, M, u_end):
+    """Find u in (0, u_end] with inbound φ(u) = target_phi."""
+    if target_phi <= 0.0:
+        return 0.0
+    lo, hi = 0.0, float(u_end)
+    phi_hi = phi_from_infinity_inbound(hi, b, M)
+    if target_phi > phi_hi:
+        return None
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        phi_mid = phi_from_infinity_inbound(mid, b, M)
+        if phi_mid < target_phi:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def crossing_count(b, M, max_m=4):
+    """How many face-on equatorial crossings exist at this b."""
+    return sum(1 for r in face_on_crossing_radii(b, M, max_m=max_m) if r is not None)
+
+
+def emitted_intensity(r, M, r_hot=None, width=None):
+    """Optically thin face-on annulus, I_em(r).  Zero inside the horizon."""
+    M = _require_positive("M", M)
+    r = _require_finite("r", r)
+    if r_hot is None:
+        r_hot = HOT_RING_R_DEFAULT * M
+    if width is None:
+        width = HOT_RING_WIDTH_DEFAULT * M
+    if r <= event_horizon(M):
+        return 0.0
+    return math.exp(-0.5 * ((r - r_hot) / width) ** 2)
+
+
+def gravitational_g(r, M):
+    """sqrt(1-2M/r) for a static emitter at radius r."""
+    r = _require_positive("r", r)
+    M = _require_positive("M", M)
+    arg = 1.0 - 2.0 * M / r
+    if arg <= 0.0:
+        return 0.0
+    return math.sqrt(arg)
+
+
+def observed_components(b, M, r_hot=None, width=None, max_m=4):
+    """Per-crossing bolometric I_obs pieces: g^4 I_em(r_m).
+
+    Returns (parts, radii) where parts[0] is the direct image, parts[1]
+    the lensing-ring crossing, and parts[2:] photon-ring / subring
+    crossings.  Captured rays are allowed to contribute before the
+    horizon; they are not forced dark.
+    """
+    radii = face_on_crossing_radii(b, M, max_m=max_m)
+    parts = []
+    for r in radii:
+        if r is None:
+            parts.append(0.0)
+        else:
+            g = gravitational_g(r, M)
+            parts.append((g ** 4) * emitted_intensity(r, M, r_hot, width))
+    return parts, radii
+
+
+def observed_intensity(b, M, r_hot=None, width=None, max_m=4, upto=None):
+    parts, _ = observed_components(b, M, r_hot=r_hot, width=width, max_m=max_m)
+    if upto is None:
+        return float(sum(parts))
+    return float(sum(parts[:int(upto)]))
+
+
+def transfer_curves(M, b_max_over_M=8.0, n=81, max_m=3):
+    """b/M and r_m/M tables for the transfer-function beat."""
+    M = _require_positive("M", M)
+    b_crit = critical_impact_parameter(M)
+    bs = np.linspace(0.05 * M, b_max_over_M * M, int(n))
+    table = np.full((int(n), max_m), np.nan)
+    counts = np.zeros(int(n), dtype=int)
+    for i, bv in enumerate(bs):
+        radii = face_on_crossing_radii(float(bv), M, max_m=max_m)
+        counts[i] = sum(r is not None for r in radii)
+        for m, r in enumerate(radii):
+            if r is not None:
+                table[i, m] = r / M
+    return bs, table, counts, b_crit
+
+
+def disk_image(bx, by, M, r_hot=None, width=None, max_m=4, upto=None):
+    """Face-on optically thin image from stored transfer functions.
+
+    ``upto`` = 1 direct only, 2 direct+lensing, None = all computed
+    crossings.  Returns (image, b_hot) with b_hot the impact parameter
+    whose periapsis equals r_hot (a useful marker, not the image peak).
+    """
+    M = _require_positive("M", M)
+    if r_hot is None:
+        r_hot = HOT_RING_R_DEFAULT * M
+    if width is None:
+        width = HOT_RING_WIDTH_DEFAULT * M
+    r_hot = _require_positive("r_hot", r_hot)
+    if r_hot <= photon_sphere(M):
+        raise ValueError(
+            f"r_hot must lie outside the photon sphere ({photon_sphere(M):g})."
+        )
+    bx = np.asarray(bx, dtype=float)
+    by = np.asarray(by, dtype=float)
+    b = np.hypot(bx, by)
+    # Radial table, then interpolate.  Include both sides of b_crit.
+    b_max = float(np.max(b)) if b.size else 8.0 * M
+    sample = np.linspace(0.0, b_max, 241)
+    values = np.array([
+        observed_intensity(float(bv), M, r_hot=r_hot, width=width,
+                           max_m=max_m, upto=upto)
+        if bv > 0.0 else 0.0
+        for bv in sample
+    ])
+    image = np.interp(b, sample, values, left=0.0, right=0.0)
+    try:
+        b_hot = impact_parameter_of_periapsis(r_hot, M)
+    except ValueError:
+        b_hot = float("nan")
     return image, b_hot
 
 

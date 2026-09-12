@@ -13,6 +13,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-11  Grok.  Response to Audit1.  Version 0.2.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit1-2026091122.txt
+
+  2026-09-11  Grok.  Response to Audit2.  Version 0.3.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit2-2026091123.txt
 """
 
 from __future__ import annotations
@@ -279,19 +282,34 @@ class TestPhotonRingMask(unittest.TestCase):
         self.assertFalse(bool(phys.photon_ring_mask(captured, by, M)[0, 0]))
 
 
-class TestBacklight(unittest.TestCase):
-    def test_shadow_stays_dark(self):
-        bx, by, _, _ = phys.make_impact_grid(81, 16.0)
-        image, b_hot = phys.backlight_image(bx, by, 1.0, r_hot=6.0)
-        captured = phys.capture_map(bx, by, 1.0)
-        self.assertTrue(np.all(image[captured] == 0.0))
-        self.assertGreater(b_hot, phys.critical_impact_parameter(1.0))
-        self.assertGreater(float(np.max(image)), 0.0)
+class TestDiskImage(unittest.TestCase):
+    def test_zero_emissivity_gives_zero_image(self):
+        bx, by, _, _ = phys.make_impact_grid(21, 16.0, 1.0)
+        image, _ = phys.disk_image(bx, by, 1.0, r_hot=6.0, width=1.0e-9)
+        self.assertLess(float(np.max(image)), 1.0e-6)
 
     def test_hot_ring_must_lie_outside_photon_sphere(self):
-        bx, by, _, _ = phys.make_impact_grid(21, 16.0)
+        bx, by, _, _ = phys.make_impact_grid(21, 16.0, 1.0)
         with self.assertRaises(ValueError):
-            phys.backlight_image(bx, by, 1.0, r_hot=2.5)
+            phys.disk_image(bx, by, 1.0, r_hot=2.5)
+
+    def test_components_sum_to_total(self):
+        parts, _ = phys.observed_components(7.0, 1.0)
+        self.assertAlmostEqual(sum(parts), phys.observed_intensity(7.0, 1.0), places=12)
+
+    def test_crossings_scale_with_M(self):
+        r1 = phys.face_on_crossing_radii(6.0, 1.0)
+        r2 = phys.face_on_crossing_radii(12.0, 2.0)
+        for a, b in zip(r1, r2):
+            if a is None:
+                self.assertIsNone(b)
+            else:
+                self.assertAlmostEqual(a, b/2.0, places=8)
+
+    def test_captured_ray_may_still_cross(self):
+        rs = phys.face_on_crossing_radii(5.0, 1.0)
+        self.assertIsNotNone(rs[0])
+        self.assertGreater(rs[0], 2.0)
 
 
 class TestCompareRings(unittest.TestCase):
@@ -311,8 +329,8 @@ class TestModesAndCLI(unittest.TestCase):
     def test_known_modes(self):
         self.assertEqual(
             driver.MODES,
-            ("rays", "pixels", "capture", "ring", "radii", "weak",
-             "compare", "backlight"),
+            ("rays", "pixels", "capture", "ring", "transfer", "image",
+             "radii", "weak", "compare"),
         )
 
     def test_cli_rejects_unknown_mode(self):
@@ -398,6 +416,12 @@ class TestScaleInvariance(unittest.TestCase):
         b = phys.require_resolved_shadow(7.0, 16.0, 81)
         self.assertAlmostEqual(a, b, places=10)
 
+
+    def test_undersized_fov_is_expanded_not_blank(self):
+        fov_eff, need = phys.contained_fov(6.0, 1.0)
+        self.assertGreater(fov_eff, 6.0)
+        self.assertGreaterEqual(0.5 * fov_eff, phys.critical_impact_parameter(1.0))
+
     def test_cli_capture_at_M_equals_two_is_not_blank(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = run_cli(
@@ -411,12 +435,25 @@ class TestScaleInvariance(unittest.TestCase):
             self.assertNotIn("1681 / 1681", result.stdout)
 
     def test_r_cam_scales_with_M(self):
-        _, _, info = phys.integrate_photon_orbit(
-            2.0, phys.to_absolute_length(40.0, 2.0, "r_cam"),
-            phys.to_absolute_length(6.0, 2.0, "b"),
-            800.0, 0.05,
-        )
-        self.assertEqual(info["status"], "escaped")
+        statuses=[]
+        phis=[]
+        rmins=[]
+        for M in (0.5, 1.0, 2.0, 5.0):
+            _, _, info = phys.integrate_photon_orbit(
+                M,
+                phys.to_absolute_length(40.0, M, "r_cam"),
+                phys.to_absolute_length(6.0, M, "b"),
+                phys.to_absolute_length(200.0, M, "lambda_max"),
+                phys.to_absolute_length(0.02, M, "d_lambda"),
+            )
+            statuses.append(info["status"])
+            phis.append(info["delta_phi"])
+            rmins.append(info["closest_approach"]/M)
+        self.assertEqual(set(statuses), {"escaped"})
+        for phi in phis[1:]:
+            self.assertAlmostEqual(phi, phis[0], places=5)
+        for r in rmins[1:]:
+            self.assertAlmostEqual(r, rmins[0], places=5)
 
 
 if __name__ == "__main__":
