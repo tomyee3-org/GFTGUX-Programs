@@ -74,7 +74,7 @@ def parse_args():
                         "Default 161 except pixels mode "
                         f"({physics_bhs.PIXELS_N_PIX_DEFAULT}, cap "
                         f"{physics_bhs.PIXELS_N_PIX_MAX}). "
-                        "Ignored by transfer (uses a source-aware b table).")
+                        "Ignored by transfer (uses an adaptive b table).")
     g.add_argument("--fov", type=float, default=16.0, metavar="M",
                    help="field of view on a side, in units of M")
 

@@ -28,6 +28,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-12  Grok.  Response to Audit6.  Version 0.7.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit6-2026091213.txt
+
+  2026-09-12  Grok.  Response to Audit7.  Version 0.8.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit7-2026091218.txt
 """
 
 from __future__ import annotations
@@ -144,6 +147,18 @@ class TestBuildIdentity(unittest.TestCase):
                 )
             copied = phys.compute_build_id_from_directory(tmp_path)
             self.assertEqual(copied, phys.BUILD_ID)
+
+    def test_mutating_help_does_not_change_build_id(self):
+        help_path = find_help_file()
+        if help_path is None:
+            self.skipTest("Help file not shipped next to this build")
+        before = phys.BUILD_ID
+        original = help_path.read_text(encoding="utf-8")
+        try:
+            help_path.write_text(original + "\n<!-- probe -->\n", encoding="utf-8")
+            self.assertEqual(recompute_build_id(MODULE_DIR), before)
+        finally:
+            help_path.write_text(original, encoding="utf-8")
 
 
 class TestScales(unittest.TestCase):
@@ -351,6 +366,19 @@ class TestDiskImage(unittest.TestCase):
             r = phys.face_on_crossing_radii(b, 1.0, max_m=m)[m-1]
             self.assertAlmostEqual(r, 6.0, places=5)
 
+    def test_captured_direct_root_below_critical(self):
+        peaks = phys.source_crossing_impacts(1.0, 4.0, max_m=4)
+        self.assertIsNotNone(peaks[0])
+        r = phys.face_on_crossing_radii(peaks[0], 1.0, max_m=1)[0]
+        self.assertAlmostEqual(r, 4.0, places=5)
+        self.assertLess(peaks[0], phys.critical_impact_parameter(1.0))
+
+    def test_critical_high_m_stops_when_indistinguishable(self):
+        rs = phys.face_on_crossing_radii(
+            phys.critical_impact_parameter(1.0), 1.0, max_m=20,
+        )
+        self.assertTrue(any(r is None for r in rs[12:]))
+
     def test_transfer_resolves_r3_independent_of_fov(self):
         for fov in (8.0, 16.0, 24.0):
             bs, table, _, _ = phys.transfer_curves(1.0, b_max_over_M=0.5*fov, max_m=3)
@@ -359,13 +387,13 @@ class TestDiskImage(unittest.TestCase):
 
     def test_table_photon_peak_is_physical(self):
         g4 = (1.0 - 2.0 / 6.0) ** 2
-        _, parts, _ = phys.intensity_table(1.0, 12.0, r_hot=6.0)
+        _, parts = phys.intensity_table(1.0, 12.0, r_hot=6.0)
         for m in range(4):
             self.assertAlmostEqual(float(parts[:, m].max()), g4, delta=0.02)
 
     def test_table_resolves_documented_r_hot_8(self):
         g4 = (1.0 - 2.0 / 8.0) ** 2
-        _, parts, _ = phys.intensity_table(1.0, 16.0, r_hot=8.0)
+        _, parts = phys.intensity_table(1.0, 16.0, r_hot=8.0)
         for m in range(4):
             self.assertAlmostEqual(
                 float(parts[:, m].max()), g4, delta=0.03, msg=f"m={m+1}",
@@ -394,6 +422,10 @@ class TestCompareRings(unittest.TestCase):
         self.assertGreater(numbers["r_e_over_M"], 1.0e5)
         self.assertAlmostEqual(numbers["b_crit_over_M"], 3.0 * math.sqrt(3.0), places=12)
         self.assertNotAlmostEqual(numbers["r_e_over_M"], numbers["b_crit_over_M"])
+
+    def test_compare_rings_rejects_out_of_range_logM(self):
+        with self.assertRaises(ValueError):
+            phys.compare_rings(40.0)
 
 
 class TestModesAndCLI(unittest.TestCase):
@@ -451,8 +483,21 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn('id="version_build"', text)
         self.assertIn(phys.MODEL_VERSION, text)
         self.assertIn(phys.BUILD_ID, text)
-        self.assertIn(r"\sum_{m=1}^{4}", text)
+        self.assertIn(rf"\sum_{{m=1}}^{{{phys.MAX_IMAGE_M}}}", text)
         self.assertIn("pixel centre", text)
+
+    def test_patch_help_version_is_idempotent(self):
+        src = find_help_file()
+        if src is None:
+            self.skipTest("Help file not shipped next to this build")
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "BlackHoleShadow.html"
+            dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+            phys.patch_help_version(dest)
+            phys.patch_help_version(dest)
+            text = dest.read_text(encoding="utf-8")
+            self.assertEqual(text.count('id="version_build"'), 1)
+            self.assertEqual(text.count(phys.BUILD_ID), 1)
 
     def test_cli_rejects_camera_inside_photon_sphere(self):
         result = run_cli(["--mode", "rays", "--r_cam", "2.5"])

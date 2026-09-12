@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.7.0"
+MODEL_VERSION = "0.8.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # m>=5 is omitted; the figure must say so.
@@ -276,12 +276,7 @@ def asymptotic_deflection(b, M, n_u=800):
     beta = b / M
     x_min = M / r_min
     # Dimensionless u-sub: x = M/r = x_min - t^2.
-    delta = abs(beta - 3.0 * math.sqrt(3.0))
-    n_u = max(int(n_u), 256)
-    if delta < 1.0e-2:
-        n_u = max(n_u, 4096)
-    if delta < 1.0e-4:
-        n_u = max(n_u, 16384)
+    n_u = max(int(n_u), 512)
     t = np.linspace(0.0, math.sqrt(x_min), n_u)
     x = np.clip(x_min - t * t, 0.0, x_min)
     rad = 1.0 - (beta * beta) * x * x + 2.0 * (beta * beta) * x * x * x
@@ -289,10 +284,13 @@ def asymptotic_deflection(b, M, n_u=800):
     piece = np.zeros_like(t)
     safe = rad > 0.0
     piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
-    drad_dx = -2.0 * beta * beta * x_min + 6.0 * beta * beta * x_min * x_min
-    slope = abs(float(drad_dx))
-    if slope > 0.0:
-        piece[0] = 2.0 / math.sqrt(slope)
+    R_min = float(1.0 - (beta * beta) * x_min * x_min
+                  + 2.0 * (beta * beta) * x_min * x_min * x_min)
+    if R_min <= 1.0e-14:
+        drad_dx = -2.0 * beta * beta * x_min + 6.0 * beta * beta * x_min * x_min
+        slope = abs(float(drad_dx))
+        if slope > 0.0:
+            piece[0] = 2.0 / math.sqrt(slope)
     delta_phi_inf = 2.0 * beta * float(np.trapezoid(piece, t))
     return delta_phi_inf - math.pi
 
@@ -703,6 +701,10 @@ def compare_rings(log10_m_galaxy=12.0, d_l=D_L_DEFAULT, d_s=D_S_DEFAULT):
     enormous — that is the point of the beat.
     """
     log10_m_galaxy = _require_finite("log10_m_galaxy", log10_m_galaxy)
+    if log10_m_galaxy < LOGM_MIN or log10_m_galaxy > LOGM_MAX:
+        raise ValueError(
+            f"log10_m_galaxy must lie in [{LOGM_MIN:g}, {LOGM_MAX:g}]."
+        )
     m_kg = (10.0 ** log10_m_galaxy) * M_SUN
     theta_e = einstein_radius_point_mass(m_kg, d_l=d_l, d_s=d_s)
     M_gal_m = geometric_length_of_sun(10.0 ** log10_m_galaxy)
@@ -736,7 +738,7 @@ def _R_hat(x, beta):
     return 1.0 / (beta * beta) - x * x + 2.0 * x * x * x
 
 
-def _phi_integral(u_lo, u_hi, b, M, n=1024):
+def _phi_integral(u_lo, u_hi, b, M, n=None):
     """∫ du / sqrt(R) computed in scale-free (x, beta) variables."""
     M = float(M)
     beta = float(b) / M
@@ -746,17 +748,11 @@ def _phi_integral(u_lo, u_hi, b, M, n=1024):
         x_lo, x_hi = x_hi, x_lo
     if x_hi <= x_lo:
         return 0.0
-    beta_c = 3.0 * math.sqrt(3.0)
-    delta = abs(beta - beta_c)
-    n = max(int(n), 256)
-    if delta < 1.0e-2:
-        n = max(n, 4096)
-    if delta < 1.0e-4:
-        n = max(n, 16384)
-    if delta < 1.0e-6:
-        n = max(n, 32768)
     R_hi = float(_R_hat(x_hi, beta))
-    use_plain = R_hi > 1.0e-8 and not (delta < 1.0e-3 and R_hi < 1.0e-4)
+    if n is None:
+        n = 2048 if R_hi > 1.0e-8 else 4096
+    n = max(int(n), 256)
+    use_plain = R_hi > 1.0e-12
     if use_plain:
         x = np.linspace(x_lo, x_hi, n)
         rad = np.maximum(_R_hat(x, beta), 0.0)
@@ -771,18 +767,19 @@ def _phi_integral(u_lo, u_hi, b, M, n=1024):
     piece = np.zeros_like(t)
     safe = rad > 0.0
     piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
-    dR = -2.0 * x_hi + 6.0 * x_hi * x_hi
-    if abs(dR) > 0.0:
-        piece[0] = 2.0 / math.sqrt(abs(dR))
+    if R_hi <= 1.0e-14:
+        dR = -2.0 * x_hi + 6.0 * x_hi * x_hi
+        if abs(dR) > 0.0:
+            piece[0] = 2.0 / math.sqrt(abs(dR))
     return float(np.trapezoid(piece, t))
 
 
-def phi_from_infinity_inbound(u_target, b, M):
+def phi_from_infinity_inbound(u_target, b, M, n=None):
     """Orbital angle from r=∞ down to r=1/u_target, inbound, no turning."""
     u_target = float(u_target)
     if u_target <= 0.0:
         return 0.0
-    return _phi_integral(0.0, u_target, b, M)
+    return _phi_integral(0.0, u_target, b, M, n=n)
 
 
 def face_on_crossing_angle(m):
@@ -854,12 +851,13 @@ def _invert_phi_inbound(target_phi, b, M, u_end):
     if target_phi <= 0.0:
         return 0.0
     lo, hi = 0.0, float(u_end)
-    phi_hi = phi_from_infinity_inbound(hi, b, M)
+    phi_hi = phi_from_infinity_inbound(hi, b, M, n=512)
     if target_phi > phi_hi:
         return None
-    for _ in range(60):
+    for i in range(56):
         mid = 0.5 * (lo + hi)
-        phi_mid = phi_from_infinity_inbound(mid, b, M)
+        n_use = 512 if i < 42 else None
+        phi_mid = phi_from_infinity_inbound(mid, b, M, n=n_use)
         if phi_mid < target_phi:
             lo = mid
         else:
@@ -884,8 +882,10 @@ def critical_x_of_phi(phi):
     """Invert critical_phi_of_x.  Returns x=M/r in (0, 1/3)."""
     if phi <= 0.0:
         return 0.0
-    a = math.tanh(0.5 * float(phi) + _ATANH_ONE_OVER_SQRT3)
-    a = min(a, math.nextafter(1.0, 0.0))
+    arg = 0.5 * float(phi) + _ATANH_ONE_OVER_SQRT3
+    if arg > 16.0:
+        return None
+    a = math.tanh(arg)
     return max(0.5 * (a * a - 1.0 / 3.0), 0.0)
 
 
@@ -899,7 +899,7 @@ def _critical_crossing_radii(M, max_m):
     radii = []
     for m in range(1, max_m + 1):
         x = critical_x_of_phi(face_on_crossing_angle(m))
-        if x <= 0.0 or x >= 1.0 / 3.0:
+        if x is None or x <= 0.0 or x >= 1.0 / 3.0:
             radii.append(None)
         else:
             radii.append(M / x)
@@ -1007,9 +1007,10 @@ def source_crossing_impacts(M, r_hot, max_m=4):
     r_hot = _require_positive("r_hot", r_hot)
     b_crit = critical_impact_parameter(M)
     b_max = max(2.0 * r_hot, 3.0 * b_crit)
-    rel_lo = -np.logspace(-10.0, -2.0, 48)
-    rel_hi = np.logspace(-10.0, math.log10(max(b_max / b_crit - 1.0, 1.0e-2)), 96)
-    bs = np.unique(np.concatenate([b_crit * (1.0 + rel_lo), b_crit * (1.0 + rel_hi)]))
+    inner = np.linspace(0.05 * M, 0.995 * b_crit, 48)
+    outer_hi = math.log10(max(b_max / b_crit - 1.0, 1.0e-3))
+    outer = b_crit * (1.0 + np.logspace(-6.0, outer_hi, 56))
+    bs = np.unique(np.concatenate([inner, outer]))
     bs = bs[bs > 0.0]
     found = [None] * max_m
     prev_r = [None] * max_m
@@ -1073,7 +1074,7 @@ def _bisect_source_root(b_lo, b_hi, M, m, r_hot):
         fm = residual(mid)
         if fm is None:
             break
-        if abs(fm) <= 1.0e-8 * M:
+        if abs(fm) <= 1.0e-10 * max(M, r_hot):
             return mid
         if f_lo * fm <= 0.0:
             hi = mid
@@ -1082,30 +1083,35 @@ def _bisect_source_root(b_lo, b_hi, M, m, r_hot):
     return 0.5 * (lo + hi)
 
 
-def source_aware_impact_samples(M, b_max, r_hot, width, max_m=4):
-    """b nodes clustered at b_crit and at every source-image root."""
+def source_aware_impact_samples(M, b_max, r_hot, width, max_m=4, peaks=None):
+    """b nodes clustered at b_crit and at every source-image root.
+
+    Returns the sample array only.  Pass ``peaks`` to reuse a root list
+    already computed by source_crossing_impacts.
+    """
     M = _require_positive("M", M)
     chunks = [adaptive_impact_samples(M, b_max)]
-    peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
+    if peaks is None:
+        peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
     roots = [
         float(bp) for bp in peaks
         if bp is not None and bp > 0.0 and bp <= b_max * 1.05
     ]
     if roots:
         chunks.append(np.asarray(roots, dtype=float))
-        span = max((width / M) if width else 0.05, 0.05)
-        lo_off = min(1.0e-8, 0.05 * span)
-        log_off = np.logspace(math.log10(lo_off), math.log10(span), 36) * M
+        span = max((width / M) if width else 1.0e-12, 1.0e-12)
+        lo_off = min(1.0e-8, max(0.05 * span, 1.0e-12))
+        log_off = np.logspace(math.log10(lo_off), math.log10(span), 28) * M
         near = np.concatenate(
             [np.concatenate([bp - log_off[::-1], bp + log_off]) for bp in roots]
         )
         near = near[(near > 0.0) & (near <= b_max * 1.05)]
         chunks.append(near)
-    return np.sort(np.unique(np.concatenate(chunks))), peaks
+    return np.sort(np.unique(np.concatenate(chunks)))
 
 
-def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
-    """Source-aware (b, I_m) table.  Components computed once."""
+def intensity_table(M, b_max, r_hot=None, width=None, max_m=None, peaks=None):
+    """Source-aware (b, I_m) table.  Returns (sample, parts)."""
     M = _require_positive("M", M)
     if max_m is None:
         max_m = MAX_IMAGE_M
@@ -1114,8 +1120,10 @@ def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
     width = _require_positive("width", width)
-    sample, peaks = source_aware_impact_samples(
-        M, b_max, r_hot, width, max_m=max_m,
+    if peaks is None:
+        peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
+    sample = source_aware_impact_samples(
+        M, b_max, r_hot, width, max_m=max_m, peaks=peaks,
     )
     parts = np.zeros((sample.size, max_m))
     for i, bv in enumerate(sample):
@@ -1123,7 +1131,7 @@ def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
             float(bv), M, r_hot=r_hot, width=width, max_m=max_m,
         )
         parts[i, :] = comp
-    return sample, parts, peaks
+    return sample, parts
 
 
 def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
@@ -1152,8 +1160,9 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
     b = np.hypot(bx, by)
     b_pix = float(np.max(b)) if b.size else 0.0
     b_max = max(b_pix, 1.25 * r_hot, 2.0 * critical_impact_parameter(M))
-    sample, parts, peaks = intensity_table(
-        M, b_max, r_hot=r_hot, width=width, max_m=max_m,
+    peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
+    sample, parts = intensity_table(
+        M, b_max, r_hot=r_hot, width=width, max_m=max_m, peaks=peaks,
     )
     cols = [
         np.interp(b, sample, parts[:, m], left=0.0, right=0.0)
