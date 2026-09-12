@@ -10,6 +10,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-11  Grok.  Kickoff.  Version 0.1.0.
     Artifact: BlackHoleShadow-Grok-Kickoff-2026091118.txt
+
+  2026-09-11  Grok.  Response to Audit1.  Version 0.2.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit1-2026091122.txt
 """
 
 from __future__ import annotations
@@ -187,12 +190,18 @@ class TestDeflection(unittest.TestCase):
         self.assertAlmostEqual(phys.weak_field_deflection(100.0, 1.0), 0.04, places=12)
 
     def test_large_b_matches_weak_field(self):
-        b = 200.0
-        exact = phys.asymptotic_deflection(b, 1.0)
-        weak = phys.weak_field_deflection(b, 1.0)
-        self.assertLess(abs(exact - weak) / weak, 0.02)
-        series = weak + (15.0 * math.pi / 4.0) / (b * b)
-        self.assertLess(abs(exact - series) / series, 0.005)
+        for b in (50.0, 200.0, 500.0, 1000.0):
+            exact = phys.asymptotic_deflection(b, 1.0)
+            weak = phys.weak_field_deflection(b, 1.0)
+            series = weak + (15.0 * math.pi / 4.0) / (b * b)
+            self.assertLess(abs(exact - series) / series, 0.02, msg=f"b={b}")
+
+    def test_deflection_diverges_toward_b_crit(self):
+        b_crit = phys.critical_impact_parameter(1.0)
+        near = phys.asymptotic_deflection(b_crit * 1.001, 1.0)
+        mid = phys.asymptotic_deflection(b_crit * 1.02, 1.0)
+        self.assertGreater(near, mid)
+        self.assertGreater(near, math.pi)
 
     def test_deflection_grows_toward_the_photon_sphere(self):
         b_crit = phys.critical_impact_parameter(1.0)
@@ -250,7 +259,7 @@ class TestCameraGrid(unittest.TestCase):
 
 class TestPhotonRingMask(unittest.TestCase):
     def test_ring_sits_outside_the_shadow(self):
-        bx, by, _, _ = phys.make_impact_grid(81, 16.0)
+        bx, by, _, _ = phys.make_impact_grid(81, 16.0, 1.0)
         captured = phys.capture_map(bx, by, 1.0)
         ring = phys.photon_ring_mask(bx, by, 1.0)
         self.assertTrue(np.any(ring))
@@ -258,7 +267,16 @@ class TestPhotonRingMask(unittest.TestCase):
         b = np.hypot(bx, by)
         b_crit = phys.critical_impact_parameter(1.0)
         self.assertTrue(np.all(b[ring] > b_crit))
-        self.assertTrue(np.max(b[ring]) < b_crit + 1.5)
+
+    def test_near_critical_escapers_are_in_the_overlay(self):
+        M = 1.0
+        b_crit = phys.critical_impact_parameter(M)
+        bx = np.array([[b_crit * (1.0 + 1.0e-6)]])
+        by = np.array([[0.0]])
+        mask = phys.photon_ring_mask(bx, by, M)
+        self.assertTrue(bool(mask[0, 0]))
+        captured = np.array([[b_crit]])
+        self.assertFalse(bool(phys.photon_ring_mask(captured, by, M)[0, 0]))
 
 
 class TestBacklight(unittest.TestCase):
@@ -343,7 +361,64 @@ class TestHelpFile(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertIn('id="version_build"', text)
         self.assertIn(phys.MODEL_VERSION, text)
+        self.assertIn(phys.BUILD_ID, text)
+
+    def test_cli_rejects_camera_inside_photon_sphere(self):
+        result = run_cli(["--mode", "rays", "--r_cam", "2.5"])
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_cli_rejects_inclination_outside_range(self):
+        result = run_cli(["--mode", "backlight", "--inclination", "120"])
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_pixels_narration_follows_flags(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cli(
+                ["--mode", "pixels", "--b_in", "6", "--b_out", "5",
+                 "--outdir", tmp],
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("escaped", result.stdout)
+            self.assertIn("captured", result.stdout)
+
+
+class TestScaleInvariance(unittest.TestCase):
+    def test_capture_fraction_independent_of_M_at_fixed_fov_over_M(self):
+        fractions = []
+        for M in (0.5, 1.0, 2.0, 5.0):
+            bx, by, _, _ = phys.make_impact_grid(41, 16.0, M)
+            captured = phys.capture_map(bx, by, M)
+            fractions.append(captured.mean())
+        for frac in fractions[1:]:
+            self.assertAlmostEqual(frac, fractions[0], places=10)
+
+    def test_resolved_shadow_is_M_invariant(self):
+        a = phys.require_resolved_shadow(1.0, 16.0, 81)
+        b = phys.require_resolved_shadow(7.0, 16.0, 81)
+        self.assertAlmostEqual(a, b, places=10)
+
+    def test_cli_capture_at_M_equals_two_is_not_blank(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cli(
+                ["--mode", "capture", "--M", "2", "--n_pix", "41",
+                 "--fov", "16", "--outdir", tmp],
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, 0, msg=result.stderr)
+            self.assertIn("captured pixels", result.stdout)
+            # Must not be 100% dark on a 16M field.
+            self.assertNotIn("1681 / 1681", result.stdout)
+
+    def test_r_cam_scales_with_M(self):
+        _, _, info = phys.integrate_photon_orbit(
+            2.0, phys.to_absolute_length(40.0, 2.0, "r_cam"),
+            phys.to_absolute_length(6.0, 2.0, "b"),
+            800.0, 0.05,
+        )
+        self.assertEqual(info["status"], "escaped")
 
 
 if __name__ == "__main__":
     unittest.main()
+

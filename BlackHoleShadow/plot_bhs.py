@@ -6,6 +6,9 @@ Matplotlib figures for BlackHoleShadow.
 One drawing routine per mode.  Each routine returns the figure.  When an
 output directory is supplied it also writes a timestamped PNG and a
 same-stem ``.provenance.txt`` sidecar.  There are no sliders.
+
+Image-plane axes are always labelled in units of M.  Incoming ``bx, by``
+arrays are absolute lengths; they are divided by M for display.
 """
 
 import math
@@ -14,16 +17,14 @@ from datetime import datetime
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+from matplotlib.patches import Circle, Wedge
 
 import physics_bhs as phys
 
-C_RS = "#888888"
-C_PH = "#e8a838"
-C_BC = "#00bcd4"
-C_CAP = "#1a1a1a"
-C_ESC = "#d9c48b"
-C_RING = "#ff6b3d"
+C_RS = "#9a9a9a"
+C_PH = "#c9a227"
+C_BC = "#0097a7"
+C_WIND = "#ff6b3d"
 
 
 def _timestamp_name(prefix):
@@ -73,47 +74,40 @@ def _finish(fig, outdir, prefix, dpi, provenance=None):
     return saved
 
 
-def _extent(bx, by):
-    return [float(bx.min()), float(bx.max()),
-            float(by.min()), float(by.max())]
+def _extent_over_M(bx, by, M):
+    ext = phys.pixel_edge_extent(bx, by)
+    return [e / M for e in ext]
 
 
-def _draw_circles(ax, M, show_rs=True, show_ph=True, show_bc=True):
-    r_s = phys.event_horizon(M)
-    r_ph = phys.photon_sphere(M)
-    b_crit = phys.critical_impact_parameter(M)
-    if show_rs:
-        ax.add_patch(Circle((0.0, 0.0), r_s, fill=False, color=C_RS,
-                            lw=1.0, ls=":", label=rf"$r_s=2M$"))
-    if show_ph:
-        ax.add_patch(Circle((0.0, 0.0), r_ph, fill=False, color=C_PH,
-                            lw=1.2, ls="--", label=rf"$r_{{\rm ph}}=3M$"))
-    if show_bc:
-        ax.add_patch(Circle((0.0, 0.0), b_crit, fill=False, color=C_BC,
-                            lw=1.4, ls="-", label=rf"$b_{{\rm crit}}=3\sqrt{{3}}M$"))
+def _draw_bcrit(ax, M, lw=2.0):
+    b_crit_over_M = phys.critical_impact_parameter(M) / M
+    ax.add_patch(Circle((0.0, 0.0), b_crit_over_M, fill=False, color=C_BC,
+                        lw=lw, ls="-", zorder=4,
+                        label=r"$b_{\rm crit}=3\sqrt{3}\,M$  (critical curve)"))
 
 
 def plot_rays(traj_in, traj_out, M=1.0, r_cam=40.0, b_in=5.0, b_out=6.0,
+              lambda_max=200.0, d_lambda=0.02,
               outdir=None, dpi=140, show=True):
     xs_in, ys_in, info_in = traj_in
     xs_out, ys_out, info_out = traj_out
     fig, ax = plt.subplots(figsize=(7.2, 7.2))
-    r_s = phys.event_horizon(M)
-    r_ph = phys.photon_sphere(M)
-    hole = Circle((0.0, 0.0), r_s, facecolor="k", edgecolor="k", zorder=5)
-    ax.add_patch(hole)
-    ax.add_patch(Circle((0.0, 0.0), r_ph, fill=False, color=C_PH,
-                        lw=1.2, ls="--", label="photon sphere"))
-    ax.plot(xs_in, ys_in, color="#c1121f", lw=1.6,
-            label=rf"$b={b_in:g}$ ({info_in['status']})")
-    ax.plot(xs_out, ys_out, color="#0077b6", lw=1.6,
-            label=rf"$b={b_out:g}$ ({info_out['status']})")
+    r_s_o = phys.event_horizon(M) / M
+    r_ph_o = phys.photon_sphere(M) / M
+    ax.add_patch(Circle((0.0, 0.0), r_s_o, facecolor="k", edgecolor="k",
+                        zorder=5, label=r"$r_s=2M$"))
+    ax.add_patch(Circle((0.0, 0.0), r_ph_o, fill=False, color=C_PH,
+                        lw=1.4, ls="--", label=r"photon sphere $r=3M$"))
+    ax.plot(np.asarray(xs_in) / M, np.asarray(ys_in) / M, color="#c1121f",
+            lw=1.6, label=rf"$b={b_in / M:g}\,M$ ({info_in['status']})")
+    ax.plot(np.asarray(xs_out) / M, np.asarray(ys_out) / M, color="#0077b6",
+            lw=1.6, label=rf"$b={b_out / M:g}\,M$ ({info_out['status']})")
     ax.set_aspect("equal")
-    span = max(r_cam, 2.0 * r_s)
+    span = max(r_cam / M, 2.0 * r_s_o)
     ax.set_xlim(-1.05 * span, 1.05 * span)
     ax.set_ylim(-1.05 * span, 1.05 * span)
-    ax.set_xlabel(r"$x$ [$M$]")
-    ax.set_ylabel(r"$y$ [$M$]")
+    ax.set_xlabel(r"$x/M$")
+    ax.set_ylabel(r"$y/M$")
     ax.set_title("Beat 0 · Two Schwarzschild null geodesics")
     ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout(rect=[0, 0.03, 1, 1])
@@ -121,8 +115,11 @@ def plot_rays(traj_in, traj_out, M=1.0, r_cam=40.0, b_in=5.0, b_out=6.0,
         "mode": "rays",
         "M": repr(M),
         "r_cam": repr(r_cam),
+        "r_cam_over_M": repr(r_cam / M),
         "b_in": repr(b_in),
         "b_out": repr(b_out),
+        "lambda_max": repr(lambda_max),
+        "d_lambda": repr(d_lambda),
         "status_in": info_in["status"],
         "status_out": info_out["status"],
         "delta_phi_in": repr(info_in["delta_phi"]),
@@ -136,22 +133,25 @@ def plot_rays(traj_in, traj_out, M=1.0, r_cam=40.0, b_in=5.0, b_out=6.0,
 
 
 def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
+                n_pix_requested=None, fov_over_M=16.0,
                 outdir=None, dpi=140, show=True):
     fig, axes = plt.subplots(1, 2, figsize=(10.6, 5.0))
     ax = axes[0]
-    # Paint the coarse camera as a classified grid.
     image = np.where(captured, 0.0, 1.0)
-    ax.imshow(image, origin="lower", cmap="gray", extent=_extent(bx, by),
+    ax.imshow(image, origin="lower", cmap="gray",
+              extent=_extent_over_M(bx, by, M),
               vmin=0.0, vmax=1.0, interpolation="nearest")
-    _draw_circles(ax, M, show_rs=False, show_ph=False, show_bc=True)
-    ax.plot([b_in], [0.0], marker="o", color="#c1121f", ms=8, zorder=5,
-            label=rf"$b={b_in:g}$ pixel")
-    ax.plot([b_out], [0.0], marker="o", color="#0077b6", ms=8, zorder=5,
-            label=rf"$b={b_out:g}$ pixel")
+    _draw_bcrit(ax, M, lw=1.4)
+    status_in = "captured" if phys.is_captured(b_in, M) else "escaped"
+    status_out = "captured" if phys.is_captured(b_out, M) else "escaped"
+    ax.plot([b_in / M], [0.0], marker="o", color="#c1121f", ms=8, zorder=5,
+            label=rf"$b={b_in / M:g}\,M$ ({status_in})")
+    ax.plot([b_out / M], [0.0], marker="o", color="#0077b6", ms=8, zorder=5,
+            label=rf"$b={b_out / M:g}\,M$ ({status_out})")
     ax.set_aspect("equal")
-    ax.set_xlabel(r"$b_x$ [$M$]")
-    ax.set_ylabel(r"$b_y$ [$M$]")
-    ax.set_title("A ray becomes a pixel")
+    ax.set_xlabel(r"$b_x/M$")
+    ax.set_ylabel(r"$b_y/M$")
+    ax.set_title("A ray becomes a direction on the sky")
     ax.legend(loc="upper right", fontsize=8)
 
     ax = axes[1]
@@ -159,14 +159,13 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
     b_crit = phys.critical_impact_parameter(M)
     text = (
         "Beat 1\n\n"
-        f"The left panel is a coarse camera.\n"
-        f"Each cell is one direction on the sky,\n"
-        f"labelled by the impact parameter $(b_x,b_y)$.\n\n"
-        f"$b={b_in:g}$ lies inside $b_\\mathrm{{crit}}={b_crit:.4g} M$\n"
-        f"and is captured — a dark pixel.\n\n"
-        f"$b={b_out:g}$ lies outside $b_\\mathrm{{crit}}$ and escapes\n"
-        f"— a light pixel.\n\n"
-        "PhotonOrbit already classified these two rays.\n"
+        "The left panel is a coarse camera.\n"
+        "Each cell is one conserved impact\n"
+        "parameter $(b_x,b_y)$.\n\n"
+        f"$b={b_in / M:g}\\,M$ is {status_in}\n"
+        f"relative to $b_\\mathrm{{crit}}={b_crit / M:.4g}\\,M$.\n\n"
+        f"$b={b_out / M:g}\\,M$ is {status_out}.\n\n"
+        "PhotonOrbit already classified single rays.\n"
         "The new object is the camera map."
     )
     ax.text(0.02, 0.98, text, va="top", ha="left", fontsize=11,
@@ -178,6 +177,10 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
         "b_in": repr(b_in),
         "b_out": repr(b_out),
         "n_pix": str(bx.shape[0]),
+        "n_pix_requested": "None" if n_pix_requested is None else str(n_pix_requested),
+        "fov_over_M": repr(fov_over_M),
+        "status_in": status_in,
+        "status_out": status_out,
     })
     if show:
         plt.show()
@@ -186,16 +189,17 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
     return fig, saved
 
 
-def plot_capture(bx, by, captured, M=1.0, outdir=None, dpi=140, show=True):
+def plot_capture(bx, by, captured, M=1.0, fov_over_M=16.0,
+                 outdir=None, dpi=140, show=True):
     fig, ax = plt.subplots(figsize=(6.4, 6.4))
     image = np.where(captured, 0.05, 0.92)
-    ax.imshow(image, origin="lower", cmap="gray", extent=_extent(bx, by),
-              vmin=0.0, vmax=1.0)
-    _draw_circles(ax, M)
+    ax.imshow(image, origin="lower", cmap="gray",
+              extent=_extent_over_M(bx, by, M), vmin=0.0, vmax=1.0)
+    _draw_bcrit(ax, M)
     ax.set_aspect("equal")
-    ax.set_xlabel(r"$b_x$ [$M$]")
-    ax.set_ylabel(r"$b_y$ [$M$]")
-    ax.set_title("Beat 2 · Geometric shadow (no backlight)")
+    ax.set_xlabel(r"$b_x/M$")
+    ax.set_ylabel(r"$b_y/M$")
+    ax.set_title("Beat 2 · Geometric capture map")
     ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "capture", dpi, provenance={
@@ -203,7 +207,7 @@ def plot_capture(bx, by, captured, M=1.0, outdir=None, dpi=140, show=True):
         "M": repr(M),
         "b_crit": repr(phys.critical_impact_parameter(M)),
         "n_pix": str(bx.shape[0]),
-        "fov_M": f"{float(bx.max() - bx.min()):.6f}",
+        "fov_over_M": repr(fov_over_M),
     })
     if show:
         plt.show()
@@ -212,25 +216,38 @@ def plot_capture(bx, by, captured, M=1.0, outdir=None, dpi=140, show=True):
     return fig, saved
 
 
-def plot_ring(bx, by, captured, ring, M=1.0, outdir=None, dpi=140, show=True):
+def plot_ring(bx, by, captured, ring, M=1.0, b_lo=None, b_hi=None,
+              fov_over_M=16.0, outdir=None, dpi=140, show=True):
     fig, ax = plt.subplots(figsize=(6.4, 6.4))
     rgb = np.zeros(captured.shape + (3,))
     rgb[..., :] = 0.92
     rgb[captured] = (0.05, 0.05, 0.05)
     rgb[ring] = (1.0, 0.42, 0.18)
-    ax.imshow(rgb, origin="lower", extent=_extent(bx, by))
-    _draw_circles(ax, M, show_rs=False)
+    ax.imshow(rgb, origin="lower", extent=_extent_over_M(bx, by, M))
+    _draw_bcrit(ax, M, lw=1.5)
+    if b_lo is not None and b_hi is not None and b_hi > b_lo:
+        # Continuous overlay so a coarse grid still shows the window.
+        wedge = Wedge((0.0, 0.0), b_hi / M, 0.0, 360.0, width=(b_hi - b_lo) / M,
+                      facecolor=C_WIND, alpha=0.18, edgecolor=C_WIND, lw=0.8,
+                      label="high-winding window")
+        ax.add_patch(wedge)
     ax.set_aspect("equal")
-    ax.set_xlabel(r"$b_x$ [$M$]")
-    ax.set_ylabel(r"$b_y$ [$M$]")
-    ax.set_title("Beat 3 · Photon ring on the shadow rim")
+    ax.set_xlabel(r"$b_x/M$")
+    ax.set_ylabel(r"$b_y/M$")
+    ax.set_title("Beat 3 · High-winding overlay on the critical curve")
     ax.legend(loc="upper right", fontsize=8)
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "ring", dpi, provenance={
         "mode": "ring",
         "M": repr(M),
-        "n_ring_pixels": str(int(np.count_nonzero(ring))),
+        "n_overlay_pixels": str(int(np.count_nonzero(ring))),
         "n_pix": str(bx.shape[0]),
+        "fov_over_M": repr(fov_over_M),
+        "b_lo": "None" if b_lo is None else repr(b_lo),
+        "b_hi": "None" if b_hi is None else repr(b_hi),
+        "r_window_over_M": repr(phys.PHOTON_RING_R_WINDOW),
+        "delta_phi_min": repr(phys.WINDING_DELTA_PHI),
+        "note": "pedagogical high-winding overlay, not a photon-ring profile",
     })
     if show:
         plt.show()
@@ -239,34 +256,45 @@ def plot_ring(bx, by, captured, ring, M=1.0, outdir=None, dpi=140, show=True):
     return fig, saved
 
 
-def plot_radii(bx, by, captured, M=1.0, outdir=None, dpi=140, show=True):
-    fig, ax = plt.subplots(figsize=(6.8, 6.8))
-    image = np.where(captured, 0.05, 0.92)
-    ax.imshow(image, origin="lower", cmap="gray", extent=_extent(bx, by),
-              vmin=0.0, vmax=1.0)
-    _draw_circles(ax, M)
+def plot_radii(bx, by, captured, M=1.0, fov_over_M=16.0,
+               outdir=None, dpi=140, show=True):
+    fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.4))
+
+    ax = axes[0]
+    ax.add_patch(Circle((0.0, 0.0), 2.0, facecolor="k", edgecolor="k",
+                        label=r"$r_s=2M$  (horizon)"))
+    ax.add_patch(Circle((0.0, 0.0), 3.0, fill=False, color=C_PH, lw=1.6, ls="--",
+                        label=r"$r_{\rm ph}=3M$  (photon sphere)"))
     ax.set_aspect("equal")
-    ax.set_xlabel(r"$b_x$ [$M$]")
-    ax.set_ylabel(r"$b_y$ [$M$]")
-    ax.set_title("Beat 4 · Three circles, three meanings")
-    ax.legend(loc="upper right", fontsize=8, title="drawn in the image plane")
-    note = (
-        r"$r_s$ is the horizon in the spacetime diagram;"
-        "\n"
-        r"$r_{\rm ph}$ is where a photon can orbit;"
-        "\n"
-        r"$b_{\rm crit}$ is the shadow rim a camera records."
-    )
-    ax.text(0.02, 0.02, note, transform=ax.transAxes, fontsize=8,
-            va="bottom", color="0.15",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.85, lw=0.4))
-    fig.tight_layout(rect=[0, 0.03, 1, 1])
+    ax.set_xlim(-4.2, 4.2)
+    ax.set_ylim(-4.2, 4.2)
+    ax.set_xlabel(r"coordinate $x/M$")
+    ax.set_ylabel(r"coordinate $y/M$")
+    ax.set_title("Spacetime diagram")
+    ax.legend(loc="upper right", fontsize=8)
+
+    ax = axes[1]
+    image = np.where(captured, 0.05, 0.92)
+    ax.imshow(image, origin="lower", cmap="gray",
+              extent=_extent_over_M(bx, by, M), vmin=0.0, vmax=1.0)
+    _draw_bcrit(ax, M, lw=2.2)
+    ax.set_aspect("equal")
+    ax.set_xlabel(r"$b_x/M$")
+    ax.set_ylabel(r"$b_y/M$")
+    ax.set_title("Image plane (what a camera records)")
+    ax.legend(loc="upper right", fontsize=8)
+
+    fig.suptitle("Beat 4 · Coordinate radii are not image-plane radii",
+                 fontsize=12, y=0.98)
+    fig.tight_layout(rect=[0, 0.03, 1, 0.94])
     saved = _finish(fig, outdir, "radii", dpi, provenance={
         "mode": "radii",
         "M": repr(M),
         "r_s_over_M": "2",
         "r_photon_over_M": "3",
         "b_crit_over_M": repr(3.0 * math.sqrt(3.0)),
+        "n_pix": str(bx.shape[0]),
+        "fov_over_M": repr(fov_over_M),
     })
     if show:
         plt.show()
@@ -285,7 +313,7 @@ def plot_weak(bs, exact, weak, M=1.0, outdir=None, dpi=140, show=True):
                label=r"$b_{\rm crit}$")
     ax.set_xlabel(r"$b/M$")
     ax.set_ylabel(r"deflection $\hat\alpha$ [rad]")
-    ax.set_title("Beat 5 · Large-$b$ deflection recovers $4GM/(c^2 b)$")
+    ax.set_title(r"Beat 5 · Large-$b$ deflection recovers $4M/b$")
     ax.legend(loc="upper right", fontsize=8)
     ax.set_xlim(bs.min() / M, bs.max() / M)
     fig.tight_layout(rect=[0, 0.03, 1, 1])
@@ -295,6 +323,9 @@ def plot_weak(bs, exact, weak, M=1.0, outdir=None, dpi=140, show=True):
         "M": repr(M),
         "relative_error_at_bmax": f"{rel:.6e}",
         "b_max_over_M": f"{float(bs[-1] / M):.6f}",
+        "n_samples": str(len(bs)),
+        "b_min_factor": "1.02",
+        "b_max_factor": "8.0",
     })
     if show:
         plt.show()
@@ -307,22 +338,22 @@ def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
     fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
 
     ax = axes[0]
-    # Unit-M hole: three radii in units of M.
     ax.add_patch(Circle((0.0, 0.0), numbers["r_s_over_M"], fill=True,
-                        facecolor="k", edgecolor="k"))
+                        facecolor="k", edgecolor="k",
+                        label=r"$r_s=2M$"))
     ax.add_patch(Circle((0.0, 0.0), numbers["r_photon_over_M"], fill=False,
                         color=C_PH, lw=1.4, ls="--",
                         label=r"$r_{\rm ph}=3M$"))
     ax.add_patch(Circle((0.0, 0.0), numbers["b_crit_over_M"], fill=False,
-                        color=C_BC, lw=1.6,
+                        color=C_BC, lw=2.0,
                         label=r"$b_{\rm crit}=3\sqrt{3}M$"))
     ax.set_aspect("equal")
     lim = 1.3 * numbers["b_crit_over_M"]
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
-    ax.set_xlabel(r"$x$ [$GM/c^2$ of this hole]")
-    ax.set_ylabel(r"$y$ [$GM/c^2$ of this hole]")
-    ax.set_title("Schwarzschild hole: photon ring")
+    ax.set_xlabel(r"$b_x/M$  (image plane)")
+    ax.set_ylabel(r"$b_y/M$")
+    ax.set_title("Schwarzschild hole: critical curve")
     ax.legend(loc="upper right", fontsize=8)
 
     ax = axes[1]
@@ -334,28 +365,34 @@ def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
         f"A transparent $10^{{{numbers['log10_m_galaxy']:.0f}}} M_\\odot$ "
         "galaxy lens at the\n"
         "GravitationalLensing cartoon distances "
-        f"($D_l=1\\,\\mathrm{{Gpc}}$, $D_s=2\\,\\mathrm{{Gpc}}$)\n"
+        r"($D_l=1\,\mathrm{Gpc}$, $D_s=2\,\mathrm{Gpc}$)"
+        "\n"
         f"has $\\theta_E = {te:.3f}''$.\n\n"
         "The physical Einstein radius at the lens, in units of\n"
         "that galaxy's own $GM/c^2$, is\n"
         f"    $R_E / M \\approx {re_over_m:.3e}$.\n\n"
         "The photon-sphere radius of a Schwarzschild hole is $3M$.\n"
-        "The shadow rim is $b_\\mathrm{crit} \\approx 5.196\\,M$.\n\n"
-        "One ring is a weak-field critical curve of a transparent\n"
-        "mass.  The other is the unstable photon orbit of the\n"
-        "vacuum Schwarzschild metric.  GravitationalLensing's\n"
-        "thin-lens $\\alpha = \\theta_E^2\\,\\theta/|\\theta|^2$ cannot\n"
-        "produce the second one."
+        "The image-plane critical curve is "
+        r"$b_{\mathrm{crit}} \approx 5.196\,M$."
+        "\n\n"
+        "One is a weak-field critical curve of a transparent mass.\n"
+        "The other is the capture boundary of the vacuum\n"
+        "Schwarzschild metric.  A thin-lens "
+        r"$\alpha = \theta_E^2\,\theta/|\theta|^2$"
+        "\ncannot produce the second one."
     )
     ax.text(0.02, 0.98, text, va="top", ha="left", fontsize=11,
             family="serif", transform=ax.transAxes)
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "compare", dpi, provenance={
         "mode": "compare",
+        "program_M": repr(M),
         "theta_e_arcsec": f"{te:.6f}",
         "r_e_over_M": f"{re_over_m:.6e}",
         "b_crit_over_M": f"{numbers['b_crit_over_M']:.6f}",
         "log10_m_galaxy": f"{numbers['log10_m_galaxy']:.6f}",
+        "d_l_m": repr(numbers["d_l_m"]),
+        "d_s_m": repr(numbers["d_s_m"]),
     })
     if show:
         plt.show()
@@ -365,20 +402,21 @@ def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
 
 
 def plot_backlight(bx, by, image, M=1.0, r_hot=6.0, b_hot=None,
-                   inclination=60.0, outdir=None, dpi=140, show=True):
+                   inclination=0.0, fov_over_M=16.0,
+                   outdir=None, dpi=140, show=True):
     fig, ax = plt.subplots(figsize=(6.4, 6.4))
     vmax = max(float(np.max(image)), 1.0e-12)
-    ax.imshow(image, origin="lower", cmap="inferno", extent=_extent(bx, by),
-              vmin=0.0, vmax=vmax)
-    _draw_circles(ax, M, show_rs=False, show_ph=True, show_bc=True)
+    ax.imshow(image, origin="lower", cmap="inferno",
+              extent=_extent_over_M(bx, by, M), vmin=0.0, vmax=vmax)
+    _draw_bcrit(ax, M, lw=1.4)
     ax.set_aspect("equal")
-    ax.set_xlabel(r"$b_x$ [$M$]")
-    ax.set_ylabel(r"$b_y$ [$M$]")
-    ax.set_title("Beat 7 · Thin equatorial backlight (false colour)")
+    ax.set_xlabel(r"$b_x/M$")
+    ax.set_ylabel(r"$b_y/M$")
+    ax.set_title("Beat 7 · Schematic turning-point overlay (false colour)")
     ax.legend(loc="upper right", fontsize=8)
     note = (
-        f"hot ring at $r={r_hot:g} M$, "
-        f"$i={inclination:g}^\\circ$ (display shading only)"
+        f"schematic periapsis paint at r={r_hot / M:g} M, "
+        f"i={inclination:g} deg (display only)"
     )
     ax.text(0.02, 0.02, note, transform=ax.transAxes, fontsize=8,
             color="white", va="bottom")
@@ -387,10 +425,14 @@ def plot_backlight(bx, by, image, M=1.0, r_hot=6.0, b_hot=None,
         "mode": "backlight",
         "M": repr(M),
         "r_hot": repr(r_hot),
+        "r_hot_over_M": repr(r_hot / M),
         "b_hot": "None" if b_hot is None else repr(b_hot),
+        "width_over_M": repr(phys.HOT_RING_WIDTH_DEFAULT),
         "inclination_deg": repr(inclination),
         "n_pix": str(bx.shape[0]),
+        "fov_over_M": repr(fov_over_M),
         "false_colour": "inferno display scale; not a spectrum",
+        "note": "schematic periapsis overlay, not a disk or EHT image",
     })
     if show:
         plt.show()

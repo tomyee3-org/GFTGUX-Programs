@@ -6,20 +6,22 @@ Command-line entry point for BlackHoleShadow.
 Eight calculations share one program, chosen with --mode, and they follow
 the teaching beats in the Help file:
 
-    rays       two PhotonOrbit-class geodesics, one captured and one not
-    pixels     the same two impact parameters as two cells of a coarse camera
-    capture    dense capture map — the geometric shadow
-    ring       photon-ring highlighter on that shadow rim
-    radii      r_s, r_photon and b_crit drawn on the same image plane
+    rays       two PhotonOrbit-class geodesics
+    pixels     two impact parameters on a coarse camera grid
+    capture    geometric capture map (the shadow)
+    ring       high-winding-ray overlay on that critical curve
+    radii      spacetime radii versus the image-plane critical curve
     weak       exact deflection versus the weak-field 4M/b formula
     compare    a galaxy Einstein radius versus this hole's b_crit
-    backlight  thin equatorial hot ring (false colour, optional inclination)
+    backlight  schematic periapsis overlay (false colour)
+
+Length flags (--r_cam, --b_in, --b_out, --fov, --r_hot) are in units of M.
 
 Examples
 --------
   python main.py --mode rays
   python main.py --mode capture
-  python main.py --mode backlight --inclination 70
+  python main.py --mode capture --M 5
   python main.py --mode weak --outdir ./runs
 """
 
@@ -34,8 +36,8 @@ def parse_args():
     p = argparse.ArgumentParser(
         prog="BlackHoleShadow",
         description=(
-            "Image-plane teaching program: the Schwarzschild shadow, the "
-            "photon ring, and why neither is a thin-lens Einstein ring."
+            "Image-plane teaching program: the Schwarzschild capture map, "
+            "the critical curve, and why neither is a thin-lens Einstein ring."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -50,15 +52,15 @@ def parse_args():
     g = p.add_argument_group("Spacetime")
     g.add_argument("--M", type=float, default=1.0, metavar="LEN",
                    help="gravitational length GM/c^2; teaching default is 1")
-    g.add_argument("--r_cam", type=float, default=None, metavar="LEN",
-                   help="camera / launch radius for ray integrations "
-                        f"(default {physics_bhs.R_CAM_DEFAULT:g} M)")
+    g.add_argument("--r_cam", type=float, default=None, metavar="M",
+                   help="camera / launch radius in units of M "
+                        f"(default {physics_bhs.R_CAM_DEFAULT:g}; must exceed 3)")
 
     g = p.add_argument_group("Two demonstration rays")
-    g.add_argument("--b_in", type=float, default=5.0, metavar="LEN",
-                   help="impact parameter expected to be captured at M=1")
-    g.add_argument("--b_out", type=float, default=6.0, metavar="LEN",
-                   help="impact parameter expected to escape at M=1")
+    g.add_argument("--b_in", type=float, default=5.0, metavar="M",
+                   help="first impact parameter in units of M")
+    g.add_argument("--b_out", type=float, default=6.0, metavar="M",
+                   help="second impact parameter in units of M")
     g.add_argument("--lambda_max", type=float, default=200.0, metavar="LAMBDA",
                    help="maximum affine parameter for ray integrations")
     g.add_argument("--d_lambda", type=float, default=0.02, metavar="LAMBDA",
@@ -66,16 +68,17 @@ def parse_args():
 
     g = p.add_argument_group("Camera grid")
     g.add_argument("--n_pix", type=int, default=161, metavar="N",
-                   help="pixels along one side; even values become the next odd")
+                   help="pixels along one side; even values become the next odd. "
+                        f"pixels mode caps this at {physics_bhs.PIXELS_N_PIX_MAX}")
     g.add_argument("--fov", type=float, default=16.0, metavar="M",
                    help="field of view on a side, in units of M")
 
     g = p.add_argument_group("Backlight and compare")
-    g.add_argument("--r_hot", type=float, default=None, metavar="LEN",
-                   help="coordinate radius of the thin equatorial ring "
-                        f"(default {physics_bhs.HOT_RING_R_DEFAULT:g} M)")
-    g.add_argument("--inclination", type=float, default=60.0, metavar="DEG",
-                   help="display inclination for backlight shading")
+    g.add_argument("--r_hot", type=float, default=None, metavar="M",
+                   help="turning-point radius used by the schematic overlay, "
+                        f"in units of M (default {physics_bhs.HOT_RING_R_DEFAULT:g})")
+    g.add_argument("--inclination", type=float, default=0.0, metavar="DEG",
+                   help="display inclination for backlight shading, in [0, 90]")
     g.add_argument("--logM", type=float, default=12.0, metavar="LOG10",
                    help="log10(M/M_sun) of the comparison galaxy lens")
 
@@ -99,12 +102,21 @@ def _validate_args(args):
     physics_bhs.validate_user_value("d_lambda", args.d_lambda, positive=True)
     physics_bhs.validate_user_value("fov", args.fov, positive=True)
     physics_bhs.validate_user_value("dpi", args.dpi, positive=True)
-    physics_bhs.validate_user_value("inclination", args.inclination)
-    physics_bhs.validate_user_value("logM", args.logM)
+    physics_bhs.validate_user_value(
+        "inclination", args.inclination, min_value=0.0, max_value=90.0,
+    )
+    physics_bhs.validate_user_value(
+        "logM", args.logM,
+        min_value=physics_bhs.LOGM_MIN, max_value=physics_bhs.LOGM_MAX,
+    )
     if args.r_cam is not None:
         physics_bhs.validate_user_value("r_cam", args.r_cam, positive=True)
+        if args.r_cam <= 3.0:
+            raise ValueError("--r_cam must exceed 3 (units of M)")
     if args.r_hot is not None:
         physics_bhs.validate_user_value("r_hot", args.r_hot, positive=True)
+        if args.r_hot <= 3.0:
+            raise ValueError("--r_hot must exceed 3 (units of M)")
     if int(args.n_pix) != args.n_pix or args.n_pix < 9:
         raise ValueError("n_pix must be an integer >= 9")
 
@@ -143,9 +155,11 @@ def main():
                 r_cam=args.r_cam, b_in=args.b_in, b_out=args.b_out,
                 lambda_max=args.lambda_max, d_lambda=args.d_lambda, **common)
         elif args.mode == "pixels":
+            n_use = min(int(args.n_pix), physics_bhs.PIXELS_N_PIX_MAX)
             driver_bhs.run_pixels(
-                r_cam=args.r_cam, b_in=args.b_in, b_out=args.b_out,
-                n_pix=min(args.n_pix, 41), fov_M=args.fov, **common)
+                b_in=args.b_in, b_out=args.b_out,
+                n_pix=n_use, n_pix_requested=args.n_pix,
+                fov_M=args.fov, **common)
         elif args.mode == "capture":
             driver_bhs.run_capture(n_pix=args.n_pix, fov_M=args.fov, **common)
         elif args.mode == "ring":

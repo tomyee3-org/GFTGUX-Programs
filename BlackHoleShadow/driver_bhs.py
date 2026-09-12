@@ -6,6 +6,10 @@ Glue between the command line and the physics / plot modules.
 Each mode builds a figure once.  ``--interactive`` only means “open a
 window”; there are no sliders.  Students change a run by passing flags
 on the command line.  Headless tests pass ``show=False`` and an ``outdir``.
+
+Length arguments arriving here are *multiples of M* (r_cam/M, b/M,
+fov/M, r_hot/M).  Absolute lengths are formed only at the physics
+boundary.
 """
 
 import os
@@ -34,115 +38,155 @@ def _print_summary(mode, extra_lines):
     print(sep)
 
 
+def _ratios_to_abs(M, r_cam_over_M, b_in_over_M, b_out_over_M):
+    M = phys.validate_user_value("M", M, positive=True)
+    if r_cam_over_M is None:
+        r_cam_over_M = phys.R_CAM_DEFAULT
+    r_cam_over_M = phys.validate_user_value("r_cam", r_cam_over_M, positive=True)
+    b_in_over_M = phys.validate_user_value("b_in", b_in_over_M, min_value=0.0)
+    b_out_over_M = phys.validate_user_value("b_out", b_out_over_M, min_value=0.0)
+    r_cam = phys.to_absolute_length(r_cam_over_M, M, "r_cam")
+    b_in = phys.to_absolute_length(b_in_over_M, M, "b_in")
+    b_out = phys.to_absolute_length(b_out_over_M, M, "b_out")
+    phys.require_camera_outside_photon_sphere(r_cam, M)
+    return M, r_cam_over_M, r_cam, b_in_over_M, b_in, b_out_over_M, b_out
+
+
 def run_rays(M=1.0, r_cam=None, b_in=5.0, b_out=6.0,
              lambda_max=200.0, d_lambda=0.02,
              outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 0: two PhotonOrbit-class rays, one captured and one escaped."""
-    M = phys.validate_user_value("M", M, positive=True)
-    r_cam = phys.R_CAM_DEFAULT if r_cam is None else r_cam
-    r_cam = phys.validate_user_value("r_cam", r_cam, positive=True)
-    info_in = phys.integrate_photon_orbit(M, r_cam, b_in, lambda_max, d_lambda)
-    info_out = phys.integrate_photon_orbit(M, r_cam, b_out, lambda_max, d_lambda)
+    """Beat 0: two PhotonOrbit-class rays."""
+    (M, r_cam_over_M, r_cam_abs, b_in_over_M, b_in_abs,
+     b_out_over_M, b_out_abs) = _ratios_to_abs(M, r_cam, b_in, b_out)
+    info_in = phys.integrate_photon_orbit(M, r_cam_abs, b_in_abs,
+                                          lambda_max, d_lambda)
+    info_out = phys.integrate_photon_orbit(M, r_cam_abs, b_out_abs,
+                                           lambda_max, d_lambda)
     _print_summary("rays", [
         f"M                      : {M:.6g}",
-        f"r_cam                  : {r_cam:.6g}",
-        f"b_in  (expect capture) : {b_in:.6g}  -> {info_in[2]['status']}",
-        f"b_out (expect escape)  : {b_out:.6g}  -> {info_out[2]['status']}",
-        f"b_crit                 : {phys.critical_impact_parameter(M):.6g}",
+        f"r_cam                  : {r_cam_over_M:.6g} M  ({r_cam_abs:.6g})",
+        f"b_in / M               : {b_in_over_M:.6g}  -> {info_in[2]['status']}",
+        f"b_out / M              : {b_out_over_M:.6g}  -> {info_out[2]['status']}",
+        f"b_crit / M             : {phys.critical_impact_parameter(M) / M:.6g}",
         f"Delta phi in / out     : {info_in[2]['delta_phi']:.6g} / "
         f"{info_out[2]['delta_phi']:.6g} rad",
+        "Delta phi is accumulated azimuth to a finite stopping surface,",
+        "not the asymptotic deflection hat{alpha}.",
     ])
     return plotting.plot_rays(
-        info_in, info_out, M=M, r_cam=r_cam, b_in=b_in, b_out=b_out,
+        info_in, info_out, M=M, r_cam=r_cam_abs,
+        b_in=b_in_abs, b_out=b_out_abs,
+        lambda_max=lambda_max, d_lambda=d_lambda,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
 
-def run_pixels(M=1.0, r_cam=None, b_in=5.0, b_out=6.0,
-               n_pix=21, fov_M=16.0,
+def run_pixels(M=1.0, b_in=5.0, b_out=6.0,
+               n_pix=None, fov_M=16.0, n_pix_requested=None,
                outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 1: the same two b values as two pixels in a coarse camera."""
+    """Beat 1: two impact parameters on a coarse camera grid."""
     M = phys.validate_user_value("M", M, positive=True)
-    n_pix = phys.odd_n_pix(n_pix if n_pix is not None else 21)
-    # A coarse teaching grid; do not enforce the dense-map shadow contract.
-    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M)
+    if n_pix is None:
+        n_pix = phys.PIXELS_N_PIX_MAX
+    n_pix = phys.odd_n_pix(n_pix)
+    if n_pix > phys.PIXELS_N_PIX_MAX:
+        n_pix = phys.odd_n_pix(phys.PIXELS_N_PIX_MAX)
+    clamped = (n_pix_requested is not None
+               and int(n_pix_requested) > phys.PIXELS_N_PIX_MAX)
+    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     captured = phys.capture_map(bx, by, M)
-    _print_summary("pixels", [
+    b_in_abs = phys.to_absolute_length(b_in, M, "b_in")
+    b_out_abs = phys.to_absolute_length(b_out, M, "b_out")
+    lines = [
         f"M                      : {M:.6g}",
-        f"b_in / b_out           : {b_in:.6g} / {b_out:.6g}",
-        f"b_crit                 : {phys.critical_impact_parameter(M):.6g}",
+        f"b_in / M               : {b_in:.6g}  -> "
+        f"{'captured' if phys.is_captured(b_in_abs, M) else 'escaped'}",
+        f"b_out / M              : {b_out:.6g}  -> "
+        f"{'captured' if phys.is_captured(b_out_abs, M) else 'escaped'}",
+        f"b_crit / M             : {phys.critical_impact_parameter(M) / M:.6g}",
         f"n_pix x n_pix          : {n_pix} x {n_pix}",
         f"fov                    : {fov_M:.6g} M",
-    ])
+    ]
+    if clamped:
+        lines.append(
+            f"note                   : pixels mode caps --n_pix at "
+            f"{phys.PIXELS_N_PIX_MAX} so the coarse camera stays coarse "
+            f"(requested {int(n_pix_requested)})."
+        )
+    _print_summary("pixels", lines)
     return plotting.plot_pixels(
-        bx, by, captured, M=M, b_in=b_in, b_out=b_out,
+        bx, by, captured, M=M, b_in=b_in_abs, b_out=b_out_abs,
+        n_pix_requested=n_pix_requested, fov_over_M=fov_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
 
 def run_capture(M=1.0, n_pix=161, fov_M=16.0,
                 outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 2: dense capture map.  Dark disk of radius b_crit, not r_s."""
+    """Beat 2: geometric capture map.  Dark disk of radius b_crit."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
-    phys.validate_user_value("fov_M", fov_M, positive=True)
+    phys.validate_user_value("fov", fov_M, positive=True)
     phys.require_resolved_shadow(M, fov_M, n_pix)
-    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M)
+    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     captured = phys.capture_map(bx, by, M)
     b_crit = phys.critical_impact_parameter(M)
-    n_dark = int(captured.sum())
     _print_summary("capture", [
         f"M                      : {M:.6g}",
-        f"b_crit                 : {b_crit:.6g}",
-        f"r_s                    : {phys.event_horizon(M):.6g}",
-        f"r_photon               : {phys.photon_sphere(M):.6g}",
+        f"b_crit / M             : {b_crit / M:.6g}",
+        f"r_s / M                : {phys.event_horizon(M) / M:.6g}",
+        f"r_photon / M           : {phys.photon_sphere(M) / M:.6g}",
         f"n_pix x n_pix          : {n_pix} x {n_pix}",
-        f"captured pixels        : {n_dark} / {captured.size}",
+        f"fov                    : {fov_M:.6g} M",
+        f"captured pixels        : {int(captured.sum())} / {captured.size}",
     ])
     return plotting.plot_capture(
-        bx, by, captured, M=M,
+        bx, by, captured, M=M, fov_over_M=fov_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
 
 def run_ring(M=1.0, n_pix=161, fov_M=16.0,
              outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 3: capture map plus the high-winding photon-ring highlighter."""
+    """Beat 3: capture map plus a high-winding-ray overlay."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
-    phys.require_resolved_shadow(M, fov_M, n_pix)
-    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M)
+    b_lo, b_hi = phys.require_resolved_high_winding(M, fov_M, n_pix)
+    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     captured = phys.capture_map(bx, by, M)
     ring = phys.photon_ring_mask(bx, by, M)
     _print_summary("ring", [
         f"M                      : {M:.6g}",
-        f"b_crit                 : {phys.critical_impact_parameter(M):.6g}",
-        f"photon-ring pixels     : {int(ring.sum())}",
+        f"b_crit / M             : {phys.critical_impact_parameter(M) / M:.6g}",
+        f"high-winding window    : ({b_lo / M:.6g}, {b_hi / M:.6g}] M",
+        f"overlay pixels         : {int(ring.sum())}",
         f"n_pix x n_pix          : {n_pix} x {n_pix}",
+        "Overlay = strongly wound escapers, not a photon-ring profile.",
     ])
     return plotting.plot_ring(
-        bx, by, captured, ring, M=M,
+        bx, by, captured, ring, M=M, b_lo=b_lo, b_hi=b_hi, fov_over_M=fov_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
 
 def run_radii(M=1.0, n_pix=161, fov_M=16.0,
               outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 4: three circles, three meanings — r_s, r_photon, b_crit."""
+    """Beat 4: spacetime radii versus the image-plane critical curve."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
     phys.require_resolved_shadow(M, fov_M, n_pix)
-    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M)
+    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     captured = phys.capture_map(bx, by, M)
     _print_summary("radii", [
         f"M                      : {M:.6g}",
         f"r_s / M                : {phys.event_horizon(M) / M:.6g}",
         f"r_photon / M           : {phys.photon_sphere(M) / M:.6g}",
         f"b_crit / M             : {phys.critical_impact_parameter(M) / M:.6g}",
-        "These are three different circles.  Only b_crit is the shadow rim.",
+        "Left: coordinate radii in the spacetime diagram.",
+        "Right: the only circle a camera records is b_crit.",
     ])
     return plotting.plot_radii(
-        bx, by, captured, M=M,
+        bx, by, captured, M=M, fov_over_M=fov_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
@@ -151,17 +195,15 @@ def run_weak(M=1.0, outdir=None, dpi=140, show=True, interactive=False):
     """Beat 5: exact deflection versus 4M/b."""
     M = phys.validate_user_value("M", M, positive=True)
     bs, exact, weak = phys.deflection_curve(M)
-    # A couple of checkpoints for the console.
-    b_far = float(bs[-1])
-    b_near = float(bs[0])
     _print_summary("weak", [
         f"M                      : {M:.6g}",
-        f"b_crit                 : {phys.critical_impact_parameter(M):.6g}",
-        f"hat alpha (b={b_far:.3g} M) exact/weak : "
+        f"b_crit / M             : {phys.critical_impact_parameter(M) / M:.6g}",
+        f"hat alpha (b={bs[-1] / M:.3g} M) exact/weak : "
         f"{exact[-1]:.5g} / {weak[-1]:.5g} rad",
-        f"hat alpha (b={b_near:.3g} M) exact/weak : "
+        f"hat alpha (b={bs[0] / M:.3g} M) exact/weak : "
         f"{exact[0]:.5g} / {weak[0]:.5g} rad",
         "The weak-field formula is the large-b limit of the same rays.",
+        "The divergence as b -> b_crit is strong deflection, not a ring.",
     ])
     return plotting.plot_weak(
         bs, exact, weak, M=M,
@@ -171,9 +213,11 @@ def run_weak(M=1.0, outdir=None, dpi=140, show=True, interactive=False):
 
 def run_compare(M=1.0, logM=12.0,
                 outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 6: galaxy Einstein radius versus this hole's b_crit."""
+    """Beat 6: galaxy Einstein radius versus this hole's critical curve."""
     M = phys.validate_user_value("M", M, positive=True)
-    logM = phys.validate_user_value("logM", logM)
+    logM = phys.validate_user_value(
+        "logM", logM, min_value=phys.LOGM_MIN, max_value=phys.LOGM_MAX,
+    )
     numbers = phys.compare_rings(log10_m_galaxy=logM)
     _print_summary("compare", [
         f"galaxy log10(M/M_sun)  : {logM:.6g}",
@@ -181,7 +225,9 @@ def run_compare(M=1.0, logM=12.0,
         f"R_E / (GM/c^2)_galaxy  : {numbers['r_e_over_M']:.6g}",
         f"b_crit / M (this hole) : {numbers['b_crit_over_M']:.6g}",
         f"r_photon / M           : {numbers['r_photon_over_M']:.6g}",
-        "These are not the same ring.",
+        "Einstein critical curve and Schwarzschild critical curve",
+        "are not the same ring.",
+        f"(--M = {M:.6g} is unused here; the comparison is dimensionless.)",
     ])
     return plotting.plot_compare(
         numbers, M=M,
@@ -190,29 +236,35 @@ def run_compare(M=1.0, logM=12.0,
 
 
 def run_backlight(M=1.0, n_pix=161, fov_M=16.0,
-                  r_hot=None, inclination=60.0,
+                  r_hot=None, inclination=0.0,
                   outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 7: thin equatorial backlight.  Ring on a dark disk, no Kerr."""
+    """Beat 7: schematic turning-point backlight.  Not a disk image."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
     phys.require_resolved_shadow(M, fov_M, n_pix)
-    r_hot = phys.HOT_RING_R_DEFAULT * M if r_hot is None else r_hot
-    r_hot = phys.validate_user_value("r_hot", r_hot, positive=True)
-    inclination = phys.validate_user_value("inclination", inclination)
-    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M)
+    if r_hot is None:
+        r_hot_over_M = phys.HOT_RING_R_DEFAULT
+    else:
+        r_hot_over_M = phys.validate_user_value("r_hot", r_hot, positive=True)
+    r_hot_abs = phys.to_absolute_length(r_hot_over_M, M, "r_hot")
+    inclination = phys.validate_user_value(
+        "inclination", inclination, min_value=0.0, max_value=90.0,
+    )
+    bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
     image, b_hot = phys.backlight_image(
-        bx, by, M, r_hot=r_hot, inclination_deg=inclination,
+        bx, by, M, r_hot=r_hot_abs, inclination_deg=inclination,
     )
     _print_summary("backlight", [
         f"M                      : {M:.6g}",
-        f"r_hot                  : {r_hot:.6g}",
-        f"b_hot (primary image)  : {b_hot:.6g}",
+        f"r_hot                  : {r_hot_over_M:.6g} M",
+        f"b(periapsis=r_hot) / M : {b_hot / M:.6g}",
         f"inclination            : {inclination:.6g} deg  (display shading)",
+        "Schematic overlay keyed to periapsis.  Not a disk, not EHT.",
         "False colour is a display scale.  The shadow is not a rainbow.",
     ])
     return plotting.plot_backlight(
-        bx, by, image, M=M, r_hot=r_hot, b_hot=b_hot,
-        inclination=inclination,
+        bx, by, image, M=M, r_hot=r_hot_abs, b_hot=b_hot,
+        inclination=inclination, fov_over_M=fov_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 

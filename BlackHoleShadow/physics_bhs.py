@@ -10,12 +10,14 @@ It takes a grid of image-plane impact parameters (b_x, b_y) and classifies
 each direction on the sky as captured, escaped, or a high-winding escaper
 near the photon sphere.
 
-Geometric units: the single scale is M = GM/c^2.  Lengths (r, b, r_s,
-r_photon) are stored in the same unit the caller used for M.  Default
-teaching runs use M = 1.
+Geometric units: the single scale is M = GM/c^2.  Command-line length
+flags are multiples of M (r_cam/M, b/M, fov/M, r_hot/M).  The integrator
+converts those ratios to absolute lengths by multiplying by M.  Camera
+grids are built so a fixed --fov (in units of M) frames the same
+dimensionless picture at every M.
 
 Nothing here is Kerr, plasma, radiative transfer, or an EHT pipeline.
-Inclination is a projection of a spherically symmetric capture cone.
+A nonzero backlight inclination is a display factor, not a disk model.
 """
 
 from __future__ import annotations
@@ -26,7 +28,12 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.1.0"
+MODEL_VERSION = "0.2.0"
+
+# RK4 null-geodesic stepper is kept in lockstep with PhotonOrbit 1.4.0
+# (GFTGUX-Programs/PhotonOrbit).  This package does not import that
+# program; the copy exists so a BlackHoleShadow zip runs standalone.
+PHOTONORBIT_SYNC_VERSION = "1.4.0"
 
 BUILD_ID_COVERS = (
     "physics_bhs.py",
@@ -81,17 +88,25 @@ SHADOW_MIN_INTERVALS = 8.0
 # Automatic n_pix cap.  Wider fields need an explicit --n_pix.
 N_PIX_AUTO_MAX = 401
 
-# Default camera radius in units of M.  Large compared with 3M so the
+# Default camera radius as a multiple of M.  Large compared with 3 so the
 # conserved b is essentially the impact parameter at infinity.
 R_CAM_DEFAULT = 40.0
 
-# Window around the photon sphere used to tag a photon-ring pixel.
+# Window around the photon sphere, as a multiple of M, used to tag a
+# high-winding overlay pixel.  Not a fitted photon-ring profile.
 PHOTON_RING_R_WINDOW = 0.35
+
+# Coarse-camera cap for pixels mode.  Dense maps use --n_pix as given.
+PIXELS_N_PIX_MAX = 41
+
+# compare-mode log10(M/M_sun) teaching range.
+LOGM_MIN = 6.0
+LOGM_MAX = 15.0
 
 # Azimuth threshold that counts as "wound once" on an escaping ray.
 WINDING_DELTA_PHI = 2.0 * math.pi
 
-# Thin-ring half-width in units of M for the optional backlight.
+# Schematic backlight Gaussian half-width as a multiple of M.
 HOT_RING_WIDTH_DEFAULT = 0.45
 
 # Default hot-ring coordinate radius (a few r_s, outside the photon sphere).
@@ -332,7 +347,10 @@ def integrate_photon_orbit(M, r0, b, lambda_max=200.0, d_lambda=0.02):
     r_ph = photon_sphere(M)
     b_crit = critical_impact_parameter(M)
     if r0 <= r_s:
-        raise ValueError(f"r0 must be outside the event horizon (r0 > {r_s:g}).")
+        raise ValueError(
+            f"--r_cam must be outside the event horizon "
+            f"(r_cam > 2M = {r_s:g} in the same units as M)."
+        )
     if b < 0.0:
         raise ValueError("b must be nonnegative.")
     step_ratio = lambda_max / d_lambda
@@ -426,39 +444,125 @@ def integrate_photon_orbit(M, r0, b, lambda_max=200.0, d_lambda=0.02):
     return xs, ys, info
 
 
-def make_impact_grid(n_pix, fov_M):
-    """Square camera grid in impact-parameter units of M.
+def to_absolute_length(value_over_M, M, name="length"):
+    """Convert a user length given in units of M to an absolute length."""
+    value_over_M = _require_finite(name, value_over_M)
+    M = _require_positive("M", M)
+    if value_over_M < 0.0:
+        raise ValueError(f"{name} must be nonnegative, got {value_over_M:g}")
+    return value_over_M * M
 
-    n_pix is rounded up to the next odd integer so a pixel sits on the
-    optical axis.  Coordinates run from -fov/2 to +fov/2 inclusive.
+
+def require_camera_outside_photon_sphere(r_cam, M):
+    """This lesson's capture predicate needs r_cam > 3M."""
+    r_cam = _require_positive("r_cam", r_cam)
+    r_ph = photon_sphere(M)
+    if r_cam <= r_ph:
+        raise ValueError(
+            f"--r_cam must lie outside the photon sphere "
+            f"(r_cam > 3M = {r_ph:g} in the same units as M).  "
+            "Inside 3M the capture cone is a different lesson."
+        )
+    return r_cam
+
+
+def make_impact_grid(n_pix, fov_over_M, M=1.0):
+    """Square camera grid of conserved impact parameters.
+
+    ``fov_over_M`` is the field of view on a side, in units of M.
+    Returned ``bx, by`` are absolute lengths (same unit as M), running
+    from -0.5*fov_over_M*M to +0.5*fov_over_M*M inclusive.  n_pix is
+    rounded up to the next odd integer so a pixel sits on the axis.
     """
     n_pix = int(n_pix)
     if n_pix < 9:
         raise ValueError("n_pix must be an integer >= 9")
     if n_pix % 2 == 0:
         n_pix += 1
-    fov_M = _require_positive("fov_M", fov_M)
-    half = 0.5 * fov_M
+    fov_over_M = _require_positive("fov", fov_over_M)
+    M = _require_positive("M", M)
+    half = 0.5 * fov_over_M * M
     axis = np.linspace(-half, half, n_pix)
     bx, by = np.meshgrid(axis, axis)
-    return bx, by, n_pix, fov_M
+    return bx, by, n_pix, fov_over_M
 
 
-def require_resolved_shadow(M, fov_M, n_pix):
-    """Reject a camera grid on which the shadow is smaller than a few pixels."""
+def pixel_edge_extent(bx, by):
+    """imshow extent using pixel *edges*, not pixel centres."""
+    x = np.asarray(bx[0, :], dtype=float)
+    y = np.asarray(by[:, 0], dtype=float)
+    dx = x[1] - x[0] if x.size > 1 else 1.0
+    dy = y[1] - y[0] if y.size > 1 else 1.0
+    return [float(x[0] - 0.5 * dx), float(x[-1] + 0.5 * dx),
+            float(y[0] - 0.5 * dy), float(y[-1] + 0.5 * dy)]
+
+
+def require_resolved_shadow(M, fov_over_M, n_pix):
+    """Reject a camera grid on which the shadow is smaller than a few pixels.
+
+    The check is M-invariant once ``fov_over_M`` is a field in units of M.
+    """
     b_crit = critical_impact_parameter(M)
-    fov_M = _require_positive("fov_M", fov_M)
+    fov_over_M = _require_positive("fov", fov_over_M)
     n_pix = int(n_pix)
-    spacing = fov_M / max(n_pix - 1, 1)
+    width = fov_over_M * M
+    spacing = width / max(n_pix - 1, 1)
     intervals = (2.0 * b_crit) / spacing
     if intervals < SHADOW_MIN_INTERVALS:
         raise ValueError(
-            f"the shadow diameter 2 b_crit = {2.0 * b_crit:.4g} M spans only "
-            f"{intervals:.2f} grid intervals.  Capture maps need at least "
-            f"{SHADOW_MIN_INTERVALS:g} intervals so the rim is visible.  "
-            "Use a smaller --fov or a larger --n_pix."
+            f"the shadow diameter 2 b_crit = {2.0 * b_crit / M:.4g} M spans "
+            f"only {intervals:.2f} grid intervals.  Capture maps need at "
+            f"least {SHADOW_MIN_INTERVALS:g} intervals so the rim is "
+            "visible.  Use a smaller --fov or a larger --n_pix."
         )
     return intervals
+
+
+def impact_parameter_of_periapsis(r_min, M):
+    """b of an escaping ray whose outer turning point is r_min > 3M."""
+    M = _require_positive("M", M)
+    r_min = _require_positive("r_min", r_min)
+    if r_min <= photon_sphere(M):
+        raise ValueError("r_min must lie outside the photon sphere.")
+    return math.sqrt(r_min ** 3 / (r_min - 2.0 * M))
+
+
+def high_winding_b_window(M, r_window=None, delta_phi_min=None):
+    """Inclusive-outer interval (b_lo, b_hi) for the high-winding overlay.
+
+    b_lo is just above b_crit (no artificial 1e-4 gap).  b_hi is the
+    largest b whose periapsis still sits within r_window of 3M *and*
+    whose asymptotic azimuth exceeds delta_phi_min.  This is a
+    pedagogical highlighter, not a photon-ring brightness profile.
+    """
+    M = _require_positive("M", M)
+    if r_window is None:
+        r_window = PHOTON_RING_R_WINDOW * M
+    else:
+        r_window = _require_positive("r_window", r_window)
+    if delta_phi_min is None:
+        delta_phi_min = WINDING_DELTA_PHI
+    else:
+        delta_phi_min = _require_positive("delta_phi_min", delta_phi_min)
+    b_crit = critical_impact_parameter(M)
+    r_ph = photon_sphere(M)
+    r_outer = r_ph + r_window
+    b_from_r = impact_parameter_of_periapsis(r_outer, M)
+    # Walk inward from b_from_r until Delta phi exceeds the threshold.
+    b_hi = b_crit
+    samples = np.geomspace(b_crit * (1.0 + 1.0e-8), b_from_r, 64)
+    for bv in samples[::-1]:
+        try:
+            delta_phi = asymptotic_deflection(float(bv), M) + math.pi
+        except ValueError:
+            continue
+        if delta_phi > delta_phi_min:
+            b_hi = float(bv)
+            break
+    b_lo = b_crit
+    if b_hi <= b_lo:
+        return b_lo, b_lo
+    return b_lo, b_hi
 
 
 def capture_map(bx, by, M):
@@ -467,42 +571,40 @@ def capture_map(bx, by, M):
     return b <= critical_impact_parameter(M)
 
 
-def photon_ring_mask(bx, by, M, r_window=PHOTON_RING_R_WINDOW,
-                     delta_phi_min=WINDING_DELTA_PHI):
-    """Escaping pixels whose periapsis is near 3M and whose winding is large.
+def photon_ring_mask(bx, by, M, r_window=None, delta_phi_min=None):
+    """High-winding overlay: escaped pixels with b_crit < b <= b_hi.
 
-    Uses the exact periapsis root and the asymptotic Delta phi.  A pixel
-    inside the shadow is never a photon-ring pixel.
+    This is a pedagogical highlighter of strongly wound escaping rays,
+    not a measurement of photon-ring brightness.  There is no artificial
+    gap above b_crit.
     """
     M = _require_positive("M", M)
-    r_window = _require_positive("r_window", r_window)
-    delta_phi_min = _require_positive("delta_phi_min", delta_phi_min)
+    if r_window is None:
+        r_window = PHOTON_RING_R_WINDOW * M
+    if delta_phi_min is None:
+        delta_phi_min = WINDING_DELTA_PHI
     b = np.hypot(np.asarray(bx, dtype=float), np.asarray(by, dtype=float))
-    b_crit = critical_impact_parameter(M)
-    r_ph = photon_sphere(M)
+    b_lo, b_hi = high_winding_b_window(M, r_window=r_window,
+                                       delta_phi_min=delta_phi_min)
     mask = np.zeros(b.shape, dtype=bool)
-    escaped = b > b_crit
-    if not np.any(escaped):
+    if b_hi <= b_lo:
         return mask
-    # Thin annulus just outside b_crit.  A 48-point radial table is enough
-    # to decide the highlighter; the mask is a teaching overlay, not a
-    # fitted photon-ring profile.
-    b_hi = min(float(np.max(b)), b_crit + 1.5 * M)
-    sample_b = np.geomspace(b_crit * (1.0 + 1.0e-4), max(b_hi, b_crit * 1.02), 48)
-    ring_b = []
-    for bv in sample_b:
-        rmin = periapsis(float(bv), M)
-        if abs(rmin - r_ph) > r_window:
-            continue
-        delta_phi = asymptotic_deflection(float(bv), M) + math.pi
-        if delta_phi > delta_phi_min:
-            ring_b.append(float(bv))
-    if not ring_b:
-        return mask
-    b_lo_ring = min(ring_b)
-    b_hi_ring = max(ring_b)
-    mask[escaped] = (b[escaped] >= b_lo_ring) & (b[escaped] <= b_hi_ring)
+    mask[(b > b_lo) & (b <= b_hi)] = True
     return mask
+
+
+def require_resolved_high_winding(M, fov_over_M, n_pix):
+    """Reject a ring-mode grid that cannot sample the high-winding window."""
+    require_resolved_shadow(M, fov_over_M, n_pix)
+    b_lo, b_hi = high_winding_b_window(M)
+    width = _require_positive("fov", fov_over_M) * _require_positive("M", M)
+    spacing = width / max(int(n_pix) - 1, 1)
+    if b_hi - b_lo < 0.5 * spacing:
+        raise ValueError(
+            "the high-winding overlay spans less than half a grid interval.  "
+            "Use a smaller --fov or a larger --n_pix so the overlay is visible."
+        )
+    return b_lo, b_hi
 
 
 def deflection_curve(M, b_min_factor=1.02, b_max_factor=8.0, n=48):
@@ -570,22 +672,26 @@ def compare_rings(log10_m_galaxy=12.0, d_l=D_L_DEFAULT, d_s=D_S_DEFAULT):
     }
 
 
-def backlight_image(bx, by, M, r_hot=HOT_RING_R_DEFAULT,
-                    width=HOT_RING_WIDTH_DEFAULT, inclination_deg=0.0):
-    """False-colour photograph of a thin equatorial hot ring plus the shadow.
+def backlight_image(bx, by, M, r_hot=None,
+                    width=None, inclination_deg=0.0):
+    """Schematic brightness overlay, not a ray-traced equatorial ring.
 
-    The geometric shadow is black.  Escaping rays whose periapsis sits
-    near r_hot light up as a thin ring just outside the shadow — the
-    primary image of the ring.  Rays that wind past 2 pi pick up an extra
-    contribution on the shadow rim (the photon ring).  Inclination only
-    multiplies the ring by a left/right display factor so a high-i frame
-    looks like a crescent; that factor is a drawing, not Doppler beaming
-    from a radiating fluid and not Kerr.
+    Captured pixels stay dark.  Escaping rays whose periapsis sits near
+    r_hot are painted with a Gaussian in b; a thinner Gaussian hugs
+    b_crit.  That is a drawing keyed to turning points, not an
+    intersection with an emitting plane, not transport, and not beaming.
+    Inclination, if any, is a left/right display factor.
     """
     M = _require_positive("M", M)
+    if r_hot is None:
+        r_hot = HOT_RING_R_DEFAULT * M
+    if width is None:
+        width = HOT_RING_WIDTH_DEFAULT * M
     r_hot = _require_positive("r_hot", r_hot)
     width = _require_positive("width", width)
     inclination_deg = _require_finite("inclination_deg", inclination_deg)
+    if inclination_deg < 0.0 or inclination_deg > 90.0:
+        raise ValueError("inclination must lie in [0, 90] degrees.")
     if r_hot <= photon_sphere(M):
         raise ValueError(
             f"r_hot must lie outside the photon sphere ({photon_sphere(M):g})."
