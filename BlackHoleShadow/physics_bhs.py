@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.6.0"
+MODEL_VERSION = "0.7.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # m>=5 is omitted; the figure must say so.
@@ -233,24 +233,24 @@ def periapsis(b, M):
     b_crit = critical_impact_parameter(M)
     if b <= b_crit:
         return None
-    r_ph = photon_sphere(M)
-    r = max(float(b), r_ph + 0.25 * M)
+    beta = b / M
+    rho = max(beta, 3.25)
     for _ in range(80):
-        f = r * r * r - b * b * r + 2.0 * M * b * b
-        df = 3.0 * r * r - b * b
+        f = rho ** 3 - beta * beta * rho + 2.0 * beta * beta
+        df = 3.0 * rho * rho - beta * beta
         if df == 0.0:
-            r = r_ph + 0.5 * M + 0.5 * float(b)
+            rho = 3.5 + 0.5 * beta
             continue
-        r_new = r - f / df
-        if r_new <= r_ph:
-            r_new = 0.5 * (r + r_ph) + 0.05 * M
-        if abs(r_new - r) <= 1.0e-14 * max(1.0, abs(r)):
-            r = r_new
+        rho_new = rho - f / df
+        if rho_new <= 3.0:
+            rho_new = 0.5 * (rho + 3.0) + 0.05
+        if abs(rho_new - rho) <= 1.0e-14 * max(1.0, abs(rho)):
+            rho = rho_new
             break
-        r = r_new
-    if r <= r_ph or not math.isfinite(r):
+        rho = rho_new
+    if rho <= 3.0 or not math.isfinite(rho):
         raise RuntimeError("periapsis solver failed for the given b, M.")
-    return r
+    return rho * M
 
 
 def asymptotic_deflection(b, M, n_u=800):
@@ -273,22 +273,27 @@ def asymptotic_deflection(b, M, n_u=800):
             f"(b > b_crit = {critical_impact_parameter(M):g})."
         )
     r_min = periapsis(b, M)
-    u_min = 1.0 / r_min
-    # u = 1/r.  Write u = u_min - t^2 so the turning-point square root
-    # cancels and the outer limit u = 0 is t = sqrt(u_min).
+    beta = b / M
+    x_min = M / r_min
+    # Dimensionless u-sub: x = M/r = x_min - t^2.
+    delta = abs(beta - 3.0 * math.sqrt(3.0))
     n_u = max(int(n_u), 256)
-    t = np.linspace(0.0, math.sqrt(u_min), n_u)
-    u = np.clip(u_min - t * t, 0.0, u_min)
-    rad = 1.0 - (b * b) * u * u + 2.0 * M * (b * b) * u * u * u
+    if delta < 1.0e-2:
+        n_u = max(n_u, 4096)
+    if delta < 1.0e-4:
+        n_u = max(n_u, 16384)
+    t = np.linspace(0.0, math.sqrt(x_min), n_u)
+    x = np.clip(x_min - t * t, 0.0, x_min)
+    rad = 1.0 - (beta * beta) * x * x + 2.0 * (beta * beta) * x * x * x
     rad = np.maximum(rad, 0.0)
     piece = np.zeros_like(t)
     safe = rad > 0.0
     piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
-    drad_du = -2.0 * b * b * u_min + 6.0 * M * b * b * u_min * u_min
-    slope = abs(float(drad_du))
+    drad_dx = -2.0 * beta * beta * x_min + 6.0 * beta * beta * x_min * x_min
+    slope = abs(float(drad_dx))
     if slope > 0.0:
         piece[0] = 2.0 / math.sqrt(slope)
-    delta_phi_inf = 2.0 * b * float(np.trapezoid(piece, t))
+    delta_phi_inf = 2.0 * beta * float(np.trapezoid(piece, t))
     return delta_phi_inf - math.pi
 
 
@@ -741,9 +746,18 @@ def _phi_integral(u_lo, u_hi, b, M, n=1024):
         x_lo, x_hi = x_hi, x_lo
     if x_hi <= x_lo:
         return 0.0
+    beta_c = 3.0 * math.sqrt(3.0)
+    delta = abs(beta - beta_c)
     n = max(int(n), 256)
+    if delta < 1.0e-2:
+        n = max(n, 4096)
+    if delta < 1.0e-4:
+        n = max(n, 16384)
+    if delta < 1.0e-6:
+        n = max(n, 32768)
     R_hi = float(_R_hat(x_hi, beta))
-    if R_hi > 1.0e-14:
+    use_plain = R_hi > 1.0e-8 and not (delta < 1.0e-3 and R_hi < 1.0e-4)
+    if use_plain:
         x = np.linspace(x_lo, x_hi, n)
         rad = np.maximum(_R_hat(x, beta), 0.0)
         inv = np.zeros_like(x)
@@ -871,6 +885,7 @@ def critical_x_of_phi(phi):
     if phi <= 0.0:
         return 0.0
     a = math.tanh(0.5 * float(phi) + _ATANH_ONE_OVER_SQRT3)
+    a = min(a, math.nextafter(1.0, 0.0))
     return max(0.5 * (a * a - 1.0 / 3.0), 0.0)
 
 
@@ -904,6 +919,7 @@ def emitted_intensity(r, M, r_hot=None, width=None):
         r_hot = HOT_RING_R_DEFAULT * M
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
+    width = _require_positive("width", width)
     if r <= event_horizon(M):
         return 0.0
     return math.exp(-0.5 * ((r - r_hot) / width) ** 2)
@@ -980,12 +996,21 @@ def transfer_curves(M, b_max_over_M=8.0, max_m=3):
 
 
 def source_crossing_impacts(M, r_hot, max_m=4):
-    """Bracketed roots of r_m(b) = r_hot, one per existing branch."""
+    """Bracketed roots of r_m(b) = r_hot, one per existing branch.
+
+    Each transfer branch is scanned from below b_crit out to a large b.
+    If r_m jumps from a finite value below r_hot to None, the solver
+    hunts the branch endpoint (where r_m -> infinity) rather than
+    declaring the root missing.
+    """
     M = _require_positive("M", M)
     r_hot = _require_positive("r_hot", r_hot)
     b_crit = critical_impact_parameter(M)
-    b_max = max(1.6 * r_hot, 2.0 * b_crit)
-    bs = adaptive_impact_samples(M, b_max, n_outer=80, n_near=120)
+    b_max = max(2.0 * r_hot, 3.0 * b_crit)
+    rel_lo = -np.logspace(-10.0, -2.0, 48)
+    rel_hi = np.logspace(-10.0, math.log10(max(b_max / b_crit - 1.0, 1.0e-2)), 96)
+    bs = np.unique(np.concatenate([b_crit * (1.0 + rel_lo), b_crit * (1.0 + rel_hi)]))
+    bs = bs[bs > 0.0]
     found = [None] * max_m
     prev_r = [None] * max_m
     prev_b = None
@@ -994,16 +1019,37 @@ def source_crossing_impacts(M, r_hot, max_m=4):
         for m, r in enumerate(radii):
             if found[m] is not None:
                 continue
-            if r is None or prev_r[m] is None or prev_b is None:
-                prev_r[m] = r
-                continue
-            if (prev_r[m] - r_hot) * (r - r_hot) <= 0.0:
-                found[m] = _bisect_source_root(
-                    prev_b, float(bv), M, m + 1, r_hot,
-                )
+            if r is not None and prev_r[m] is not None and prev_b is not None:
+                if (prev_r[m] - r_hot) * (r - r_hot) <= 0.0:
+                    found[m] = _bisect_source_root(
+                        prev_b, float(bv), M, m + 1, r_hot,
+                    )
+            elif r is None and prev_r[m] is not None and prev_b is not None:
+                if prev_r[m] < r_hot:
+                    found[m] = _hunt_root_to_endpoint(
+                        prev_b, float(bv), M, m + 1, r_hot,
+                    )
             prev_r[m] = r
         prev_b = float(bv)
     return found
+
+
+def _hunt_root_to_endpoint(b_lo, b_hi, M, m, r_hot):
+    """b_lo has finite r_m < r_hot; b_hi has no crossing.  r_m -> inf at the edge."""
+    lo, hi = float(b_lo), float(b_hi)
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        r = face_on_crossing_radii(mid, M, max_m=m)[m - 1]
+        if r is None:
+            hi = mid
+        elif r >= r_hot:
+            return _bisect_source_root(b_lo, mid, M, m, r_hot)
+        else:
+            lo = mid
+    r_lo = face_on_crossing_radii(lo, M, max_m=m)[m - 1]
+    if r_lo is not None and r_lo >= r_hot:
+        return _bisect_source_root(b_lo, lo, M, m, r_hot)
+    return None
 
 
 def _bisect_source_root(b_lo, b_hi, M, m, r_hot):
@@ -1040,20 +1086,22 @@ def source_aware_impact_samples(M, b_max, r_hot, width, max_m=4):
     """b nodes clustered at b_crit and at every source-image root."""
     M = _require_positive("M", M)
     chunks = [adaptive_impact_samples(M, b_max)]
+    peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
     roots = [
-        float(bp) for bp in source_crossing_impacts(M, r_hot, max_m=max_m)
+        float(bp) for bp in peaks
         if bp is not None and bp > 0.0 and bp <= b_max * 1.05
     ]
     if roots:
         chunks.append(np.asarray(roots, dtype=float))
         span = max((width / M) if width else 0.05, 0.05)
-        log_off = np.logspace(-6.0, math.log10(span), 28) * M
+        lo_off = min(1.0e-8, 0.05 * span)
+        log_off = np.logspace(math.log10(lo_off), math.log10(span), 36) * M
         near = np.concatenate(
             [np.concatenate([bp - log_off[::-1], bp + log_off]) for bp in roots]
         )
         near = near[(near > 0.0) & (near <= b_max * 1.05)]
         chunks.append(near)
-    return np.sort(np.unique(np.concatenate(chunks)))
+    return np.sort(np.unique(np.concatenate(chunks))), peaks
 
 
 def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
@@ -1065,14 +1113,17 @@ def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
         r_hot = HOT_RING_R_DEFAULT * M
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
-    sample = source_aware_impact_samples(M, b_max, r_hot, width, max_m=max_m)
+    width = _require_positive("width", width)
+    sample, peaks = source_aware_impact_samples(
+        M, b_max, r_hot, width, max_m=max_m,
+    )
     parts = np.zeros((sample.size, max_m))
     for i, bv in enumerate(sample):
         comp, _ = observed_components(
             float(bv), M, r_hot=r_hot, width=width, max_m=max_m,
         )
         parts[i, :] = comp
-    return sample, parts
+    return sample, parts, peaks
 
 
 def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
@@ -1090,6 +1141,7 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
         r_hot = HOT_RING_R_DEFAULT * M
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
+    width = _require_positive("width", width)
     r_hot = _require_positive("r_hot", r_hot)
     if r_hot <= photon_sphere(M):
         raise ValueError(
@@ -1100,7 +1152,7 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
     b = np.hypot(bx, by)
     b_pix = float(np.max(b)) if b.size else 0.0
     b_max = max(b_pix, 1.25 * r_hot, 2.0 * critical_impact_parameter(M))
-    sample, parts = intensity_table(
+    sample, parts, peaks = intensity_table(
         M, b_max, r_hot=r_hot, width=width, max_m=max_m,
     )
     cols = [
@@ -1110,7 +1162,6 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
     img1 = cols[0]
     img2 = cols[0] + (cols[1] if max_m > 1 else 0.0)
     img_all = sum(cols)
-    peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
     return img1, img2, img_all, sample, parts, peaks
 
 

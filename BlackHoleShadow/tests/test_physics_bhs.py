@@ -25,6 +25,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-12  Grok.  Response to Audit5.  Version 0.6.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit5-2026091207.txt
+
+  2026-09-12  Grok.  Response to Audit6.  Version 0.7.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit6-2026091213.txt
 """
 
 from __future__ import annotations
@@ -334,10 +337,12 @@ class TestDiskImage(unittest.TestCase):
         self.assertGreater(rs[1], rs[2])
         self.assertGreater(rs[2], rs[3])
         # Nearby captured/escaping rays keep their own geometry.
-        below = phys.face_on_crossing_radii(b - 1.0e-6, 1.0, max_m=2)
-        above = phys.face_on_crossing_radii(b + 1.0e-6, 1.0, max_m=2)
+        below = phys.face_on_crossing_radii(b - 1.0e-6, 1.0, max_m=4)
+        above = phys.face_on_crossing_radii(b + 1.0e-6, 1.0, max_m=4)
         self.assertAlmostEqual(below[0], rs[0], places=4)
         self.assertAlmostEqual(above[0], rs[0], places=4)
+        self.assertTrue(all(r > 3.0 for r in above))
+        self.assertTrue(all(r > 2.0 for r in below if r is not None))
 
     def test_source_roots_for_default_annulus(self):
         peaks = phys.source_crossing_impacts(1.0, 6.0, max_m=4)
@@ -354,13 +359,13 @@ class TestDiskImage(unittest.TestCase):
 
     def test_table_photon_peak_is_physical(self):
         g4 = (1.0 - 2.0 / 6.0) ** 2
-        _, parts = phys.intensity_table(1.0, 12.0, r_hot=6.0)
+        _, parts, _ = phys.intensity_table(1.0, 12.0, r_hot=6.0)
         for m in range(4):
             self.assertAlmostEqual(float(parts[:, m].max()), g4, delta=0.02)
 
     def test_table_resolves_documented_r_hot_8(self):
         g4 = (1.0 - 2.0 / 8.0) ** 2
-        _, parts = phys.intensity_table(1.0, 16.0, r_hot=8.0)
+        _, parts, _ = phys.intensity_table(1.0, 16.0, r_hot=8.0)
         for m in range(4):
             self.assertAlmostEqual(
                 float(parts[:, m].max()), g4, delta=0.03, msg=f"m={m+1}",
@@ -482,10 +487,29 @@ class TestScaleInvariance(unittest.TestCase):
 
     def test_crossings_are_scale_free(self):
         ref = phys.face_on_crossing_radii(5.3, 1.0, max_m=2)
-        for M in (1.0e-6, 1.0, 1.0e6):
+        ref_a = phys.asymptotic_deflection(1.02 * phys.critical_impact_parameter(1.0), 1.0)
+        for M in (1.0e-14, 1.0e-6, 1.0, 1.0e6):
             got = phys.face_on_crossing_radii(5.3 * M, M, max_m=2)
             self.assertAlmostEqual(got[0] / M, ref[0], places=5)
             self.assertAlmostEqual(got[1] / M, ref[1], places=5)
+            peri = phys.periapsis(5.3 * M, M)
+            self.assertAlmostEqual(peri / M, 3.403321312, places=6)
+            alpha = phys.asymptotic_deflection(
+                1.02 * phys.critical_impact_parameter(M), M,
+            )
+            self.assertAlmostEqual(alpha, ref_a, places=5)
+
+    def test_large_r_hot_finds_all_four_branches(self):
+        for r_hot in (80.0,):
+            peaks = phys.source_crossing_impacts(1.0, r_hot, max_m=4)
+            for m, b in enumerate(peaks, start=1):
+                self.assertIsNotNone(b, msg=f"r_hot={r_hot} missing m={m}")
+                r = phys.face_on_crossing_radii(b, 1.0, max_m=m)[m - 1]
+                self.assertAlmostEqual(r / r_hot, 1.0, places=6)
+
+    def test_width_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            phys.emitted_intensity(6.0, 1.0, r_hot=6.0, width=0.0)
 
     def test_resolved_shadow_is_M_invariant(self):
         a = phys.require_resolved_shadow(1.0, 16.0, 81)
