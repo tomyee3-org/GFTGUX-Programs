@@ -1,0 +1,648 @@
+"""
+physics_bhs.py
+==============
+Schwarzschild image-plane engine for the BlackHoleShadow teaching program.
+
+PhotonOrbit integrates one equatorial null geodesic and reports its status
+and accumulated azimuth.  GravitationalLensing maps a source plane through
+a thin-lens kink.  This module does neither of those jobs a second time.
+It takes a grid of image-plane impact parameters (b_x, b_y) and classifies
+each direction on the sky as captured, escaped, or a high-winding escaper
+near the photon sphere.
+
+Geometric units: the single scale is M = GM/c^2.  Lengths (r, b, r_s,
+r_photon) are stored in the same unit the caller used for M.  Default
+teaching runs use M = 1.
+
+Nothing here is Kerr, plasma, radiative transfer, or an EHT pipeline.
+Inclination is a projection of a spherically symmetric capture cone.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import os
+
+import numpy as np
+
+MODEL_VERSION = "0.1.0"
+
+BUILD_ID_COVERS = (
+    "physics_bhs.py",
+    "driver_bhs.py",
+    "main.py",
+    "plot_bhs.py",
+)
+
+
+def compute_build_id_from_directory(directory):
+    """Hash the four covered files found in ``directory``.
+
+    Tests copy those files into a temporary folder and call this; they
+    must not write the live source tree.
+    """
+    digest = hashlib.sha256()
+    for name in BUILD_ID_COVERS:
+        path = os.path.join(directory, name)
+        with open(path, "r", encoding="utf-8", newline=None) as source:
+            content = source.read().encode("utf-8")
+        digest.update(name.encode("utf-8"))
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()[:12]
+
+
+def _compute_build_id():
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        return compute_build_id_from_directory(here)
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+
+
+BUILD_ID = _compute_build_id()
+
+
+# ----------------------------------------------------------------------
+# Physical constants (SI, CODATA 2022 / IAU) — compare mode only
+# ----------------------------------------------------------------------
+G = 6.674_30e-11
+C_LIGHT = 2.997_924_58e8
+M_SUN = 1.988_47e30
+PC = 3.085_677_581e16
+GPC = 1.0e9 * PC
+D_L_DEFAULT = 1.0 * GPC
+D_S_DEFAULT = 2.0 * GPC
+
+# Smallest number of grid intervals the shadow diameter 2 b_crit must span.
+SHADOW_MIN_INTERVALS = 8.0
+
+# Automatic n_pix cap.  Wider fields need an explicit --n_pix.
+N_PIX_AUTO_MAX = 401
+
+# Default camera radius in units of M.  Large compared with 3M so the
+# conserved b is essentially the impact parameter at infinity.
+R_CAM_DEFAULT = 40.0
+
+# Window around the photon sphere used to tag a photon-ring pixel.
+PHOTON_RING_R_WINDOW = 0.35
+
+# Azimuth threshold that counts as "wound once" on an escaping ray.
+WINDING_DELTA_PHI = 2.0 * math.pi
+
+# Thin-ring half-width in units of M for the optional backlight.
+HOT_RING_WIDTH_DEFAULT = 0.45
+
+# Default hot-ring coordinate radius (a few r_s, outside the photon sphere).
+HOT_RING_R_DEFAULT = 6.0
+
+_MAX_STEPS = 5_000_000
+
+
+def _require_finite(name, value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f"{name} must be a finite real number.")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise ValueError(f"{name} must be a finite real number.")
+    return float(value)
+
+
+def _require_positive(name, value):
+    value = _require_finite(name, value)
+    if value <= 0.0:
+        raise ValueError(f"{name} must be greater than zero, got {value:g}")
+    return value
+
+
+def validate_user_value(name, value, *, positive=False, min_value=None,
+                        max_value=None, exclusive_max=None):
+    value = _require_finite(name, value)
+    if positive and value <= 0.0:
+        raise ValueError(f"{name} must be greater than zero, got {value:g}")
+    if min_value is not None and value < min_value:
+        raise ValueError(f"{name} must be >= {min_value:g}, got {value:g}")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{name} must be <= {max_value:g}, got {value:g}")
+    if exclusive_max is not None and value >= exclusive_max:
+        raise ValueError(f"{name} must be < {exclusive_max:g}, got {value:g}")
+    return value
+
+
+def event_horizon(M):
+    M = _require_positive("M", M)
+    r_s = 2.0 * M
+    if not math.isfinite(r_s):
+        raise ValueError("r_s is not finite for the given M.")
+    return r_s
+
+
+def photon_sphere(M):
+    M = _require_positive("M", M)
+    r_ph = 3.0 * M
+    if not math.isfinite(r_ph):
+        raise ValueError("r_photon is not finite for the given M.")
+    return r_ph
+
+
+def critical_impact_parameter(M):
+    """b_crit = 3 sqrt(3) M, the capture threshold from infinity."""
+    M = _require_positive("M", M)
+    b_crit = 3.0 * math.sqrt(3.0) * M
+    if not math.isfinite(b_crit):
+        raise ValueError("b_crit is not finite for the given M.")
+    return b_crit
+
+
+def weak_field_deflection(b, M):
+    """hat{alpha} = 4M/b, the large-b limit of a Schwarzschild photon."""
+    M = _require_positive("M", M)
+    b = _require_positive("b", b)
+    return 4.0 * M / b
+
+
+def radicand(r, b, M):
+    """1 - (1 - 2M/r) (b/r)^2, the quantity under the square root of (dr/dλ)^2.
+
+    Affine parameter normalized so E = 1 and L = b, matching PhotonOrbit.
+    """
+    r = _require_finite("r", r)
+    b = _require_finite("b", b)
+    M = _require_positive("M", M)
+    if r <= 0.0:
+        raise ValueError("r must remain positive.")
+    q = b / r
+    return 1.0 - q * q * (1.0 - 2.0 * M / r)
+
+
+def is_captured(b, M):
+    """True if an ingoing ray from outside the photon sphere is captured.
+
+    For a static camera at any r_cam > 3M the condition is the same as
+    the condition at infinity: b < b_crit.  Equality is the unstable
+    circular photon orbit and is treated as captured for the silhouette
+    (a set of measure zero on the grid).
+    """
+    b = _require_finite("b", b)
+    if b < 0.0:
+        raise ValueError("b must be nonnegative.")
+    return b <= critical_impact_parameter(M)
+
+
+def periapsis(b, M):
+    """Outer turning point of an escaping null geodesic, or None if captured.
+
+    Solves r^3 - b^2 r + 2 M b^2 = 0 for the root r > 3M.
+    """
+    b = _require_finite("b", b)
+    M = _require_positive("M", M)
+    if b < 0.0:
+        raise ValueError("b must be nonnegative.")
+    b_crit = critical_impact_parameter(M)
+    if b <= b_crit:
+        return None
+    r_ph = photon_sphere(M)
+    r = max(float(b), r_ph + 0.25 * M)
+    for _ in range(80):
+        f = r * r * r - b * b * r + 2.0 * M * b * b
+        df = 3.0 * r * r - b * b
+        if df == 0.0:
+            r = r_ph + 0.5 * M + 0.5 * float(b)
+            continue
+        r_new = r - f / df
+        if r_new <= r_ph:
+            r_new = 0.5 * (r + r_ph) + 0.05 * M
+        if abs(r_new - r) <= 1.0e-14 * max(1.0, abs(r)):
+            r = r_new
+            break
+        r = r_new
+    if r <= r_ph or not math.isfinite(r):
+        raise RuntimeError("periapsis solver failed for the given b, M.")
+    return r
+
+
+def asymptotic_deflection(b, M, n_u=800):
+    """Asymptotic scattering deflection hat{alpha} = Delta phi_inf - pi.
+
+    Uses the standard substitution u = 1/r:
+
+        Delta phi_inf = 2 * integral_0^{u_min} b / sqrt(1 - b^2 u^2 + 2 M b^2 u^3) du
+
+    Captured rays (b <= b_crit) have no scattering deflection; this
+    function raises ValueError for them.  The integrand is integrable at
+    the turning point.  Near b_crit the result grows without bound — that
+    is the photon-ring winding, not a numerical bug.
+    """
+    b = _require_positive("b", b)
+    M = _require_positive("M", M)
+    if is_captured(b, M):
+        raise ValueError(
+            "asymptotic_deflection is defined only for escaping rays "
+            f"(b > b_crit = {critical_impact_parameter(M):g})."
+        )
+    r_min = periapsis(b, M)
+    u_min = 1.0 / r_min
+    # u = 1/r.  Write u = u_min - t^2 so the turning-point square root
+    # cancels and the outer limit u = 0 is t = sqrt(u_min).
+    n_u = max(int(n_u), 256)
+    t = np.linspace(0.0, math.sqrt(u_min), n_u)
+    u = np.clip(u_min - t * t, 0.0, u_min)
+    rad = 1.0 - (b * b) * u * u + 2.0 * M * (b * b) * u * u * u
+    rad = np.maximum(rad, 0.0)
+    piece = np.zeros_like(t)
+    safe = rad > 0.0
+    piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
+    drad_du = -2.0 * b * b * u_min + 6.0 * M * b * b * u_min * u_min
+    slope = abs(float(drad_du))
+    if slope > 0.0:
+        piece[0] = 2.0 / math.sqrt(slope)
+    delta_phi_inf = 2.0 * b * float(np.trapezoid(piece, t))
+    return delta_phi_inf - math.pi
+
+
+def radial_acceleration(r, L, M):
+    """d²r/dλ² = (L/r)²/r · (1 - 3M/r), PhotonOrbit's first integral."""
+    r = _require_finite("r", r)
+    L = _require_finite("L", L)
+    M = _require_positive("M", M)
+    if r <= 0.0:
+        raise ValueError("r must remain positive during integration.")
+    q = L / r
+    value = (q * q / r) * (1.0 - 3.0 * M / r)
+    if not math.isfinite(value):
+        raise ValueError("radial_acceleration produced a non-finite result.")
+    return value
+
+
+def dphi_dlambda(r, L):
+    """dφ/dλ = L/r²."""
+    r = _require_finite("r", r)
+    L = _require_finite("L", L)
+    if r <= 0.0:
+        raise ValueError("r must remain positive during integration.")
+    value = (L / r) / r
+    if not math.isfinite(value):
+        raise ValueError("dphi_dlambda produced a non-finite result.")
+    return value
+
+
+def _derivatives(r, v_r, phi, L, M):
+    del phi
+    return (v_r, radial_acceleration(r, L, M), dphi_dlambda(r, L))
+
+
+def rk4_step(r, v_r, phi, L, M, d_lambda):
+    k1 = _derivatives(r, v_r, phi, L, M)
+    r2 = r + 0.5 * d_lambda * k1[0]
+    v2 = v_r + 0.5 * d_lambda * k1[1]
+    p2 = phi + 0.5 * d_lambda * k1[2]
+    k2 = _derivatives(r2, v2, p2, L, M)
+    r3 = r + 0.5 * d_lambda * k2[0]
+    v3 = v_r + 0.5 * d_lambda * k2[1]
+    p3 = phi + 0.5 * d_lambda * k2[2]
+    k3 = _derivatives(r3, v3, p3, L, M)
+    r4 = r + d_lambda * k3[0]
+    v4 = v_r + d_lambda * k3[1]
+    p4 = phi + d_lambda * k3[2]
+    k4 = _derivatives(r4, v4, p4, L, M)
+    factor = d_lambda / 6.0
+    return (
+        r + factor * (k1[0] + 2.0 * k2[0] + 2.0 * k3[0] + k4[0]),
+        v_r + factor * (k1[1] + 2.0 * k2[1] + 2.0 * k3[1] + k4[1]),
+        phi + factor * (k1[2] + 2.0 * k2[2] + 2.0 * k3[2] + k4[2]),
+    )
+
+
+def integrate_photon_orbit(M, r0, b, lambda_max=200.0, d_lambda=0.02):
+    """Initially ingoing equatorial null geodesic.  PhotonOrbit's ODE.
+
+    Affine parameter normalized so E = 1, L = b.  Returns (x, y, info)
+    with status in {'captured', 'escaped', 'lambda_max'}.
+    """
+    M = _require_positive("M", M)
+    r0 = _require_finite("r0", r0)
+    b = _require_finite("b", b)
+    lambda_max = _require_positive("lambda_max", lambda_max)
+    d_lambda = _require_positive("d_lambda", d_lambda)
+    r_s = event_horizon(M)
+    r_ph = photon_sphere(M)
+    b_crit = critical_impact_parameter(M)
+    if r0 <= r_s:
+        raise ValueError(f"r0 must be outside the event horizon (r0 > {r_s:g}).")
+    if b < 0.0:
+        raise ValueError("b must be nonnegative.")
+    step_ratio = lambda_max / d_lambda
+    if not math.isfinite(step_ratio) or step_ratio > _MAX_STEPS:
+        raise ValueError(
+            f"lambda_max/d_lambda would require more than {_MAX_STEPS:,} steps."
+        )
+    n_steps = math.ceil(step_ratio)
+    L = b
+    escape_radius = 2.0 * r0
+    b_max = r0 * math.sqrt(r0 / (r0 - r_s))
+    if b > b_max + 4.0 * math.ulp(b_max):
+        raise ValueError(
+            "The requested b is incompatible with an initially ingoing "
+            f"null geodesic at r0={r0:g}.  b must be <= {b_max:.8g}."
+        )
+    q0 = L / r0
+    initial_radicand = max(0.0, 1.0 - q0 * q0 * (1.0 - r_s / r0))
+    r = r0
+    v_r = -math.sqrt(initial_radicand)
+    phi = 0.0
+    lambda_value = 0.0
+    xs = [r * math.cos(phi)]
+    ys = [r * math.sin(phi)]
+    min_r = r0
+    status = "lambda_max"
+    turned_outward = False
+    for _ in range(n_steps):
+        if lambda_value >= lambda_max:
+            break
+        h = min(d_lambda, lambda_max - lambda_value)
+        previous_r, previous_v, previous_phi, previous_lambda = r, v_r, phi, lambda_value
+        try:
+            new_r, new_v, new_phi = rk4_step(r, v_r, phi, L, M, h)
+        except ValueError as exc:
+            raise RuntimeError(
+                "Integration stepped to a nonphysical radius. Reduce d_lambda."
+            ) from exc
+        if not all(math.isfinite(v) for v in (new_r, new_v, new_phi)):
+            raise RuntimeError("Integration produced a non-finite value.")
+        if new_r <= r_s:
+            if new_r < previous_r:
+                fraction = (previous_r - r_s) / (previous_r - new_r)
+                fraction = min(1.0, max(0.0, fraction))
+            else:
+                fraction = 1.0
+            r = r_s
+            v_r = previous_v + fraction * (new_v - previous_v)
+            phi = previous_phi + fraction * (new_phi - previous_phi)
+            lambda_value = previous_lambda + fraction * h
+            xs.append(r * math.cos(phi))
+            ys.append(r * math.sin(phi))
+            min_r = min(min_r, r)
+            status = "captured"
+            break
+        now_outward = turned_outward or new_v > 0.0
+        if now_outward and new_r >= escape_radius:
+            if new_r > previous_r:
+                fraction = (escape_radius - previous_r) / (new_r - previous_r)
+                fraction = min(1.0, max(0.0, fraction))
+            else:
+                fraction = 1.0
+            r = escape_radius
+            v_r = previous_v + fraction * (new_v - previous_v)
+            phi = previous_phi + fraction * (new_phi - previous_phi)
+            lambda_value = previous_lambda + fraction * h
+            xs.append(r * math.cos(phi))
+            ys.append(r * math.sin(phi))
+            min_r = min(min_r, r)
+            status = "escaped"
+            break
+        r, v_r, phi = new_r, new_v, new_phi
+        lambda_value += h
+        turned_outward = now_outward
+        xs.append(r * math.cos(phi))
+        ys.append(r * math.sin(phi))
+        min_r = min(min_r, r)
+    info = {
+        "status": status,
+        "closest_approach": min_r,
+        "delta_phi": phi,
+        "lambda_final": lambda_value,
+        "steps": len(xs) - 1,
+        "r_s": r_s,
+        "r_photon": r_ph,
+        "critical_b_infinity": b_crit,
+        "escape_radius": escape_radius,
+        "model_version": MODEL_VERSION,
+        "build_id": BUILD_ID,
+    }
+    return xs, ys, info
+
+
+def make_impact_grid(n_pix, fov_M):
+    """Square camera grid in impact-parameter units of M.
+
+    n_pix is rounded up to the next odd integer so a pixel sits on the
+    optical axis.  Coordinates run from -fov/2 to +fov/2 inclusive.
+    """
+    n_pix = int(n_pix)
+    if n_pix < 9:
+        raise ValueError("n_pix must be an integer >= 9")
+    if n_pix % 2 == 0:
+        n_pix += 1
+    fov_M = _require_positive("fov_M", fov_M)
+    half = 0.5 * fov_M
+    axis = np.linspace(-half, half, n_pix)
+    bx, by = np.meshgrid(axis, axis)
+    return bx, by, n_pix, fov_M
+
+
+def require_resolved_shadow(M, fov_M, n_pix):
+    """Reject a camera grid on which the shadow is smaller than a few pixels."""
+    b_crit = critical_impact_parameter(M)
+    fov_M = _require_positive("fov_M", fov_M)
+    n_pix = int(n_pix)
+    spacing = fov_M / max(n_pix - 1, 1)
+    intervals = (2.0 * b_crit) / spacing
+    if intervals < SHADOW_MIN_INTERVALS:
+        raise ValueError(
+            f"the shadow diameter 2 b_crit = {2.0 * b_crit:.4g} M spans only "
+            f"{intervals:.2f} grid intervals.  Capture maps need at least "
+            f"{SHADOW_MIN_INTERVALS:g} intervals so the rim is visible.  "
+            "Use a smaller --fov or a larger --n_pix."
+        )
+    return intervals
+
+
+def capture_map(bx, by, M):
+    """Boolean array: True where the ray is captured (the geometric shadow)."""
+    b = np.hypot(bx, by)
+    return b <= critical_impact_parameter(M)
+
+
+def photon_ring_mask(bx, by, M, r_window=PHOTON_RING_R_WINDOW,
+                     delta_phi_min=WINDING_DELTA_PHI):
+    """Escaping pixels whose periapsis is near 3M and whose winding is large.
+
+    Uses the exact periapsis root and the asymptotic Delta phi.  A pixel
+    inside the shadow is never a photon-ring pixel.
+    """
+    M = _require_positive("M", M)
+    r_window = _require_positive("r_window", r_window)
+    delta_phi_min = _require_positive("delta_phi_min", delta_phi_min)
+    b = np.hypot(np.asarray(bx, dtype=float), np.asarray(by, dtype=float))
+    b_crit = critical_impact_parameter(M)
+    r_ph = photon_sphere(M)
+    mask = np.zeros(b.shape, dtype=bool)
+    escaped = b > b_crit
+    if not np.any(escaped):
+        return mask
+    # Thin annulus just outside b_crit.  A 48-point radial table is enough
+    # to decide the highlighter; the mask is a teaching overlay, not a
+    # fitted photon-ring profile.
+    b_hi = min(float(np.max(b)), b_crit + 1.5 * M)
+    sample_b = np.geomspace(b_crit * (1.0 + 1.0e-4), max(b_hi, b_crit * 1.02), 48)
+    ring_b = []
+    for bv in sample_b:
+        rmin = periapsis(float(bv), M)
+        if abs(rmin - r_ph) > r_window:
+            continue
+        delta_phi = asymptotic_deflection(float(bv), M) + math.pi
+        if delta_phi > delta_phi_min:
+            ring_b.append(float(bv))
+    if not ring_b:
+        return mask
+    b_lo_ring = min(ring_b)
+    b_hi_ring = max(ring_b)
+    mask[escaped] = (b[escaped] >= b_lo_ring) & (b[escaped] <= b_hi_ring)
+    return mask
+
+
+def deflection_curve(M, b_min_factor=1.02, b_max_factor=8.0, n=48):
+    """(b, hat_alpha_exact, hat_alpha_weak) for the weak-field beat."""
+    M = _require_positive("M", M)
+    b_crit = critical_impact_parameter(M)
+    b_lo = b_min_factor * b_crit
+    b_hi = b_max_factor * b_crit
+    bs = np.geomspace(b_lo, b_hi, int(n))
+    exact = np.array([asymptotic_deflection(float(b), M) for b in bs])
+    weak = np.array([weak_field_deflection(float(b), M) for b in bs])
+    return bs, exact, weak
+
+
+def einstein_radius_point_mass(m_kg, d_l=D_L_DEFAULT, d_s=D_S_DEFAULT):
+    """Einstein radius of a transparent point-mass lens, in radians.
+
+    Identical formula to GravitationalLensing.  Used only in compare mode
+    so the student can put theta_E and b_crit on the same page and refuse
+    to call them the same ring.
+    """
+    m_kg = _require_positive("m_kg", m_kg)
+    d_l = _require_positive("d_l", d_l)
+    d_s = _require_positive("d_s", d_s)
+    if d_s <= d_l:
+        raise ValueError("d_s must exceed d_l so that D_ls is positive")
+    d_ls = d_s - d_l
+    return math.sqrt((4.0 * G * m_kg / C_LIGHT**2) * (d_ls / (d_l * d_s)))
+
+
+def geometric_length_of_sun(m_over_msun=1.0):
+    """GM/c^2 for a mass in solar units, in metres."""
+    m_over_msun = _require_positive("m_over_msun", m_over_msun)
+    return G * m_over_msun * M_SUN / C_LIGHT**2
+
+
+def compare_rings(log10_m_galaxy=12.0, d_l=D_L_DEFAULT, d_s=D_S_DEFAULT):
+    """Numbers that keep the Einstein ring and the photon ring apart.
+
+    Returns a dict.  Lengths are metres; angles are radians and arcsec.
+    The galaxy Einstein radius in units of that galaxy's own GM/c^2 is
+    enormous — that is the point of the beat.
+    """
+    log10_m_galaxy = _require_finite("log10_m_galaxy", log10_m_galaxy)
+    m_kg = (10.0 ** log10_m_galaxy) * M_SUN
+    theta_e = einstein_radius_point_mass(m_kg, d_l=d_l, d_s=d_s)
+    M_gal_m = geometric_length_of_sun(10.0 ** log10_m_galaxy)
+    r_e_physical = theta_e * d_l
+    return {
+        "log10_m_galaxy": log10_m_galaxy,
+        "m_kg": m_kg,
+        "theta_e_rad": theta_e,
+        "theta_e_arcsec": math.degrees(theta_e) * 3600.0,
+        "M_galaxy_m": M_gal_m,
+        "r_s_galaxy_m": 2.0 * M_gal_m,
+        "r_photon_galaxy_m": 3.0 * M_gal_m,
+        "b_crit_galaxy_m": 3.0 * math.sqrt(3.0) * M_gal_m,
+        "r_e_physical_m": r_e_physical,
+        "r_e_over_M": r_e_physical / M_gal_m,
+        "b_crit_over_M": 3.0 * math.sqrt(3.0),
+        "r_s_over_M": 2.0,
+        "r_photon_over_M": 3.0,
+        "d_l_m": d_l,
+        "d_s_m": d_s,
+    }
+
+
+def backlight_image(bx, by, M, r_hot=HOT_RING_R_DEFAULT,
+                    width=HOT_RING_WIDTH_DEFAULT, inclination_deg=0.0):
+    """False-colour photograph of a thin equatorial hot ring plus the shadow.
+
+    The geometric shadow is black.  Escaping rays whose periapsis sits
+    near r_hot light up as a thin ring just outside the shadow — the
+    primary image of the ring.  Rays that wind past 2 pi pick up an extra
+    contribution on the shadow rim (the photon ring).  Inclination only
+    multiplies the ring by a left/right display factor so a high-i frame
+    looks like a crescent; that factor is a drawing, not Doppler beaming
+    from a radiating fluid and not Kerr.
+    """
+    M = _require_positive("M", M)
+    r_hot = _require_positive("r_hot", r_hot)
+    width = _require_positive("width", width)
+    inclination_deg = _require_finite("inclination_deg", inclination_deg)
+    if r_hot <= photon_sphere(M):
+        raise ValueError(
+            f"r_hot must lie outside the photon sphere ({photon_sphere(M):g})."
+        )
+    bx = np.asarray(bx, dtype=float)
+    by = np.asarray(by, dtype=float)
+    b = np.hypot(bx, by)
+    b_crit = critical_impact_parameter(M)
+    image = np.zeros(b.shape, dtype=float)
+    escaped = b > b_crit
+    # Impact parameter whose periapsis is r_hot: from the turning-point
+    # equation, b^2 = r^3 / (r - 2M) at r = r_hot.
+    b_hot = math.sqrt(r_hot ** 3 / (r_hot - 2.0 * M))
+    # Primary ring: Gaussian in b around b_hot.
+    ring = np.exp(-0.5 * ((b - b_hot) / width) ** 2)
+    # Photon-ring highlighter: a thinner Gaussian hugging b_crit from above.
+    photon = np.exp(-0.5 * ((b - b_crit) / (0.35 * width)) ** 2)
+    image = np.where(escaped, ring + 0.65 * photon, 0.0)
+    # Schematic left/right shading with inclination.  Alpha = b_x.
+    inc = math.radians(inclination_deg)
+    shade = 1.0 + 0.55 * math.sin(inc) * np.divide(
+        bx, np.maximum(b, 1.0e-30), out=np.zeros_like(b), where=b > 0.0
+    )
+    shade = np.clip(shade, 0.15, 1.85)
+    image = image * shade
+    image = np.where(escaped, image, 0.0)
+    return image, b_hot
+
+
+def odd_n_pix(n_pix):
+    n_pix = int(n_pix)
+    if n_pix < 9:
+        raise ValueError("n_pix must be an integer >= 9")
+    if n_pix % 2 == 0:
+        n_pix += 1
+    if n_pix > N_PIX_AUTO_MAX:
+        raise ValueError(
+            f"n_pix={n_pix} exceeds the automatic cap {N_PIX_AUTO_MAX}.  "
+            "This is a teaching grid, not an EHT pipeline."
+        )
+    return n_pix
+
+
+def patch_help_version(html_path):
+    """Write MODEL_VERSION and BUILD_ID into the Help #version_build element."""
+    import re
+    path = os.fspath(html_path)
+    text = open(path, encoding="utf-8").read()
+    pattern = r'(id="version_build"[^>]*>)(.*?)(</p>)'
+    replacement = (
+        rf'\1\n    Version {MODEL_VERSION}&nbsp;&nbsp;&nbsp;&nbsp;'
+        rf'Build {BUILD_ID}\n  \3'
+    )
+    new, n = re.subn(pattern, replacement, text, count=1, flags=re.S)
+    if n != 1:
+        raise ValueError("could not find #version_build in Help file")
+    if new != text:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(new)
+    return MODEL_VERSION, BUILD_ID
