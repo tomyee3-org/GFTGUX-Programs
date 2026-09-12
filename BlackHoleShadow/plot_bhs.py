@@ -299,7 +299,7 @@ def plot_radii(bx, by, captured, M=1.0, fov_over_M=16.0,
     ax.set_title("Image plane (critical curve of a distant camera)")
     ax.legend(loc="upper right", fontsize=8)
 
-    fig.suptitle("Beat 4 · Coordinate radii are not image-plane radii",
+    fig.suptitle("Beat 6 · Coordinate radii are not image-plane radii",
                  fontsize=12, y=0.98)
     fig.tight_layout(rect=[0, 0.03, 1, 0.94])
     saved = _finish(fig, outdir, "radii", dpi, provenance={
@@ -328,7 +328,7 @@ def plot_weak(bs, exact, weak, M=1.0, outdir=None, dpi=140, show=True):
                label=r"$b_{\rm crit}$")
     ax.set_xlabel(r"$b/M$")
     ax.set_ylabel(r"deflection $\hat\alpha$ [rad]")
-    ax.set_title(r"Beat 5 · Large-$b$ deflection recovers $4M/b$")
+    ax.set_title(r"Beat 7 · Large-$b$ deflection recovers $4M/b$")
     ax.legend(loc="upper right", fontsize=8)
     ax.set_xlim(bs.min() / M, bs.max() / M)
     fig.tight_layout(rect=[0, 0.03, 1, 1])
@@ -376,7 +376,7 @@ def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
     te = numbers["theta_e_arcsec"]
     re_over_m = numbers["r_e_over_M"]
     text = (
-        "Beat 6 · Do not call these the same ring\n\n"
+        "Beat 8 · Do not call these the same ring\n\n"
         f"A transparent $10^{{{numbers['log10_m_galaxy']:.0f}}} M_\\odot$ "
         "galaxy lens at the\n"
         "GravitationalLensing cartoon distances "
@@ -416,74 +416,64 @@ def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
     return fig, saved
 
 
-def plot_backlight(bx, by, image, M=1.0, r_hot=6.0, b_hot=None,
-                   inclination=0.0, fov_over_M=16.0,
-                   outdir=None, dpi=140, show=True):
-    fig, ax = plt.subplots(figsize=(6.4, 6.4))
-    vmax = max(float(np.max(image)), 1.0e-12)
-    ax.imshow(image, origin="lower", cmap="inferno",
-              extent=_extent_over_M(bx, by, M), vmin=0.0, vmax=vmax)
-    _draw_bcrit(ax, M, lw=1.4)
-    ax.set_aspect("equal")
-    ax.set_xlabel(r"$b_x/M$")
-    ax.set_ylabel(r"$b_y/M$")
-    ax.set_title("Beat 7 · Schematic turning-point overlay (false colour)")
-    ax.legend(loc="upper right", fontsize=8)
-    note = (
-        f"schematic periapsis paint at r={r_hot / M:g} M, "
-        f"i={inclination:g} deg (display only)"
-    )
-    ax.text(0.02, 0.02, note, transform=ax.transAxes, fontsize=8,
-            color="white", va="bottom")
-    fig.tight_layout(rect=[0, 0.03, 1, 1])
-    saved = _finish(fig, outdir, "backlight", dpi, provenance={
-        "_deprecated": "use mode image",
-        "mode": "backlight",
-        "M": repr(M),
-        "r_hot": repr(r_hot),
-        "r_hot_over_M": repr(r_hot / M),
-        "b_hot": "None" if b_hot is None else repr(b_hot),
-        "width_over_M": repr(phys.HOT_RING_WIDTH_DEFAULT),
-        "inclination_deg": repr(inclination),
-        "n_pix": str(bx.shape[0]),
-        "fov_over_M": repr(fov_over_M),
-        "false_colour": "inferno display scale; not a spectrum",
-        "note": "schematic periapsis overlay, not a disk or EHT image",
-    })
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-    return fig, saved
-
-
-def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0, fov_over_M=16.0,
+def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0,
+                  width_over_M=0.45, peaks=None, fov_over_M=16.0,
                   outdir=None, dpi=140, show=True):
-    fig, ax = plt.subplots(figsize=(7.6, 5.4))
+    fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
+    ax = axes[0]
     colors = ("#0077b6", "#c9a227", "#c1121f")
-    labels = (r"$r_1/M$ (direct)", r"$r_2/M$ (lensing)", r"$r_3/M$ (photon ring)")
+    labels = (r"$r_1/M$ (direct)", r"$r_2/M$ (lensing)",
+              r"$r_3/M$ (photon ring / subring)")
     for m in range(table.shape[1]):
         y = table[:, m]
-        ax.plot(bs / M, y, color=colors[m % 3], lw=1.8, label=labels[m])
+        ax.plot(bs / M, y, color=colors[m % 3], lw=1.6, label=labels[m])
     ax.axvline(phys.critical_impact_parameter(M) / M, color=C_BC, ls=":",
                label=r"$b_{\rm crit}$")
     ax.axhline(3.0, color=C_PH, ls="--", lw=1.0, label=r"$r_{\rm ph}=3M$")
     ax.axhline(r_hot_over_M, color="0.4", ls="-.", lw=1.0,
                label=rf"$r_{{\rm hot}}={r_hot_over_M:g}M$")
+    if peaks:
+        for m, bp in enumerate(peaks):
+            if bp is None:
+                continue
+            ax.plot([bp / M], [r_hot_over_M], marker="o", color=colors[m % 3],
+                    ms=7, zorder=5)
     ax.set_xlabel(r"$b/M$")
     ax.set_ylabel(r"crossing radius $r_m/M$")
-    ax.set_title("Beat 4 · Face-on transfer functions $r_m(b)$")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.set_ylim(2.0, max(12.0, r_hot_over_M + 4.0))
-    fig.tight_layout(rect=[0, 0.03, 1, 1])
+    ax.set_title("Transfer functions (adaptive $b$ grid)")
+    ax.legend(loc="upper right", fontsize=7)
+    finite = table[np.isfinite(table)]
+    y_top = max(12.0, r_hot_over_M + 4.0)
+    if finite.size:
+        y_top = max(y_top, float(np.nanmax(table[:, 0:min(2, table.shape[1])])) + 1.0)
+    ax.set_ylim(2.0, y_top)
+
+    ax = axes[1]
+    r = np.linspace(2.01, max(12.0, r_hot_over_M + 4.0), 200)
+    iem = np.array([
+        phys.emitted_intensity(float(rv) * M, M, r_hot=r_hot_over_M * M,
+                               width=width_over_M * M)
+        for rv in r
+    ])
+    ax.plot(r, iem, color="#7b2d00", lw=1.8)
+    ax.axvline(r_hot_over_M, color="0.4", ls="-.", lw=1.0)
+    ax.set_xlabel(r"$r/M$")
+    ax.set_ylabel(r"$I_{\mathrm{em}}(r)$  (static emitters)")
+    ax.set_title(rf"Source: Gaussian annulus, width ${width_over_M:g}M$")
+    fig.suptitle("Beat 4 · Source profile and face-on transfer functions",
+                 fontsize=12)
+    fig.tight_layout(rect=[0, 0.03, 1, 0.93])
     saved = _finish(fig, outdir, "transfer", dpi, provenance={
         "mode": "transfer",
         "M": repr(M),
         "r_hot_over_M": repr(r_hot_over_M),
+        "width_over_M": repr(width_over_M),
         "fov_over_M": repr(fov_over_M),
         "n_samples": str(len(bs)),
         "max_m": str(table.shape[1]),
-        "note": "face-on equatorial crossings; optically thin source later",
+        "n_finite_r3": str(int(np.isfinite(table[:, 2]).sum()) if table.shape[1] > 2 else 0),
+        "sampling": "adaptive log cluster around b_crit",
+        "emitters": "static; no orbital Doppler",
     })
     if show:
         plt.show()
@@ -500,7 +490,7 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
     titles = (
         "direct ($m=1$)",
         "+ lensing (m <= 2)",
-        "+ photon ring (m >= 3)",
+        "+ photon-ring/subring (m=3,4)",
     )
     for ax, img, title in zip(axes, (img1, img2, img3), titles):
         ax.imshow(img, origin="lower", cmap="inferno",
@@ -510,9 +500,11 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
         ax.set_xlabel(r"$b_x/M$")
         ax.set_title(title, fontsize=10)
     axes[0].set_ylabel(r"$b_y/M$")
-    fig.suptitle("Face-on optically thin image  ·  "
-                 r"$I_{\mathrm{obs}}=\sum_m g(r_m)^4 I_{\mathrm{em}}(r_m)$",
-                 fontsize=12)
+    fig.suptitle(
+        r"Beat 5 · Face-on image  $I_{\mathrm{obs}}=\sum_{m=1}^{4} g^4 I_{\mathrm{em}}$"
+        "  (static emitters; m>=5 omitted)",
+        fontsize=11,
+    )
     fig.tight_layout(rect=[0, 0.03, 1, 0.90])
     saved = _finish(fig, outdir, "image", dpi, provenance={
         "mode": "image",
@@ -523,9 +515,11 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
         "width_over_M": repr(phys.HOT_RING_WIDTH_DEFAULT),
         "n_pix": str(bx.shape[0]),
         "fov_over_M": repr(fov_over_M),
-        "I_obs": "sum g^4 I_em over face-on equatorial crossings",
+        "I_obs": "sum_{m=1..4} g^4 I_em; m>=5 omitted",
         "false_colour": "inferno display scale; not a spectrum",
-        "inclination": "0 (face-on only)",
+        "emitters": "static; no orbital Doppler",
+        "sampling": "adaptive log cluster around b_crit plus peak stamp",
+        "max_m": str(phys.MAX_IMAGE_M),
     })
     if show:
         plt.show()

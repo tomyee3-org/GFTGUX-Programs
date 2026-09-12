@@ -68,18 +68,20 @@ def parse_args():
                    help="RK4 step in units of M")
 
     g = p.add_argument_group("Camera grid")
-    g.add_argument("--n_pix", type=int, default=161, metavar="N",
+    g.add_argument("--n_pix", type=int, default=None, metavar="N",
                    help="pixels along one side; even values become the next odd. "
-                        f"pixels mode caps this at {physics_bhs.PIXELS_N_PIX_MAX}")
+                        "Default 161 except pixels mode "
+                        f"({physics_bhs.PIXELS_N_PIX_DEFAULT}, cap "
+                        f"{physics_bhs.PIXELS_N_PIX_MAX})")
     g.add_argument("--fov", type=float, default=16.0, metavar="M",
                    help="field of view on a side, in units of M")
 
-    g = p.add_argument_group("Backlight and compare")
+    g = p.add_argument_group("Source and compare")
     g.add_argument("--r_hot", type=float, default=None, metavar="M",
-                   help="turning-point radius used by the schematic overlay, "
-                        f"in units of M (default {physics_bhs.HOT_RING_R_DEFAULT:g})")
+                   help="emitted-annulus radius for transfer/image, in units of M "
+                        f"(default {physics_bhs.HOT_RING_R_DEFAULT:g})")
     g.add_argument("--inclination", type=float, default=0.0, metavar="DEG",
-                   help="display inclination for backlight shading, in [0, 90]")
+                   help="must be 0; this version is face-on only")
     g.add_argument("--logM", type=float, default=12.0, metavar="LOG10",
                    help="log10(M/M_sun) of the comparison galaxy lens")
 
@@ -103,9 +105,11 @@ def _validate_args(args):
     physics_bhs.validate_user_value("d_lambda", args.d_lambda, positive=True)
     physics_bhs.validate_user_value("fov", args.fov, positive=True)
     physics_bhs.validate_user_value("dpi", args.dpi, positive=True)
-    physics_bhs.validate_user_value(
-        "inclination", args.inclination, min_value=0.0, max_value=90.0,
-    )
+    if abs(float(args.inclination)) > 1.0e-12:
+        raise ValueError(
+            "--inclination is not used: this version is face-on only. "
+            "Pass 0 or omit the flag."
+        )
     physics_bhs.validate_user_value(
         "logM", args.logM,
         min_value=physics_bhs.LOGM_MIN, max_value=physics_bhs.LOGM_MAX,
@@ -118,8 +122,9 @@ def _validate_args(args):
         physics_bhs.validate_user_value("r_hot", args.r_hot, positive=True)
         if args.r_hot <= 3.0:
             raise ValueError("--r_hot must exceed 3 (units of M)")
-    if int(args.n_pix) != args.n_pix or args.n_pix < 9:
-        raise ValueError("n_pix must be an integer >= 9")
+    if args.n_pix is not None:
+        if int(args.n_pix) != args.n_pix or args.n_pix < 9:
+            raise ValueError("n_pix must be an integer >= 9")
 
 
 def main():
@@ -156,25 +161,30 @@ def main():
                 r_cam=args.r_cam, b_in=args.b_in, b_out=args.b_out,
                 lambda_max=args.lambda_max, d_lambda=args.d_lambda, **common)
         elif args.mode == "pixels":
-            requested = int(args.n_pix)
-            n_use = (physics_bhs.PIXELS_N_PIX_DEFAULT if requested == 161
-                     else min(requested, physics_bhs.PIXELS_N_PIX_MAX))
+            requested = args.n_pix
+            n_use = (physics_bhs.PIXELS_N_PIX_DEFAULT if requested is None
+                     else min(int(requested), physics_bhs.PIXELS_N_PIX_MAX))
             driver_bhs.run_pixels(
                 b_in=args.b_in, b_out=args.b_out,
                 n_pix=n_use, n_pix_requested=requested,
                 fov_M=args.fov, **common)
         elif args.mode == "capture":
-            driver_bhs.run_capture(n_pix=args.n_pix, fov_M=args.fov, **common)
+            n_pix = 161 if args.n_pix is None else args.n_pix
+            driver_bhs.run_capture(n_pix=n_pix, fov_M=args.fov, **common)
         elif args.mode == "ring":
-            driver_bhs.run_ring(n_pix=args.n_pix, fov_M=args.fov, **common)
+            n_pix = 161 if args.n_pix is None else args.n_pix
+            driver_bhs.run_ring(n_pix=n_pix, fov_M=args.fov, **common)
         elif args.mode == "transfer":
+            n_pix = 161 if args.n_pix is None else args.n_pix
             driver_bhs.run_transfer(
-                n_pix=args.n_pix, fov_M=args.fov, r_hot=args.r_hot, **common)
+                n_pix=n_pix, fov_M=args.fov, r_hot=args.r_hot, **common)
         elif args.mode == "image":
+            n_pix = 161 if args.n_pix is None else args.n_pix
             driver_bhs.run_image(
-                n_pix=args.n_pix, fov_M=args.fov, r_hot=args.r_hot, **common)
+                n_pix=n_pix, fov_M=args.fov, r_hot=args.r_hot, **common)
         elif args.mode == "radii":
-            driver_bhs.run_radii(n_pix=args.n_pix, fov_M=args.fov, **common)
+            n_pix = 161 if args.n_pix is None else args.n_pix
+            driver_bhs.run_radii(n_pix=n_pix, fov_M=args.fov, **common)
         elif args.mode == "weak":
             driver_bhs.run_weak(**common)
         elif args.mode == "compare":

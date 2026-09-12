@@ -284,9 +284,15 @@ class TestPhotonRingMask(unittest.TestCase):
 
 class TestDiskImage(unittest.TestCase):
     def test_zero_emissivity_gives_zero_image(self):
-        bx, by, _, _ = phys.make_impact_grid(21, 16.0, 1.0)
-        image, _ = phys.disk_image(bx, by, 1.0, r_hot=6.0, width=1.0e-9)
-        self.assertLess(float(np.max(image)), 1.0e-6)
+        real = phys.emitted_intensity
+        phys.emitted_intensity = lambda *a, **k: 0.0
+        try:
+            self.assertEqual(phys.observed_intensity(6.93, 1.0), 0.0)
+            bx, by, _, _ = phys.make_impact_grid(21, 16.0, 1.0)
+            image, _ = phys.disk_image(bx, by, 1.0, r_hot=6.0)
+            self.assertEqual(float(np.max(image)), 0.0)
+        finally:
+            phys.emitted_intensity = real
 
     def test_hot_ring_must_lie_outside_photon_sphere(self):
         bx, by, _, _ = phys.make_impact_grid(21, 16.0, 1.0)
@@ -305,6 +311,33 @@ class TestDiskImage(unittest.TestCase):
                 self.assertIsNone(b)
             else:
                 self.assertAlmostEqual(a, b/2.0, places=8)
+
+
+    def test_critical_ray_does_not_plunge(self):
+        b = phys.critical_impact_parameter(1.0)
+        rs = phys.face_on_crossing_radii(b, 1.0, max_m=8)
+        self.assertTrue(all(r >= 3.0 for r in rs))
+
+    def test_source_roots_for_default_annulus(self):
+        peaks = phys.source_crossing_impacts(1.0, 6.0, max_m=4)
+        self.assertAlmostEqual(peaks[0]/1.0, 6.93215, places=2)
+        self.assertAlmostEqual(peaks[1]/1.0, 5.4789, places=2)
+        self.assertAlmostEqual(peaks[2]/1.0, 5.2080, places=2)
+
+    def test_transfer_resolves_r3_independent_of_fov(self):
+        for fov in (8.0, 16.0, 24.0):
+            bs, table, _, _ = phys.transfer_curves(1.0, b_max_over_M=0.5*fov, max_m=3)
+            n3 = int(np.isfinite(table[:, 2]).sum())
+            self.assertGreater(n3, 10, msg=f"fov={fov} n3={n3}")
+
+    def test_photon_increment_stable_across_fov(self):
+        incs = []
+        for fov in (16.0, 20.0):
+            bx, by, _, _ = phys.make_impact_grid(41, fov, 1.0)
+            _, img2, img3, _, _, _ = phys.disk_image_components(bx, by, 1.0)
+            incs.append(float((img3-img2).max()))
+        self.assertGreater(incs[0], 0.05)
+        self.assertAlmostEqual(incs[0], incs[1], delta=0.05)
 
     def test_captured_ray_may_still_cross(self):
         rs = phys.face_on_crossing_radii(5.0, 1.0)
@@ -386,8 +419,9 @@ class TestHelpFile(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
     def test_cli_rejects_inclination_outside_range(self):
-        result = run_cli(["--mode", "backlight", "--inclination", "120"])
+        result = run_cli(["--mode", "image", "--inclination", "30"])
         self.assertNotEqual(result.returncode, 0)
+        self.assertIn("face-on", result.stderr.lower() + result.stdout.lower())
 
     def test_pixels_narration_follows_flags(self):
         with tempfile.TemporaryDirectory() as tmp:

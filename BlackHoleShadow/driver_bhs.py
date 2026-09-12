@@ -185,7 +185,7 @@ def run_ring(M=1.0, n_pix=161, fov_M=16.0,
 
 def run_radii(M=1.0, n_pix=161, fov_M=16.0,
               outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 4: spacetime radii versus the image-plane critical curve."""
+    """Beat 6: coordinate radii versus the image-plane critical curve."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
     fov_M, need, _ = phys.require_shadow_in_frame(M, fov_M, n_pix)
@@ -206,7 +206,7 @@ def run_radii(M=1.0, n_pix=161, fov_M=16.0,
 
 
 def run_weak(M=1.0, outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 5: exact deflection versus 4M/b."""
+    """Beat 7: exact deflection versus 4M/b."""
     M = phys.validate_user_value("M", M, positive=True)
     bs, exact, weak = phys.deflection_curve(M)
     _print_summary("weak", [
@@ -227,7 +227,7 @@ def run_weak(M=1.0, outdir=None, dpi=140, show=True, interactive=False):
 
 def run_compare(M=1.0, logM=12.0,
                 outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 6: galaxy Einstein radius versus this hole's critical curve."""
+    """Beat 8: galaxy Einstein radius versus this hole's critical curve."""
     M = phys.validate_user_value("M", M, positive=True)
     logM = phys.validate_user_value(
         "logM", logM, min_value=phys.LOGM_MIN, max_value=phys.LOGM_MAX,
@@ -257,30 +257,37 @@ def run_transfer(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
         r_hot_over_M = phys.HOT_RING_R_DEFAULT
     else:
         r_hot_over_M = phys.validate_user_value("r_hot", r_hot, positive=True)
-    fov_M, need, _ = phys.require_shadow_in_frame(
-        M, fov_M, phys.odd_n_pix(n_pix), extra_radius_over_M=0.5 * fov_M,
-    )
+    r_hot_abs = phys.to_absolute_length(r_hot_over_M, M, "r_hot")
+    b_max_over_M = max(0.5 * fov_M, 1.6 * r_hot_over_M, 8.0)
     bs, table, counts, b_crit = phys.transfer_curves(
-        M, b_max_over_M=0.5 * fov_M, n=81, max_m=3,
+        M, b_max_over_M=b_max_over_M, max_m=3,
     )
+    n_r3 = 0
+    if table.shape[1] > 2:
+        n_r3 = int(sum(1 for v in table[:, 2] if v == v))
+    peaks = phys.source_crossing_impacts(M, r_hot_abs, max_m=3)
     _print_summary("transfer", [
         f"M                      : {M:.6g}",
         f"r_hot                  : {r_hot_over_M:.6g} M",
+        f"I_em width             : {phys.HOT_RING_WIDTH_DEFAULT:.6g} M",
         f"b_crit / M             : {b_crit / M:.6g}",
-        "r_1(b) = first face-on equatorial crossing (direct image)",
-        "r_2(b) = second crossing (lensing ring)",
-        "r_3(b) = third crossing (photon-ring / subring)",
-        "Face-on, optically thin, no inclination.",
+        f"adaptive b samples     : {bs.size}",
+        f"finite r_3 samples     : {n_r3}",
+        f"b(r_m=r_hot)/M         : "
+        + ", ".join("—" if p is None else f"{p / M:.5g}" for p in peaks),
+        "Static face-on emitters.  No Doppler.  m>=4 omitted here.",
     ])
     return plotting.plot_transfer(
-        bs, table, counts, M=M, r_hot_over_M=r_hot_over_M, fov_over_M=fov_M,
+        bs, table, counts, M=M, r_hot_over_M=r_hot_over_M,
+        width_over_M=phys.HOT_RING_WIDTH_DEFAULT, peaks=peaks,
+        fov_over_M=fov_M,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 
 
 def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
               outdir=None, dpi=140, show=True, interactive=False):
-    """Beat 5-7: direct, +lensing, +photon-ring contributions."""
+    """Beat 5: direct, +lensing, +photon-ring contributions."""
     M = phys.validate_user_value("M", M, positive=True)
     n_pix = phys.odd_n_pix(n_pix)
     if r_hot is None:
@@ -293,19 +300,24 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
         M, fov_M, n_pix, extra_radius_over_M=extra,
     )
     bx, by, n_pix, fov_M = phys.make_impact_grid(n_pix, fov_M, M)
-    img1, b_hot = phys.disk_image(bx, by, M, r_hot=r_hot_abs, upto=1)
-    img2, _ = phys.disk_image(bx, by, M, r_hot=r_hot_abs, upto=2)
-    img3, _ = phys.disk_image(bx, by, M, r_hot=r_hot_abs, upto=None)
+    img1, img2, img3, sample, parts, b_hot = phys.disk_image_components(
+        bx, by, M, r_hot=r_hot_abs,
+    )
+    photon_inc = float((img3 - img2).max())
     _print_summary("image", [
         f"M                      : {M:.6g}",
         f"r_hot                  : {r_hot_over_M:.6g} M",
+        f"I_em width             : {phys.HOT_RING_WIDTH_DEFAULT:.6g} M",
         f"b_hot (periapsis) / M  : {b_hot / M:.6g}",
         f"n_pix x n_pix          : {n_pix} x {n_pix}",
         f"fov                    : {fov_M:.6g} M",
-        "I_obs = sum_m g(r_m)^4 I_em(r_m),  g=sqrt(1-2M/r).",
-        "Panels: direct | +lensing | +photon-ring.  Face-on, thin.",
-        "False colour is a display scale.  Captured rays can still shine",
-        "if they cross the disk before the horizon.",
+        f"adaptive I(b) samples  : {sample.size}",
+        f"max m>=3 increment     : {photon_inc:.4g}",
+        "I_obs = sum_{m=1..4} g^4 I_em;  m>=5 omitted.",
+        "g=sqrt(1-2M/r) for static emitters (no orbital Doppler).",
+        "Third panel = photon-ring/subring crossings m=3 and m=4.",
+        "Captured means the future endpoint is the horizon; the ray",
+        "may still cross the disk on the way in.",
     ])
     return plotting.plot_image(
         bx, by, img1, img2, img3, M=M, r_hot=r_hot_abs, b_hot=b_hot,

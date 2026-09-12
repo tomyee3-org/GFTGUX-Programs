@@ -17,7 +17,8 @@ grids are built so a fixed --fov (in units of M) frames the same
 dimensionless picture at every M.
 
 Nothing here is Kerr, plasma, radiative transfer, or an EHT pipeline.
-A nonzero backlight inclination is a display factor, not a disk model.
+The face-on image uses static emitters (no orbital Doppler).
+Inclination is not a student parameter in this version.
 """
 
 from __future__ import annotations
@@ -28,7 +29,11 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.3.0"
+MODEL_VERSION = "0.4.0"
+
+# Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
+# m>=5 is omitted; the figure must say so.
+MAX_IMAGE_M = 4
 
 # RK4 null-geodesic stepper is kept in lockstep with PhotonOrbit 1.4.0
 # (GFTGUX-Programs/PhotonOrbit).  This package does not import that
@@ -712,55 +717,6 @@ def compare_rings(log10_m_galaxy=12.0, d_l=D_L_DEFAULT, d_s=D_S_DEFAULT):
     }
 
 
-def backlight_image(bx, by, M, r_hot=None,
-                    width=None, inclination_deg=0.0):
-    """Schematic brightness overlay, not a ray-traced equatorial ring.
-
-    Captured pixels stay dark.  Escaping rays whose periapsis sits near
-    r_hot are painted with a Gaussian in b; a thinner Gaussian hugs
-    b_crit.  That is a drawing keyed to turning points, not an
-    intersection with an emitting plane, not transport, and not beaming.
-    Inclination, if any, is a left/right display factor.
-    """
-    M = _require_positive("M", M)
-    if r_hot is None:
-        r_hot = HOT_RING_R_DEFAULT * M
-    if width is None:
-        width = HOT_RING_WIDTH_DEFAULT * M
-    r_hot = _require_positive("r_hot", r_hot)
-    width = _require_positive("width", width)
-    inclination_deg = _require_finite("inclination_deg", inclination_deg)
-    if inclination_deg < 0.0 or inclination_deg > 90.0:
-        raise ValueError("inclination must lie in [0, 90] degrees.")
-    if r_hot <= photon_sphere(M):
-        raise ValueError(
-            f"r_hot must lie outside the photon sphere ({photon_sphere(M):g})."
-        )
-    bx = np.asarray(bx, dtype=float)
-    by = np.asarray(by, dtype=float)
-    b = np.hypot(bx, by)
-    b_crit = critical_impact_parameter(M)
-    image = np.zeros(b.shape, dtype=float)
-    escaped = b > b_crit
-    # Impact parameter whose periapsis is r_hot: from the turning-point
-    # equation, b^2 = r^3 / (r - 2M) at r = r_hot.
-    b_hot = math.sqrt(r_hot ** 3 / (r_hot - 2.0 * M))
-    # Primary ring: Gaussian in b around b_hot.
-    ring = np.exp(-0.5 * ((b - b_hot) / width) ** 2)
-    # Photon-ring highlighter: a thinner Gaussian hugging b_crit from above.
-    photon = np.exp(-0.5 * ((b - b_crit) / (0.35 * width)) ** 2)
-    image = np.where(escaped, ring + 0.65 * photon, 0.0)
-    # Schematic left/right shading with inclination.  Alpha = b_x.
-    inc = math.radians(inclination_deg)
-    shade = 1.0 + 0.55 * math.sin(inc) * np.divide(
-        bx, np.maximum(b, 1.0e-30), out=np.zeros_like(b), where=b > 0.0
-    )
-    shade = np.clip(shade, 0.15, 1.85)
-    image = image * shade
-    image = np.where(escaped, image, 0.0)
-    return image, b_hot
-
-
 def _R_of_u(u, b, M):
     """(du/dφ)^2 = 1/b^2 - u^2 + 2 M u^3."""
     return 1.0 / (b * b) - u * u + 2.0 * M * u * u * u
@@ -838,7 +794,13 @@ def face_on_crossing_radii(b, M, max_m=4):
         # only in the sense of a polar plunge; no finite-r crossing
         # of z=0 at φ=π/2 in this construction.
         return [None] * max_m
-    captured = is_captured(b, M)
+    b_crit = critical_impact_parameter(M)
+    r_ph = photon_sphere(M)
+    if abs(b - b_crit) <= 1.0e-10 * M:
+        # Unstable circular orbit: azimuth accumulates without bound
+        # while r approaches 3M from above.  It does not plunge.
+        return [r_ph * (1.0 + 1.0e-4 / float(m)) for m in range(1, max_m + 1)]
+    captured = b < b_crit
     u_end = _max_inbound_u(b, M)
     phi_in = _phi_to_turning_or_horizon(b, M)
     phi_total = phi_in if captured else 2.0 * phi_in
@@ -932,13 +894,36 @@ def observed_intensity(b, M, r_hot=None, width=None, max_m=4, upto=None):
     return float(sum(parts[:int(upto)]))
 
 
+def adaptive_impact_samples(M, b_max, n_outer=48, n_near=72):
+    """b samples clustered logarithmically around b_crit on both sides."""
+    M = _require_positive("M", M)
+    b_max = _require_positive("b_max", b_max)
+    b_crit = critical_impact_parameter(M)
+    outer = np.linspace(0.02 * M, b_max, int(n_outer))
+    # Offsets from 1e-6 M to 0.3 M.  The m=3 window is ~0.03 M wide.
+    log_off = np.logspace(-6.0, math.log10(0.30), int(n_near)) * M
+    near = np.concatenate([
+        b_crit - log_off[::-1],
+        b_crit + log_off,
+    ])
+    near = near[(near > 0.0) & (near <= b_max * 1.001)]
+    bs = np.unique(np.concatenate([outer, near]))
+    return np.sort(bs)
+
+
 def transfer_curves(M, b_max_over_M=8.0, n=81, max_m=3):
-    """b/M and r_m/M tables for the transfer-function beat."""
+    """b and r_m/M tables for the transfer-function beat.
+
+    ``n`` is accepted for compatibility; the actual grid is adaptive
+    around b_crit so the m=3 branch is not a function of --fov luck.
+    """
+    del n
     M = _require_positive("M", M)
     b_crit = critical_impact_parameter(M)
-    bs = np.linspace(0.05 * M, b_max_over_M * M, int(n))
-    table = np.full((int(n), max_m), np.nan)
-    counts = np.zeros(int(n), dtype=int)
+    b_max = max(float(b_max_over_M) * M, 1.2 * b_crit)
+    bs = adaptive_impact_samples(M, b_max)
+    table = np.full((bs.size, max_m), np.nan)
+    counts = np.zeros(bs.size, dtype=int)
     for i, bv in enumerate(bs):
         radii = face_on_crossing_radii(float(bv), M, max_m=max_m)
         counts[i] = sum(r is not None for r in radii)
@@ -948,14 +933,66 @@ def transfer_curves(M, b_max_over_M=8.0, n=81, max_m=3):
     return bs, table, counts, b_crit
 
 
-def disk_image(bx, by, M, r_hot=None, width=None, max_m=4, upto=None):
-    """Face-on optically thin image from stored transfer functions.
+def source_crossing_impacts(M, r_hot, max_m=4):
+    """b values where r_m(b) = r_hot, one per existing branch."""
+    M = _require_positive("M", M)
+    r_hot = _require_positive("r_hot", r_hot)
+    b_crit = critical_impact_parameter(M)
+    b_max = max(1.6 * r_hot, 2.0 * b_crit)
+    bs = adaptive_impact_samples(M, b_max, n_outer=60, n_near=96)
+    found = [None] * max_m
+    prev = [None] * max_m
+    prev_b = None
+    for bv in bs:
+        radii = face_on_crossing_radii(float(bv), M, max_m=max_m)
+        for m, r in enumerate(radii):
+            if r is None or prev[m] is None or prev_b is None:
+                prev[m] = r
+                continue
+            if (prev[m] - r_hot) * (r - r_hot) <= 0.0:
+                # Linear interpolate in b.
+                denom = (r - prev[m])
+                if denom == 0.0:
+                    found[m] = float(bv)
+                else:
+                    frac = (r_hot - prev[m]) / denom
+                    found[m] = float(prev_b + frac * (bv - prev_b))
+            prev[m] = r
+        prev_b = float(bv)
+    return found
 
-    ``upto`` = 1 direct only, 2 direct+lensing, None = all computed
-    crossings.  Returns (image, b_hot) with b_hot the impact parameter
-    whose periapsis equals r_hot (a useful marker, not the image peak).
+
+def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
+    """Adaptive (b, I_m) table.  Components computed once."""
+    M = _require_positive("M", M)
+    if max_m is None:
+        max_m = MAX_IMAGE_M
+    if r_hot is None:
+        r_hot = HOT_RING_R_DEFAULT * M
+    if width is None:
+        width = HOT_RING_WIDTH_DEFAULT * M
+    sample = adaptive_impact_samples(M, b_max)
+    parts = np.zeros((sample.size, max_m))
+    for i, bv in enumerate(sample):
+        comp, _ = observed_components(
+            float(bv), M, r_hot=r_hot, width=width, max_m=max_m,
+        )
+        parts[i, :] = comp
+    return sample, parts
+
+
+def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
+    """Return (I_direct, I_upto2, I_total, sample, parts, b_hot).
+
+    Pixel values are interpolated from an adaptive radial table, then
+    each pixel takes the max of that interpolation and any source-peak
+    sample that falls inside the pixel's radial half-width.  Narrow
+    m>=3 features therefore remain visible instead of being averaged
+    off the raster.
     """
     M = _require_positive("M", M)
+    if max_m is None:
+        max_m = MAX_IMAGE_M
     if r_hot is None:
         r_hot = HOT_RING_R_DEFAULT * M
     if width is None:
@@ -968,21 +1005,52 @@ def disk_image(bx, by, M, r_hot=None, width=None, max_m=4, upto=None):
     bx = np.asarray(bx, dtype=float)
     by = np.asarray(by, dtype=float)
     b = np.hypot(bx, by)
-    # Radial table, then interpolate.  Include both sides of b_crit.
     b_max = float(np.max(b)) if b.size else 8.0 * M
-    sample = np.linspace(0.0, b_max, 241)
-    values = np.array([
-        observed_intensity(float(bv), M, r_hot=r_hot, width=width,
-                           max_m=max_m, upto=upto)
-        if bv > 0.0 else 0.0
-        for bv in sample
-    ])
-    image = np.interp(b, sample, values, left=0.0, right=0.0)
+    sample, parts = intensity_table(
+        M, b_max, r_hot=r_hot, width=width, max_m=max_m,
+    )
+    cols = [
+        np.interp(b, sample, parts[:, m], left=0.0, right=0.0)
+        for m in range(max_m)
+    ]
+    # Pixel radial half-width from the grid, if it is a regular mesh.
+    if bx.ndim == 2 and bx.shape[1] > 1:
+        db = abs(float(bx[0, 1] - bx[0, 0]))
+    else:
+        db = 0.05 * M
+    peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
+    for m, b_peak in enumerate(peaks):
+        if b_peak is None:
+            continue
+        I_peak = observed_intensity(
+            b_peak, M, r_hot=r_hot, width=width, max_m=max_m, upto=m + 1,
+        ) - observed_intensity(
+            b_peak, M, r_hot=r_hot, width=width, max_m=max_m, upto=m,
+        )
+        near = np.abs(b - b_peak) <= 0.55 * db
+        cols[m] = np.where(near, np.maximum(cols[m], I_peak), cols[m])
+    img1 = cols[0]
+    img2 = cols[0] + (cols[1] if max_m > 1 else 0.0)
+    img_all = sum(cols)
     try:
         b_hot = impact_parameter_of_periapsis(r_hot, M)
     except ValueError:
         b_hot = float("nan")
-    return image, b_hot
+    return img1, img2, img_all, sample, parts, b_hot
+
+
+def disk_image(bx, by, M, r_hot=None, width=None, max_m=None, upto=None):
+    """Face-on optically thin image.  Wrapper around disk_image_components."""
+    if max_m is None:
+        max_m = MAX_IMAGE_M
+    img1, img2, img_all, sample, parts, b_hot = disk_image_components(
+        bx, by, M, r_hot=r_hot, width=width, max_m=max_m,
+    )
+    if upto == 1:
+        return img1, b_hot
+    if upto == 2:
+        return img2, b_hot
+    return img_all, b_hot
 
 
 def odd_n_pix(n_pix):
