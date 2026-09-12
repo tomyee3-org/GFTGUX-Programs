@@ -46,6 +46,7 @@ import hashlib
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -143,6 +144,41 @@ class TestBuildIdentity(unittest.TestCase):
         text = (result.stdout + result.stderr).strip()
         self.assertIn(phys.MODEL_VERSION, text)
         self.assertIn(phys.BUILD_ID, text)
+
+
+class TestMinimumPythonVersionCompatibility(unittest.TestCase):
+    """1.0.1 regression guard.
+
+    1.0.0 shipped three provenance f-strings in plot_gl.py whose ``{...}``
+    expression spanned a physical line break inside a single-quoted
+    f-string.  That is a SyntaxError on every Python before 3.12 (PEP 701
+    relaxed the grammar); it is legal only from 3.12 onward.  The Help
+    file promises "Python 3.10 or newer," so every core module must at
+    least *parse* on 3.10.  ``ast.parse`` under the running interpreter
+    cannot catch this retroactively once run under 3.12+, so this test
+    shells out to the documented minimum interpreter directly.  It skips
+    (rather than fails) when that interpreter isn't installed on the
+    machine running the suite -- CI for this project should make sure it
+    is.
+    """
+
+    MIN_PYTHON = "python3.10"
+
+    def test_core_modules_parse_on_the_documented_minimum_python(self):
+        if shutil.which(self.MIN_PYTHON) is None:
+            self.skipTest(f"{self.MIN_PYTHON} not installed on this machine")
+        for name in CORE_MODULE_FILES:
+            path = MODULE_DIR / name
+            result = subprocess.run(
+                [self.MIN_PYTHON, "-c",
+                 "import ast, sys; ast.parse(open(sys.argv[1]).read())",
+                 str(path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                msg=f"{name} does not parse on {self.MIN_PYTHON}:\n{result.stderr}",
+            )
 
 
 class TestEinsteinRadius(unittest.TestCase):

@@ -26,7 +26,16 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "1.0.0"
+MODEL_VERSION = "1.0.1"
+
+# 1.0.1 patch: three provenance-dict f-strings in plot_gl.py (plot_point,
+# plot_arcs, plot_kappa) split a single {...} expression across a physical
+# line break inside a non-triple-quoted f-string.  That syntax is legal
+# only from Python 3.12 onward (PEP 701); on Python 3.10/3.11 -- the
+# minimum version this Help file documents -- every mode failed at import
+# time, including --version.  No plotted data, physics, or numeric result
+# changed; only how each fov_arcsec provenance string was assembled.
+# See GravitationalLensing-1.0.1-ReleaseNotes.html.
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
