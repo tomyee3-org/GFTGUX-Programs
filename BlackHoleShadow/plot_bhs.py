@@ -442,10 +442,7 @@ def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0,
     ax.set_ylabel(r"crossing radius $r_m/M$")
     ax.set_title("Transfer functions (adaptive $b$ grid)")
     ax.legend(loc="upper right", fontsize=7)
-    finite = table[np.isfinite(table)]
     y_top = max(12.0, r_hot_over_M + 4.0)
-    if finite.size:
-        y_top = max(y_top, float(np.nanmax(table[:, 0:min(2, table.shape[1])])) + 1.0)
     ax.set_ylim(2.0, y_top)
 
     ax = axes[1]
@@ -483,13 +480,16 @@ def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0,
 
 
 def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
-               fov_over_M=16.0, outdir=None, dpi=140, show=True):
-    fig, axes = plt.subplots(1, 3, figsize=(12.6, 4.4))
+               fov_over_M=16.0, sample=None, parts=None,
+               outdir=None, dpi=140, show=True):
+    fig = plt.figure(figsize=(12.6, 6.4))
+    axes = [fig.add_subplot(2, 3, i) for i in range(1, 4)]
+    ax_r = fig.add_subplot(2, 1, 2)
     extent = _extent_over_M(bx, by, M)
-    vmax = max(float(np.max(img3)), 1.0e-12)
+    vmax = max(float(np.max(img1)), 1.0e-12)
     titles = (
-        "direct ($m=1$)",
-        "+ lensing (m <= 2)",
+        "direct (m=1)",
+        "+ lensing (m<=2)",
         "+ photon-ring/subring (m=3,4)",
     )
     for ax, img, title in zip(axes, (img1, img2, img3), titles):
@@ -500,12 +500,30 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
         ax.set_xlabel(r"$b_x/M$")
         ax.set_title(title, fontsize=10)
     axes[0].set_ylabel(r"$b_y/M$")
+    if sample is not None and parts is not None:
+        b_over = np.asarray(sample) / M
+        if parts.shape[1] >= 2:
+            ax_r.plot(b_over, parts[:, 0], color="#0077b6", lw=1.4, label="m=1")
+            ax_r.plot(b_over, parts[:, 1], color="#c9a227", lw=1.4, label="m=2")
+        if parts.shape[1] >= 4:
+            ax_r.plot(b_over, parts[:, 2] + parts[:, 3], color="#c1121f",
+                      lw=1.6, label="m=3+4")
+        elif parts.shape[1] >= 3:
+            ax_r.plot(b_over, parts[:, 2], color="#c1121f", lw=1.6, label="m=3")
+        ax_r.axvline(phys.critical_impact_parameter(M) / M, color=C_BC, ls=":")
+        ax_r.set_xlim(phys.critical_impact_parameter(M) / M - 0.15,
+                      phys.critical_impact_parameter(M) / M + 2.2)
+        ax_r.set_xlabel(r"$b/M$")
+        ax_r.set_ylabel(r"$I_m(b)$  (pointwise)")
+        ax_r.set_title("Radial profile (adaptive table). Narrow peaks may miss a pixel centre.")
+        ax_r.legend(loc="upper right", fontsize=8)
     fig.suptitle(
-        r"Beat 5 · Face-on image  $I_{\mathrm{obs}}=\sum_{m=1}^{4} g^4 I_{\mathrm{em}}$"
+        r"Beat 5 · Point-sampled face-on image  "
+        r"$I_{\mathrm{obs}}\approx\sum_{m=1}^{4} g^4 I_{\mathrm{em}}$"
         "  (static emitters; m>=5 omitted)",
         fontsize=11,
     )
-    fig.tight_layout(rect=[0, 0.03, 1, 0.90])
+    fig.tight_layout(rect=[0, 0.03, 1, 0.92])
     saved = _finish(fig, outdir, "image", dpi, provenance={
         "mode": "image",
         "M": repr(M),
@@ -516,9 +534,10 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, b_hot=None,
         "n_pix": str(bx.shape[0]),
         "fov_over_M": repr(fov_over_M),
         "I_obs": "sum_{m=1..4} g^4 I_em; m>=5 omitted",
+        "pixel_contract": "point sample at pixel centre from adaptive I(b)",
         "false_colour": "inferno display scale; not a spectrum",
         "emitters": "static; no orbital Doppler",
-        "sampling": "adaptive log cluster around b_crit plus peak stamp",
+        "sampling": "adaptive log cluster around b_crit; no peak stamp",
         "max_m": str(phys.MAX_IMAGE_M),
     })
     if show:

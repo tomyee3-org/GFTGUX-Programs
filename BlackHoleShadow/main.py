@@ -27,6 +27,7 @@ Examples
 """
 
 import argparse
+import math
 import os
 
 import driver_bhs
@@ -105,7 +106,8 @@ def _validate_args(args):
     physics_bhs.validate_user_value("d_lambda", args.d_lambda, positive=True)
     physics_bhs.validate_user_value("fov", args.fov, positive=True)
     physics_bhs.validate_user_value("dpi", args.dpi, positive=True)
-    if abs(float(args.inclination)) > 1.0e-12:
+    inc = float(args.inclination)
+    if not math.isfinite(inc) or inc != 0.0:
         raise ValueError(
             "--inclination is not used: this version is face-on only. "
             "Pass 0 or omit the flag."

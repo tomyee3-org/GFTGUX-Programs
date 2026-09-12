@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.4.0"
+MODEL_VERSION = "0.5.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # m>=5 is omitted; the figure must say so.
@@ -115,7 +115,7 @@ LOGM_MAX = 15.0
 # Azimuth threshold that counts as "wound once" on an escaping ray.
 WINDING_DELTA_PHI = 2.0 * math.pi
 
-# Schematic backlight Gaussian half-width as a multiple of M.
+# Emitted-annulus Gaussian half-width as a multiple of M.
 HOT_RING_WIDTH_DEFAULT = 0.45
 
 # Default hot-ring coordinate radius (a few r_s, outside the photon sphere).
@@ -722,7 +722,7 @@ def _R_of_u(u, b, M):
     return 1.0 / (b * b) - u * u + 2.0 * M * u * u * u
 
 
-def _phi_integral(u_lo, u_hi, b, M, n=512):
+def _phi_integral(u_lo, u_hi, b, M, n=1024):
     """∫_{u_lo}^{u_hi} du / sqrt(R(u)), R>=0 on the open interval."""
     u_lo = float(u_lo)
     u_hi = float(u_hi)
@@ -730,20 +730,25 @@ def _phi_integral(u_lo, u_hi, b, M, n=512):
         u_lo, u_hi = u_hi, u_lo
     if u_hi <= u_lo:
         return 0.0
-    # t^2 substitution from the upper end in case R(u_hi)~0 (turning point).
+    n = max(int(n), 256)
+    R_hi = float(_R_of_u(u_hi, b, M))
+    if R_hi > 1.0e-10:
+        u = np.linspace(u_lo, u_hi, n)
+        rad = np.maximum(_R_of_u(u, b, M), 0.0)
+        inv = np.zeros_like(u)
+        safe = rad > 0.0
+        inv[safe] = 1.0 / np.sqrt(rad[safe])
+        return float(np.trapezoid(inv, u))
     span = u_hi - u_lo
-    t = np.linspace(0.0, math.sqrt(span), int(n))
+    t = np.linspace(0.0, math.sqrt(span), n)
     u = u_hi - t * t
-    rad = _R_of_u(u, b, M)
-    rad = np.maximum(rad, 0.0)
+    rad = np.maximum(_R_of_u(u, b, M), 0.0)
     piece = np.zeros_like(t)
     safe = rad > 0.0
     piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
-    # Endpoint slope of R at a turning point.
-    if rad[0] <= 1.0e-18:
-        dR = -2.0 * u_hi + 6.0 * M * u_hi * u_hi
-        if abs(dR) > 0.0:
-            piece[0] = 2.0 / math.sqrt(abs(dR))
+    dR = -2.0 * u_hi + 6.0 * M * u_hi * u_hi
+    if abs(dR) > 0.0:
+        piece[0] = 2.0 / math.sqrt(abs(dR))
     return float(np.trapezoid(piece, t))
 
 
@@ -796,10 +801,10 @@ def face_on_crossing_radii(b, M, max_m=4):
         return [None] * max_m
     b_crit = critical_impact_parameter(M)
     r_ph = photon_sphere(M)
-    if abs(b - b_crit) <= 1.0e-10 * M:
-        # Unstable circular orbit: azimuth accumulates without bound
-        # while r approaches 3M from above.  It does not plunge.
-        return [r_ph * (1.0 + 1.0e-4 / float(m)) for m in range(1, max_m + 1)]
+    if abs(b - b_crit) <= 1.0e-8 * M:
+        # Critical ray: inbound from infinity toward r=3M, never
+        # reaching it.  Every finite target angle has a root r>3M.
+        return _critical_crossing_radii(M, max_m)
     captured = b < b_crit
     u_end = _max_inbound_u(b, M)
     phi_in = _phi_to_turning_or_horizon(b, M)
@@ -838,6 +843,28 @@ def _invert_phi_inbound(target_phi, b, M, u_end):
         else:
             hi = mid
     return 0.5 * (lo + hi)
+
+
+def _critical_crossing_radii(M, max_m):
+    """Finite-angle crossings of the exact critical geodesic.
+
+    Endpoint u = 1/(3M) is a double root of R(u); the ray approaches
+    the photon sphere from above and never plunges.  Invert each
+    target angle on u in (0, 1/(3M)).
+    """
+    u_ph = 1.0 / photon_sphere(M)
+    b = critical_impact_parameter(M)
+    # Stay off the singular endpoint; phi -> inf as u -> u_ph.
+    u_end = u_ph * (1.0 - 1.0e-10)
+    radii = []
+    for m in range(1, max_m + 1):
+        target = face_on_crossing_angle(m)
+        u = _invert_phi_inbound(target, b, M, u_end)
+        if u is None or u <= 0.0:
+            radii.append(photon_sphere(M) * (1.0 + 1.0e-8))
+        else:
+            radii.append(1.0 / u)
+    return radii
 
 
 def crossing_count(b, M, max_m=4):
@@ -911,13 +938,8 @@ def adaptive_impact_samples(M, b_max, n_outer=48, n_near=72):
     return np.sort(bs)
 
 
-def transfer_curves(M, b_max_over_M=8.0, n=81, max_m=3):
-    """b and r_m/M tables for the transfer-function beat.
-
-    ``n`` is accepted for compatibility; the actual grid is adaptive
-    around b_crit so the m=3 branch is not a function of --fov luck.
-    """
-    del n
+def transfer_curves(M, b_max_over_M=8.0, max_m=3):
+    """b and r_m/M tables for the transfer-function beat."""
     M = _require_positive("M", M)
     b_crit = critical_impact_parameter(M)
     b_max = max(float(b_max_over_M) * M, 1.2 * b_crit)
@@ -934,32 +956,60 @@ def transfer_curves(M, b_max_over_M=8.0, n=81, max_m=3):
 
 
 def source_crossing_impacts(M, r_hot, max_m=4):
-    """b values where r_m(b) = r_hot, one per existing branch."""
+    """Bracketed roots of r_m(b) = r_hot, one per existing branch."""
     M = _require_positive("M", M)
     r_hot = _require_positive("r_hot", r_hot)
     b_crit = critical_impact_parameter(M)
     b_max = max(1.6 * r_hot, 2.0 * b_crit)
-    bs = adaptive_impact_samples(M, b_max, n_outer=60, n_near=96)
+    bs = adaptive_impact_samples(M, b_max, n_outer=80, n_near=120)
     found = [None] * max_m
-    prev = [None] * max_m
+    prev_r = [None] * max_m
     prev_b = None
     for bv in bs:
         radii = face_on_crossing_radii(float(bv), M, max_m=max_m)
         for m, r in enumerate(radii):
-            if r is None or prev[m] is None or prev_b is None:
-                prev[m] = r
+            if found[m] is not None:
                 continue
-            if (prev[m] - r_hot) * (r - r_hot) <= 0.0:
-                # Linear interpolate in b.
-                denom = (r - prev[m])
-                if denom == 0.0:
-                    found[m] = float(bv)
-                else:
-                    frac = (r_hot - prev[m]) / denom
-                    found[m] = float(prev_b + frac * (bv - prev_b))
-            prev[m] = r
+            if r is None or prev_r[m] is None or prev_b is None:
+                prev_r[m] = r
+                continue
+            if (prev_r[m] - r_hot) * (r - r_hot) <= 0.0:
+                found[m] = _bisect_source_root(
+                    prev_b, float(bv), M, m + 1, r_hot,
+                )
+            prev_r[m] = r
         prev_b = float(bv)
     return found
+
+
+def _bisect_source_root(b_lo, b_hi, M, m, r_hot):
+    """Refine b in [b_lo, b_hi] until r_m(b) = r_hot."""
+    def residual(bv):
+        radii = face_on_crossing_radii(bv, M, max_m=m)
+        r = radii[m - 1]
+        if r is None:
+            return None
+        return r - r_hot
+
+    flo = residual(b_lo)
+    fhi = residual(b_hi)
+    if flo is None or fhi is None:
+        return 0.5 * (b_lo + b_hi)
+    if flo * fhi > 0.0:
+        return 0.5 * (b_lo + b_hi)
+    lo, hi, f_lo = b_lo, b_hi, flo
+    for _ in range(50):
+        mid = 0.5 * (lo + hi)
+        fm = residual(mid)
+        if fm is None:
+            break
+        if abs(fm) <= 1.0e-8 * M:
+            return mid
+        if f_lo * fm <= 0.0:
+            hi = mid
+        else:
+            lo, f_lo = mid, fm
+    return 0.5 * (lo + hi)
 
 
 def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
@@ -984,11 +1034,10 @@ def intensity_table(M, b_max, r_hot=None, width=None, max_m=None):
 def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
     """Return (I_direct, I_upto2, I_total, sample, parts, b_hot).
 
-    Pixel values are interpolated from an adaptive radial table, then
-    each pixel takes the max of that interpolation and any source-peak
-    sample that falls inside the pixel's radial half-width.  Narrow
-    m>=3 features therefore remain visible instead of being averaged
-    off the raster.
+    Each camera pixel is a point sample of I_obs at the pixel-centre
+    impact parameter, interpolated from the adaptive radial table.
+    Features narrower than the raster may miss every centre; the
+    radial I(b) table is the honest record of those peaks.
     """
     M = _require_positive("M", M)
     if max_m is None:
@@ -1013,22 +1062,6 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
         np.interp(b, sample, parts[:, m], left=0.0, right=0.0)
         for m in range(max_m)
     ]
-    # Pixel radial half-width from the grid, if it is a regular mesh.
-    if bx.ndim == 2 and bx.shape[1] > 1:
-        db = abs(float(bx[0, 1] - bx[0, 0]))
-    else:
-        db = 0.05 * M
-    peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
-    for m, b_peak in enumerate(peaks):
-        if b_peak is None:
-            continue
-        I_peak = observed_intensity(
-            b_peak, M, r_hot=r_hot, width=width, max_m=max_m, upto=m + 1,
-        ) - observed_intensity(
-            b_peak, M, r_hot=r_hot, width=width, max_m=max_m, upto=m,
-        )
-        near = np.abs(b - b_peak) <= 0.55 * db
-        cols[m] = np.where(near, np.maximum(cols[m], I_peak), cols[m])
     img1 = cols[0]
     img2 = cols[0] + (cols[1] if max_m > 1 else 0.0)
     img_all = sum(cols)

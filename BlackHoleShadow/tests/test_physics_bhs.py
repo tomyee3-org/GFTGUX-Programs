@@ -16,6 +16,12 @@ plot_bhs.py docstrings or output):
 
   2026-09-11  Grok.  Response to Audit2.  Version 0.3.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit2-2026091123.txt
+
+  2026-09-12  Grok.  Response to Audit3.  Version 0.4.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit3-2026091203.txt
+
+  2026-09-12  Grok.  Response to Audit4.  Version 0.5.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit4-2026091204.txt
 """
 
 from __future__ import annotations
@@ -315,14 +321,20 @@ class TestDiskImage(unittest.TestCase):
 
     def test_critical_ray_does_not_plunge(self):
         b = phys.critical_impact_parameter(1.0)
-        rs = phys.face_on_crossing_radii(b, 1.0, max_m=8)
-        self.assertTrue(all(r >= 3.0 for r in rs))
+        rs = phys.face_on_crossing_radii(b, 1.0, max_m=4)
+        self.assertTrue(all(r > 3.0 for r in rs))
+        self.assertAlmostEqual(rs[0], 4.28492, places=3)
+        self.assertAlmostEqual(rs[1], 3.04375, places=3)
+        self.assertGreater(rs[0], rs[1])
+        self.assertGreater(rs[1], rs[2])
+        self.assertGreater(rs[2], rs[3])
 
     def test_source_roots_for_default_annulus(self):
         peaks = phys.source_crossing_impacts(1.0, 6.0, max_m=4)
-        self.assertAlmostEqual(peaks[0]/1.0, 6.93215, places=2)
-        self.assertAlmostEqual(peaks[1]/1.0, 5.4789, places=2)
-        self.assertAlmostEqual(peaks[2]/1.0, 5.2080, places=2)
+        for m, b in enumerate(peaks, start=1):
+            self.assertIsNotNone(b, msg=f"missing root m={m}")
+            r = phys.face_on_crossing_radii(b, 1.0, max_m=m)[m-1]
+            self.assertAlmostEqual(r, 6.0, places=5)
 
     def test_transfer_resolves_r3_independent_of_fov(self):
         for fov in (8.0, 16.0, 24.0):
@@ -330,14 +342,17 @@ class TestDiskImage(unittest.TestCase):
             n3 = int(np.isfinite(table[:, 2]).sum())
             self.assertGreater(n3, 10, msg=f"fov={fov} n3={n3}")
 
-    def test_photon_increment_stable_across_fov(self):
-        incs = []
-        for fov in (16.0, 20.0):
-            bx, by, _, _ = phys.make_impact_grid(41, fov, 1.0)
-            _, img2, img3, _, _, _ = phys.disk_image_components(bx, by, 1.0)
-            incs.append(float((img3-img2).max()))
-        self.assertGreater(incs[0], 0.05)
-        self.assertAlmostEqual(incs[0], incs[1], delta=0.05)
+    def test_table_photon_peak_is_physical(self):
+        _, parts = phys.intensity_table(1.0, 10.0)
+        peak = float((parts[:, 2] + parts[:, 3]).max())
+        self.assertGreater(peak, 0.2)
+        self.assertLess(peak, 0.5)
+
+    def test_raster_cannot_exceed_table_peak(self):
+        bx, by, _, _ = phys.make_impact_grid(41, 16.8, 1.0)
+        _, img2, img3, _, parts, _ = phys.disk_image_components(bx, by, 1.0)
+        table_peak = float((parts[:, 2] + parts[:, 3]).max())
+        self.assertLessEqual(float((img3 - img2).max()), table_peak + 1.0e-6)
 
     def test_captured_ray_may_still_cross(self):
         rs = phys.face_on_crossing_radii(5.0, 1.0)
@@ -450,6 +465,14 @@ class TestScaleInvariance(unittest.TestCase):
         b = phys.require_resolved_shadow(7.0, 16.0, 81)
         self.assertAlmostEqual(a, b, places=10)
 
+
+    def test_cli_transfer_and_image_render(self):
+        for mode in ("transfer", "image"):
+            with tempfile.TemporaryDirectory() as tmp:
+                result = run_cli(["--mode", mode, "--n_pix", "21", "--outdir", tmp])
+                self.assertEqual(result.returncode, 0, msg=result.stderr)
+                pngs = list(Path(tmp).glob("*.png"))
+                self.assertTrue(pngs)
 
     def test_undersized_fov_is_expanded_not_blank(self):
         fov_eff, need = phys.contained_fov(6.0, 1.0)
