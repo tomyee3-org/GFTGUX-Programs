@@ -510,11 +510,11 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
         if parts.shape[1] >= 2:
             ax_r.plot(b_over, parts[:, 0], color="#0077b6", lw=1.4, label="m=1")
             ax_r.plot(b_over, parts[:, 1], color="#c9a227", lw=1.4, label="m=2")
-        if parts.shape[1] >= 4:
-            ax_r.plot(b_over, parts[:, 2] + parts[:, 3], color="#c1121f",
-                      lw=1.6, label=phys.image_order_pair_label().replace(",", "+"))
-        elif parts.shape[1] >= 3:
-            ax_r.plot(b_over, parts[:, 2], color="#c1121f", lw=1.6, label="m=3")
+        if parts.shape[1] >= 3:
+            ax_r.plot(
+                b_over, parts[:, 2:].sum(axis=1), color="#c1121f",
+                lw=1.6, label=phys.photon_order_label(parts.shape[1]),
+            )
         ax_r.axvline(phys.critical_impact_parameter(M) / M, color=C_BC, ls=":")
         x_lo = phys.critical_impact_parameter(M) / M - 0.2
         x_hi = phys.critical_impact_parameter(M) / M + 2.4

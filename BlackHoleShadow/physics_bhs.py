@@ -28,21 +28,34 @@ import math
 import os
 
 import numpy as np
-from scipy.integrate import quad
 
-MODEL_VERSION = "0.11.0"
+try:
+    from scipy.integrate import quad as _scipy_quad
+except ImportError:  # optional; NumPy+Matplotlib is enough to start
+    _scipy_quad = None
+
+MODEL_VERSION = "0.12.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
-# m>=5 is omitted; the figure must say so.
+# Photon-ring panels start at m=3.
 MAX_IMAGE_M = 4
 
 
-def image_order_pair_label(max_m=None):
-    """User-facing 'm=3,4' label derived from MAX_IMAGE_M."""
+def photon_order_label(max_m=None):
+    """User-facing photon-ring range m=3..MAX_IMAGE_M."""
     max_m = MAX_IMAGE_M if max_m is None else int(max_m)
-    if max_m <= 2:
-        return f"m={max_m}"
-    return f"m={max_m - 1},{max_m}"
+    if max_m < 3:
+        return ""
+    if max_m == 3:
+        return "m=3"
+    if max_m == 4:
+        return "m=3,4"
+    return f"m=3..{max_m}"
+
+
+def image_order_pair_label(max_m=None):
+    """Back-compat alias for photon_order_label."""
+    return photon_order_label(max_m)
 
 # RK4 null-geodesic stepper is kept in lockstep with PhotonOrbit 1.4.0
 # (GFTGUX-Programs/PhotonOrbit).  This package does not import that
@@ -669,21 +682,30 @@ def high_winding_b_window(M, r_window=None, delta_phi_min=None):
     r_ph = photon_sphere(M)
     r_outer = r_ph + r_window
     b_from_r = impact_parameter_of_periapsis(r_outer, M)
-    # Walk inward from b_from_r until Delta phi exceeds the threshold.
-    b_hi = b_crit
-    samples = np.geomspace(b_crit * (1.0 + 1.0e-12), b_from_r, 80)
-    for bv in samples[::-1]:
-        try:
-            delta_phi = escaping_azimuth_from_infinity(float(bv), M)
-        except ValueError:
-            continue
-        if delta_phi > delta_phi_min:
-            b_hi = float(bv)
-            break
-    b_lo = b_crit
-    if b_hi <= b_lo:
-        return b_lo, b_lo
-    return b_lo, b_hi
+    rel_max = max((b_from_r - b_crit) / b_crit, 1.0e-15)
+
+    def qualifies(rel):
+        bv = b_crit * (1.0 + rel)
+        rmin = periapsis(bv, M)
+        if rmin is None or rmin > r_outer:
+            return False
+        return escaping_azimuth_from_infinity(bv, M) > delta_phi_min
+
+    # Search in log(rel).  Azimuth grows as rel shrinks.  A threshold
+    # beyond the 1e-15 tail (~30 rad) yields an empty window.
+    rel_lo = 1.0e-15
+    if not qualifies(rel_lo):
+        return b_crit, b_crit
+    if qualifies(rel_max):
+        return b_crit, b_from_r
+    lo, hi = rel_lo, rel_max
+    for _ in range(60):
+        mid = math.sqrt(lo * hi)
+        if qualifies(mid):
+            lo = mid
+        else:
+            hi = mid
+    return b_crit, b_crit * (1.0 + lo)
 
 
 def capture_map(bx, by, M):
@@ -808,7 +830,9 @@ def _R_hat(x, beta):
 
 
 def _phi_quad(x_lo, x_hi, beta):
-    """Adaptive ∫ dx/sqrt(R_hat) with a t² substitution at a turning point."""
+    """Optional SciPy adaptive integral.  Raises if SciPy is absent or noisy."""
+    if _scipy_quad is None:
+        raise RuntimeError("scipy.integrate.quad is not available")
     R_hi = float(_R_hat(x_hi, beta))
     if R_hi <= 1.0e-12:
         t_max = math.sqrt(max(x_hi - x_lo, 0.0))
@@ -826,19 +850,21 @@ def _phi_quad(x_lo, x_hi, beta):
         import warnings
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            val, _ = quad(g, 0.0, t_max, epsabs=1.0e-10, limit=200)
-        return float(val)
+            val, err = _scipy_quad(g, 0.0, t_max, epsabs=1.0e-10, limit=200)
+    else:
 
-    def f(x):
-        rad = float(_R_hat(x, beta))
-        if rad <= 0.0:
-            return 0.0
-        return 1.0 / math.sqrt(rad)
+        def f(x):
+            rad = float(_R_hat(x, beta))
+            if rad <= 0.0:
+                return 0.0
+            return 1.0 / math.sqrt(rad)
 
-    import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        val, _ = quad(f, x_lo, x_hi, epsabs=1.0e-10, limit=200)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            val, err = _scipy_quad(f, x_lo, x_hi, epsabs=1.0e-10, limit=200)
+    if not math.isfinite(val) or float(err) > 1.0e-3:
+        raise RuntimeError("adaptive quadrature did not meet the error target")
     return float(val)
 
 
@@ -855,7 +881,10 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
     R_hi = float(_R_hat(x_hi, beta))
     delta = abs(beta - 3.0 * math.sqrt(3.0))
     if n is None and (delta < 1.0e-3 or R_hi <= 1.0e-8):
-        return _phi_quad(x_lo, x_hi, beta)
+        try:
+            return _phi_quad(x_lo, x_hi, beta)
+        except (RuntimeError, ValueError):
+            pass
     if n is None:
         n = 8192 if R_hi > 1.0e-8 else 4096
     n = max(int(n), 256)
@@ -908,6 +937,9 @@ def _max_inbound_u(b, M):
 
 
 def _phi_to_turning_or_horizon(b, M):
+    b_crit = critical_impact_parameter(M)
+    if b > b_crit and (b - b_crit) / b_crit < 1.0e-3:
+        return 0.5 * escaping_azimuth_from_infinity(b, M)
     return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
 
 
@@ -940,6 +972,10 @@ def face_on_crossing_radii(b, M, max_m=4):
         target = face_on_crossing_angle(m)
         if target > phi_total + 1.0e-9:
             radii.append(None)
+            continue
+        if abs(b - b_crit) / b_crit < 1.0e-10:
+            x = critical_x_of_phi(target)
+            radii.append(None if x is None or x <= 0.0 else M / x)
             continue
         if target <= phi_in + 1.0e-12:
             u = _invert_phi_inbound(target, b, M, u_end)

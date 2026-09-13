@@ -40,6 +40,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-13  Grok.  Response to Audit10.  Version 0.11.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit10-2026091304.txt
+
+  2026-09-13  Grok.  Response to Audit11.  Version 0.12.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit11-2026091305.txt
 """
 
 from __future__ import annotations
@@ -546,6 +549,8 @@ class TestHelpFile(unittest.TestCase):
         self.assertNotIn("PhotonOrbit’s EXP-8", text)
         self.assertNotIn("PhotonOrbit EXP-4", text)
         self.assertIn("near-critical whirling", text)
+        self.assertIn("SciPy is optional", text)
+        self.assertIn("NumPy and Matplotlib", text)
         self.assertIn("pixel centre", text)
 
     def test_patch_help_version_is_idempotent(self):
@@ -640,6 +645,20 @@ class TestScaleInvariance(unittest.TestCase):
     def test_high_winding_window_survives_large_azimuth_threshold(self):
         lo, hi = phys.high_winding_b_window(1.0, delta_phi_min=12.0)
         self.assertGreater(hi, lo)
+        interior = phys.critical_impact_parameter(1.0) * (1.0 + 1.0e-6)
+        self.assertTrue(lo < interior <= hi)
+        self.assertGreater(phys.escaping_azimuth_from_infinity(hi, 1.0), 12.0)
+
+    def test_photon_order_label_starts_at_m3(self):
+        self.assertEqual(phys.photon_order_label(3), "m=3")
+        self.assertEqual(phys.photon_order_label(4), "m=3,4")
+        self.assertEqual(phys.photon_order_label(5), "m=3..5")
+
+    def test_escaping_ulps_keep_high_order_crossings(self):
+        b = phys.critical_impact_parameter(1.0) * (1.0 + 2.05e-15)
+        rs = phys.face_on_crossing_radii(b, 1.0, max_m=12)
+        self.assertIsNotNone(rs[11])
+        self.assertGreater(rs[11], 3.0)
 
     def test_resolved_shadow_is_M_invariant(self):
         a = phys.require_resolved_shadow(1.0, 16.0, 81)
