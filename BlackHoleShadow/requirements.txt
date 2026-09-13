@@ -1,4 +1,3 @@
 numpy>=1.22
 matplotlib>=3.5
-# scipy is optional.  When installed it improves near-critical
-# quadrature; the program starts and runs without it.
+scipy>=1.7

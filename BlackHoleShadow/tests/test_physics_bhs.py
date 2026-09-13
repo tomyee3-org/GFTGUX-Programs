@@ -43,6 +43,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-13  Grok.  Response to Audit11.  Version 0.12.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit11-2026091305.txt
+
+  2026-09-13  Grok.  Response to Audit12.  Version 0.13.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit12-2026091306.txt
 """
 
 from __future__ import annotations
@@ -400,7 +403,7 @@ class TestDiskImage(unittest.TestCase):
             self.assertAlmostEqual(r, 3.0001, places=4)
 
     def test_source_root_is_a_verified_crossing(self):
-        for r_hot in (3.00012, 3.00013, 6.0):
+        for r_hot in (3.000081, 3.00012, 3.00013, 6.0):
             peaks = phys.source_crossing_impacts(1.0, r_hot, max_m=4)
             for m, b in enumerate(peaks, start=1):
                 self.assertIsNotNone(b, msg=f"r_hot={r_hot} missing m={m}")
@@ -549,8 +552,8 @@ class TestHelpFile(unittest.TestCase):
         self.assertNotIn("PhotonOrbit’s EXP-8", text)
         self.assertNotIn("PhotonOrbit EXP-4", text)
         self.assertIn("near-critical whirling", text)
-        self.assertIn("SciPy is optional", text)
-        self.assertIn("NumPy and Matplotlib", text)
+        self.assertIn("NumPy, Matplotlib, and SciPy", text)
+        self.assertNotIn("SciPy is optional", text)
         self.assertIn("pixel centre", text)
 
     def test_patch_help_version_is_idempotent(self):
@@ -658,7 +661,12 @@ class TestScaleInvariance(unittest.TestCase):
         b = phys.critical_impact_parameter(1.0) * (1.0 + 2.05e-15)
         rs = phys.face_on_crossing_radii(b, 1.0, max_m=12)
         self.assertIsNotNone(rs[11])
-        self.assertGreater(rs[11], 3.0)
+        self.assertGreater(rs[11], 10.0)
+
+    def test_high_winding_includes_first_representable_escaping_ray(self):
+        lo, hi = phys.high_winding_b_window(1.0, delta_phi_min=38.0)
+        b = math.nextafter(phys.critical_impact_parameter(1.0), math.inf)
+        self.assertTrue(lo < b <= hi)
 
     def test_resolved_shadow_is_M_invariant(self):
         a = phys.require_resolved_shadow(1.0, 16.0, 81)

@@ -31,10 +31,13 @@ import numpy as np
 
 try:
     from scipy.integrate import quad as _scipy_quad
-except ImportError:  # optional; NumPy+Matplotlib is enough to start
-    _scipy_quad = None
+except ImportError as exc:
+    raise ImportError(
+        "BlackHoleShadow requires SciPy, NumPy, and Matplotlib. "
+        "Install the packages listed in requirements.txt."
+    ) from exc
 
-MODEL_VERSION = "0.12.0"
+MODEL_VERSION = "0.13.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.
@@ -56,6 +59,16 @@ def photon_order_label(max_m=None):
 def image_order_pair_label(max_m=None):
     """Back-compat alias for photon_order_label."""
     return photon_order_label(max_m)
+
+
+def omitted_order_label(max_m=None):
+    max_m = MAX_IMAGE_M if max_m is None else int(max_m)
+    return f"m>={max_m + 1}"
+
+
+def image_sum_clause(max_m=None):
+    max_m = MAX_IMAGE_M if max_m is None else int(max_m)
+    return f"sum_{{m=1..{max_m}}} g^4 I_em;  {omitted_order_label(max_m)} omitted"
 
 # RK4 null-geodesic stepper is kept in lockstep with PhotonOrbit 1.4.0
 # (GFTGUX-Programs/PhotonOrbit).  This package does not import that
@@ -691,9 +704,10 @@ def high_winding_b_window(M, r_window=None, delta_phi_min=None):
             return False
         return escaping_azimuth_from_infinity(bv, M) > delta_phi_min
 
-    # Search in log(rel).  Azimuth grows as rel shrinks.  A threshold
-    # beyond the 1e-15 tail (~30 rad) yields an empty window.
-    rel_lo = 1.0e-15
+    # Search in log(rel) from the first representable escaping b.
+    rel_lo = (math.nextafter(b_crit, math.inf) - b_crit) / b_crit
+    if rel_lo <= 0.0:
+        rel_lo = math.ulp(1.0)
     if not qualifies(rel_lo):
         return b_crit, b_crit
     if qualifies(rel_max):
@@ -830,9 +844,7 @@ def _R_hat(x, beta):
 
 
 def _phi_quad(x_lo, x_hi, beta):
-    """Optional SciPy adaptive integral.  Raises if SciPy is absent or noisy."""
-    if _scipy_quad is None:
-        raise RuntimeError("scipy.integrate.quad is not available")
+    """SciPy adaptive integral.  Raises if the error estimate is too large."""
     R_hi = float(_R_hat(x_hi, beta))
     if R_hi <= 1.0e-12:
         t_max = math.sqrt(max(x_hi - x_lo, 0.0))
@@ -881,10 +893,7 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
     R_hi = float(_R_hat(x_hi, beta))
     delta = abs(beta - 3.0 * math.sqrt(3.0))
     if n is None and (delta < 1.0e-3 or R_hi <= 1.0e-8):
-        try:
-            return _phi_quad(x_lo, x_hi, beta)
-        except (RuntimeError, ValueError):
-            pass
+        return _phi_quad(x_lo, x_hi, beta)
     if n is None:
         n = 8192 if R_hi > 1.0e-8 else 4096
     n = max(int(n), 256)
@@ -938,9 +947,15 @@ def _max_inbound_u(b, M):
 
 def _phi_to_turning_or_horizon(b, M):
     b_crit = critical_impact_parameter(M)
-    if b > b_crit and (b - b_crit) / b_crit < 1.0e-3:
+    rel = abs(b - b_crit) / b_crit if b_crit else 0.0
+    if b > b_crit and rel < 1.0e-3:
         return 0.5 * escaping_azimuth_from_infinity(b, M)
-    return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
+    try:
+        return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
+    except RuntimeError:
+        if rel < 1.0e-3:
+            return face_on_crossing_angle(24)
+        raise
 
 
 def face_on_crossing_radii(b, M, max_m=4):
@@ -973,15 +988,20 @@ def face_on_crossing_radii(b, M, max_m=4):
         if target > phi_total + 1.0e-9:
             radii.append(None)
             continue
-        if abs(b - b_crit) / b_crit < 1.0e-10:
-            x = critical_x_of_phi(target)
-            radii.append(None if x is None or x <= 0.0 else M / x)
-            continue
         if target <= phi_in + 1.0e-12:
-            u = _invert_phi_inbound(target, b, M, u_end)
+            try:
+                u = _invert_phi_inbound(target, b, M, u_end)
+            except RuntimeError:
+                x = critical_x_of_phi(target)
+                radii.append(None if x is None or x <= 0.0 else M / x)
+                continue
         else:
             remaining = target - phi_in
-            u = _invert_phi_inbound(phi_in - remaining, b, M, u_end)
+            try:
+                u = _invert_phi_inbound(phi_in - remaining, b, M, u_end)
+            except RuntimeError:
+                radii.append(None)
+                continue
         if u is None or u <= 0.0:
             radii.append(None)
         else:
@@ -994,8 +1014,8 @@ def _invert_phi_inbound(target_phi, b, M, u_end):
     if target_phi <= 0.0:
         return 0.0
     lo, hi = 0.0, float(u_end)
-    phi_hi = phi_from_infinity_inbound(hi, b, M)
-    if target_phi > phi_hi:
+    phi_hi = _phi_to_turning_or_horizon(b, M)
+    if target_phi > phi_hi + 1.0e-12:
         return None
     for _ in range(56):
         mid = 0.5 * (lo + hi)

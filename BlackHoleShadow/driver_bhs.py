@@ -308,7 +308,7 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
         "—" if p is None else f"{p / M:.5g}" for p in peaks
     )
     g4 = (1.0 - 2.0 / r_hot_over_M) ** 2
-    t34 = float((parts[:, 2] + parts[:, 3]).max()) if parts.shape[1] > 3 else 0.0
+    t_hi = float(parts[:, 2:].max()) if parts.shape[1] > 2 else 0.0
     t2 = float(parts[:, 1].max()) if parts.shape[1] > 1 else 0.0
     note = []
     if float(img2.max()) > float(img1.max()) * 1.02:
@@ -325,11 +325,11 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
         f"n_pix x n_pix          : {n_pix} x {n_pix}",
         f"fov                    : {fov_M:.6g} M",
         f"I(b) sample count      : {sample.size}",
-        f"max table I_2 / I_3+4  : {t2:.4g} / {t34:.4g}",
-        f"max raster m>=3 increment : {photon_inc:.4g}",
-        f"Pixels are point samples at cell centres.  Narrow {phys.image_order_pair_label()}",
+        f"max table I_2 / I_{phys.photon_order_label()}  : {t2:.4g} / {t_hi:.4g}",
+        f"max raster {phys.omitted_order_label(2)} increment : {photon_inc:.4g}",
+        f"Pixels are point samples at cell centres.  Narrow {phys.photon_order_label()}",
         "peaks live in the radial I(b) panel; they may miss a centre.",
-        "I_obs ≈ sum_{m=1..4} g^4 I_em;  m>=5 omitted.",
+        f"I_obs ≈ {phys.image_sum_clause()}.",
         "g=sqrt(1-2M/r) for static emitters (no orbital Doppler).",
         "A captured backward ray crosses the horizon; it may hit",
         "the disk first.  The integrator stops at r=2M.",

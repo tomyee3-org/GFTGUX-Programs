@@ -535,8 +535,8 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
         ax_r.legend(loc="upper right", fontsize=8)
     fig.suptitle(
         r"Beat 5 · Point-sampled face-on image  "
-        r"$I_{\mathrm{obs}}\approx\sum_{m=1}^{4} g^4 I_{\mathrm{em}}$"
-        r"  (static emitters; m>=5 omitted)",
+        rf"$I_{{\mathrm{{obs}}}}\approx\sum_{{m=1}}^{{{phys.MAX_IMAGE_M}}} g^4 I_{{\mathrm{{em}}}}$"
+        rf"  (static emitters; {phys.omitted_order_label()} omitted)",
         fontsize=11,
     )
     fig.tight_layout(rect=[0, 0.03, 1, 0.92])
@@ -553,7 +553,7 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
         "n_pix": str(bx.shape[0]),
         "n_samples": "None" if sample is None else str(len(sample)),
         "fov_over_M": repr(fov_over_M),
-        "I_obs": "sum_{m=1..4} g^4 I_em; m>=5 omitted",
+        "I_obs": phys.image_sum_clause(),
         "pixel_contract": "point sample at pixel centre from adaptive I(b)",
         "false_colour": "inferno display scale; not a spectrum",
         "emitters": "static; no orbital Doppler",
