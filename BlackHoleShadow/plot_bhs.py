@@ -145,14 +145,16 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
               extent=_extent_over_M(bx, by, M),
               vmin=0.0, vmax=1.0, interpolation="nearest")
     _draw_bcrit(ax, M, lw=1.4)
-    status_in = "captured" if phys.is_captured(b_in, M) else "escaped"
-    status_out = "captured" if phys.is_captured(b_out, M) else "escaped"
     axis = np.asarray(bx[0, :], dtype=float)
     def _snap(b_abs):
         j = int(np.argmin(np.abs(axis - b_abs)))
         return float(axis[j]), j
     cin, jin = _snap(b_in)
     cout, jout = _snap(b_out)
+    status_in_req = "captured" if phys.is_captured(b_in, M) else "escaped"
+    status_out_req = "captured" if phys.is_captured(b_out, M) else "escaped"
+    status_in = "captured" if phys.is_captured(cin, M) else "escaped"
+    status_out = "captured" if phys.is_captured(cout, M) else "escaped"
     ax.plot([cin / M], [0.0], marker="s", color="#c1121f", ms=9, zorder=5,
             label=rf"cell $b={cin / M:g}\,M$ ({status_in})")
     ax.plot([cout / M], [0.0], marker="s", color="#0077b6", ms=9, zorder=5,
@@ -173,11 +175,13 @@ def plot_pixels(bx, by, captured, M=1.0, b_in=5.0, b_out=6.0,
         "The left panel is a coarse camera.\n"
         "Each cell is one conserved impact\n"
         "parameter $(b_x,b_y)$.\n\n"
-        f"requested $b={b_in / M:g}\\,M$ sits in the\n"
-        f"cell centred at ${cin / M:g}\\,M$ ({status_in})\n"
-        f"relative to $b_\\mathrm{{crit}}={b_crit / M:.4g}\\,M$.\n\n"
-        f"requested $b={b_out / M:g}\\,M$ sits in the\n"
-        f"cell centred at ${cout / M:g}\\,M$ ({status_out}).\n\n"
+        f"requested $b={b_in / M:g}\\,M$ ({status_in_req})\n"
+        f"sits in the cell centred at ${cin / M:g}\\,M$\n"
+        f"({status_in}) relative to\n"
+        f"$b_\\mathrm{{crit}}={b_crit / M:.4g}\\,M$.\n\n"
+        f"requested $b={b_out / M:g}\\,M$ ({status_out_req})\n"
+        f"sits in the cell centred at ${cout / M:g}\\,M$\n"
+        f"({status_out}).\n\n"
         "PhotonOrbit already classified single rays.\n"
         "The new object is the camera map."
     )
@@ -491,7 +495,7 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
     titles = (
         "direct (m=1)",
         "+ lensing (m<=2)",
-        "+ photon-ring/subring (m=3,4)",
+        f"+ photon-ring/subring ({phys.image_order_pair_label()})",
     )
     for ax, img, title in zip(axes, (img1, img2, img3), titles):
         ax.imshow(img, origin="lower", cmap="inferno",
@@ -508,7 +512,7 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
             ax_r.plot(b_over, parts[:, 1], color="#c9a227", lw=1.4, label="m=2")
         if parts.shape[1] >= 4:
             ax_r.plot(b_over, parts[:, 2] + parts[:, 3], color="#c1121f",
-                      lw=1.6, label="m=3+4")
+                      lw=1.6, label=phys.image_order_pair_label().replace(",", "+"))
         elif parts.shape[1] >= 3:
             ax_r.plot(b_over, parts[:, 2], color="#c1121f", lw=1.6, label="m=3")
         ax_r.axvline(phys.critical_impact_parameter(M) / M, color=C_BC, ls=":")

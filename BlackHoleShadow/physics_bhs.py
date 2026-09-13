@@ -28,12 +28,21 @@ import math
 import os
 
 import numpy as np
+from scipy.integrate import quad
 
-MODEL_VERSION = "0.10.0"
+MODEL_VERSION = "0.11.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # m>=5 is omitted; the figure must say so.
 MAX_IMAGE_M = 4
+
+
+def image_order_pair_label(max_m=None):
+    """User-facing 'm=3,4' label derived from MAX_IMAGE_M."""
+    max_m = MAX_IMAGE_M if max_m is None else int(max_m)
+    if max_m <= 2:
+        return f"m={max_m}"
+    return f"m={max_m - 1},{max_m}"
 
 # RK4 null-geodesic stepper is kept in lockstep with PhotonOrbit 1.4.0
 # (GFTGUX-Programs/PhotonOrbit).  This package does not import that
@@ -282,6 +291,8 @@ def asymptotic_deflection(b, M, n_u=None):
     function raises ValueError for them.  The integrand is integrable at
     the turning point.  Near b_crit the result grows without bound.  That strong-deflection
     divergence permits higher-order images; it is not itself a photon ring.
+    Offsets closer than DEFLECTION_MIN_REL are refused here.  Use
+    escaping_azimuth_from_infinity when only a winding threshold is needed.
     """
     b = _require_positive("b", b)
     M = _require_positive("M", M)
@@ -324,6 +335,29 @@ def asymptotic_deflection(b, M, n_u=None):
             piece[0] = 2.0 / math.sqrt(slope)
     delta_phi_inf = 2.0 * beta * float(np.trapezoid(piece, t))
     return delta_phi_inf - math.pi
+
+
+def escaping_azimuth_from_infinity(b, M):
+    """Total asymptotic azimuth Delta phi_inf for an escaping ray.
+
+    Uses asymptotic_deflection when the offset is resolved.  Closer to
+    b_crit, uses the Schwarzschild logarithmic strong-deflection tail
+    calibrated at DEFLECTION_MIN_REL so a winding threshold cannot be
+    mistaken for an empty physical window.
+    """
+    b = _require_positive("b", b)
+    M = _require_positive("M", M)
+    b_crit = critical_impact_parameter(M)
+    if b <= b_crit:
+        raise ValueError("escaping_azimuth_from_infinity needs b > b_crit")
+    rel = (b - b_crit) / b_crit
+    if rel >= DEFLECTION_MIN_REL:
+        return asymptotic_deflection(b, M) + math.pi
+    rel_ref = 2.0 * DEFLECTION_MIN_REL
+    b_ref = b_crit * (1.0 + rel_ref)
+    alpha_ref = asymptotic_deflection(b_ref, M)
+    alpha = -math.log(rel) + alpha_ref + math.log(rel_ref)
+    return alpha + math.pi
 
 
 def radial_acceleration(r, L, M):
@@ -637,10 +671,10 @@ def high_winding_b_window(M, r_window=None, delta_phi_min=None):
     b_from_r = impact_parameter_of_periapsis(r_outer, M)
     # Walk inward from b_from_r until Delta phi exceeds the threshold.
     b_hi = b_crit
-    samples = np.geomspace(b_crit * (1.0 + 1.0e-8), b_from_r, 64)
+    samples = np.geomspace(b_crit * (1.0 + 1.0e-12), b_from_r, 80)
     for bv in samples[::-1]:
         try:
-            delta_phi = asymptotic_deflection(float(bv), M) + math.pi
+            delta_phi = escaping_azimuth_from_infinity(float(bv), M)
         except ValueError:
             continue
         if delta_phi > delta_phi_min:
@@ -773,6 +807,41 @@ def _R_hat(x, beta):
     return 1.0 / (beta * beta) - x * x + 2.0 * x * x * x
 
 
+def _phi_quad(x_lo, x_hi, beta):
+    """Adaptive ∫ dx/sqrt(R_hat) with a t² substitution at a turning point."""
+    R_hi = float(_R_hat(x_hi, beta))
+    if R_hi <= 1.0e-12:
+        t_max = math.sqrt(max(x_hi - x_lo, 0.0))
+        dR = -2.0 * x_hi + 6.0 * x_hi * x_hi
+
+        def g(t):
+            if t <= 0.0 and abs(dR) > 0.0:
+                return 2.0 / math.sqrt(abs(dR))
+            x = x_hi - t * t
+            rad = float(_R_hat(x, beta))
+            if rad <= 0.0:
+                return 0.0
+            return (2.0 * t) / math.sqrt(rad)
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            val, _ = quad(g, 0.0, t_max, epsabs=1.0e-10, limit=200)
+        return float(val)
+
+    def f(x):
+        rad = float(_R_hat(x, beta))
+        if rad <= 0.0:
+            return 0.0
+        return 1.0 / math.sqrt(rad)
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        val, _ = quad(f, x_lo, x_hi, epsabs=1.0e-10, limit=200)
+    return float(val)
+
+
 def _phi_integral(u_lo, u_hi, b, M, n=None):
     """∫ du / sqrt(R) computed in scale-free (x, beta) variables."""
     M = float(M)
@@ -784,10 +853,11 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
     if x_hi <= x_lo:
         return 0.0
     R_hi = float(_R_hat(x_hi, beta))
+    delta = abs(beta - 3.0 * math.sqrt(3.0))
+    if n is None and (delta < 1.0e-3 or R_hi <= 1.0e-8):
+        return _phi_quad(x_lo, x_hi, beta)
     if n is None:
-        n = 2048 if R_hi > 1.0e-8 else 4096
-        if abs(beta - 3.0 * math.sqrt(3.0)) < 1.0e-4:
-            n = max(n, 8192)
+        n = 8192 if R_hi > 1.0e-8 else 4096
     n = max(int(n), 256)
     use_plain = R_hi > 1.0e-12
     if use_plain:
@@ -1065,8 +1135,8 @@ def source_crossing_impacts(M, r_hot, max_m=4):
     b_max = max(2.0 * r_hot, 3.0 * b_crit)
     inner = np.linspace(0.05 * M, 0.99 * b_crit, 40)
     outer_hi = math.log10(max(b_max / b_crit - 1.0, 1.0e-3))
-    near_lo = b_crit * (1.0 - np.logspace(-9.0, -2.3, 20))
-    near_hi = b_crit * (1.0 + np.logspace(-9.0, outer_hi, 40))
+    near_lo = b_crit * (1.0 - np.logspace(-12.0, -2.3, 28))
+    near_hi = b_crit * (1.0 + np.logspace(-12.0, outer_hi, 48))
     bs = np.unique(np.concatenate([inner, near_lo, near_hi]))
     bs = bs[bs > 0.0]
     found = [None] * max_m

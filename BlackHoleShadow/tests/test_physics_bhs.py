@@ -37,6 +37,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-13  Grok.  Response to Audit9.  Version 0.10.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit9-2026091303.txt
+
+  2026-09-13  Grok.  Response to Audit10.  Version 0.11.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit10-2026091304.txt
 """
 
 from __future__ import annotations
@@ -397,11 +400,12 @@ class TestDiskImage(unittest.TestCase):
         for r_hot in (3.00012, 3.00013, 6.0):
             peaks = phys.source_crossing_impacts(1.0, r_hot, max_m=4)
             for m, b in enumerate(peaks, start=1):
-                if b is None:
-                    continue
+                self.assertIsNotNone(b, msg=f"r_hot={r_hot} missing m={m}")
                 r = phys.face_on_crossing_radii(b, 1.0, max_m=m)[m - 1]
                 self.assertIsNotNone(r)
                 self.assertAlmostEqual(r, r_hot, places=5)
+            if r_hot in (3.00012, 3.00013):
+                self.assertGreater(peaks[3], phys.critical_impact_parameter(1.0))
 
     def test_critical_high_m_stops_when_indistinguishable(self):
         rs = phys.face_on_crossing_radii(
@@ -416,7 +420,9 @@ class TestDiskImage(unittest.TestCase):
         b = phys.critical_impact_parameter(1.0)
         exact = phys.face_on_crossing_radii(b, 1.0, max_m=4)
         above = phys.face_on_crossing_radii(math.nextafter(b, math.inf), 1.0, max_m=4)
-        self.assertNotEqual(above[3], exact[3])
+        below = phys.face_on_crossing_radii(math.nextafter(b, -math.inf), 1.0, max_m=4)
+        self.assertAlmostEqual(above[3], exact[3], delta=1.0e-9)
+        self.assertAlmostEqual(below[3], exact[3], delta=1.0e-9)
 
     def test_transfer_resolves_r3_independent_of_fov(self):
         for fov in (8.0, 16.0, 24.0):
@@ -475,6 +481,18 @@ class TestModesAndCLI(unittest.TestCase):
              "radii", "weak", "compare"),
         )
 
+    def test_pixel_legend_uses_snapped_cell_status(self):
+        bx, by, _, _ = phys.make_impact_grid(9, 16.0, 1.0)
+        captured = phys.capture_map(bx, by, 1.0)
+        fig, _ = plotting.plot_pixels(
+            bx, by, captured, M=1.0, b_in=5.1, b_out=6.0,
+            n_pix_requested=9, fov_over_M=16.0, show=False,
+        )
+        labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+        joined = " ".join(labels)
+        self.assertIn("escaped", joined)
+        self.assertNotIn("captured", joined)
+
     def test_cli_rejects_unknown_mode(self):
         result = run_cli(["--mode", "kerr"])
         self.assertNotEqual(result.returncode, 0)
@@ -524,6 +542,10 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn(phys.BUILD_ID, text)
         self.assertIn(rf"\sum_{{m=1}}^{{{phys.MAX_IMAGE_M}}}", text)
         self.assertIn(rf"m\ge {phys.MAX_IMAGE_M + 1}", text)
+        self.assertIn(phys.image_order_pair_label(), text)
+        self.assertNotIn("PhotonOrbit’s EXP-8", text)
+        self.assertNotIn("PhotonOrbit EXP-4", text)
+        self.assertIn("near-critical whirling", text)
         self.assertIn("pixel centre", text)
 
     def test_patch_help_version_is_idempotent(self):
@@ -611,6 +633,13 @@ class TestScaleInvariance(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             phys.intensity_table(1.0, 12.0, r_hot=6.0, width=1.0e-12)
+
+    def test_bisect_returns_none_without_a_bracket(self):
+        self.assertIsNone(phys._bisect_source_root(8.0, 9.0, 1.0, 1, 6.0))
+
+    def test_high_winding_window_survives_large_azimuth_threshold(self):
+        lo, hi = phys.high_winding_b_window(1.0, delta_phi_min=12.0)
+        self.assertGreater(hi, lo)
 
     def test_resolved_shadow_is_M_invariant(self):
         a = phys.require_resolved_shadow(1.0, 16.0, 81)
