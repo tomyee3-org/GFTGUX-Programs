@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.8.0"
+MODEL_VERSION = "0.9.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # m>=5 is omitted; the figure must say so.
@@ -108,6 +108,7 @@ PHOTON_RING_R_WINDOW = 0.35
 # Coarse-camera cap for pixels mode.  Dense maps use --n_pix as given.
 PIXELS_N_PIX_MAX = 41
 PIXELS_N_PIX_DEFAULT = 17
+DENSE_N_PIX_DEFAULT = 161
 
 # Capture/ring maps must contain b_crit with this half-width margin.
 FOV_CONTAIN_MARGIN = 1.25
@@ -121,6 +122,18 @@ WINDING_DELTA_PHI = 2.0 * math.pi
 
 # Emitted-annulus Gaussian half-width as a multiple of M.
 HOT_RING_WIDTH_DEFAULT = 0.45
+HOT_RING_WIDTH_MIN = 1.0e-4
+
+# Image-mode r_hot/M must stay below this at the n_pix cap so
+# containment (1.4 r_hot) and the 8-interval shadow rule can both hold.
+def max_image_r_hot_over_M(n_pix=None):
+    """Largest r_hot/M that still satisfies image framing and sampling."""
+    if n_pix is None:
+        n_pix = N_PIX_AUTO_MAX
+    n_pix = max(int(n_pix), 9)
+    b_c = 3.0 * math.sqrt(3.0)
+    fov_max = (n_pix - 1) * b_c / 4.0
+    return fov_max / 2.8
 
 # Default hot-ring coordinate radius (a few r_s, outside the photon sphere).
 HOT_RING_R_DEFAULT = 6.0
@@ -253,7 +266,7 @@ def periapsis(b, M):
     return rho * M
 
 
-def asymptotic_deflection(b, M, n_u=800):
+def asymptotic_deflection(b, M, n_u=None):
     """Asymptotic scattering deflection hat{alpha} = Delta phi_inf - pi.
 
     Uses the standard substitution u = 1/r:
@@ -275,7 +288,13 @@ def asymptotic_deflection(b, M, n_u=800):
     r_min = periapsis(b, M)
     beta = b / M
     x_min = M / r_min
-    # Dimensionless u-sub: x = M/r = x_min - t^2.
+    delta = abs(beta - 3.0 * math.sqrt(3.0))
+    if n_u is None:
+        n_u = 2048
+        if delta < 1.0e-2:
+            n_u = 8192
+        if delta < 1.0e-4:
+            n_u = 32768
     n_u = max(int(n_u), 512)
     t = np.linspace(0.0, math.sqrt(x_min), n_u)
     x = np.clip(x_min - t * t, 0.0, x_min)
@@ -547,7 +566,11 @@ def require_resolved_shadow(M, fov_over_M, n_pix):
             f"the shadow diameter 2 b_crit = {2.0 * b_crit / M:.4g} M spans "
             f"only {intervals:.2f} grid intervals.  Capture maps need at "
             f"least {SHADOW_MIN_INTERVALS:g} intervals so the rim is "
-            "visible.  Use a smaller --fov or a larger --n_pix."
+            "visible.  Use a smaller --fov or a larger --n_pix "
+            f"(n_pix cannot exceed {N_PIX_AUTO_MAX}).  "
+            "If --r_hot forced the field to grow, lower --r_hot "
+            f"(image-mode maximum is {max_image_r_hot_over_M(n_pix):.3g} M "
+            "at this n_pix)."
         )
     return intervals
 
@@ -751,6 +774,8 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
     R_hi = float(_R_hat(x_hi, beta))
     if n is None:
         n = 2048 if R_hi > 1.0e-8 else 4096
+        if abs(beta - 3.0 * math.sqrt(3.0)) < 1.0e-4:
+            n = max(n, 8192)
     n = max(int(n), 256)
     use_plain = R_hi > 1.0e-12
     if use_plain:
@@ -851,13 +876,12 @@ def _invert_phi_inbound(target_phi, b, M, u_end):
     if target_phi <= 0.0:
         return 0.0
     lo, hi = 0.0, float(u_end)
-    phi_hi = phi_from_infinity_inbound(hi, b, M, n=512)
+    phi_hi = phi_from_infinity_inbound(hi, b, M)
     if target_phi > phi_hi:
         return None
-    for i in range(56):
+    for _ in range(56):
         mid = 0.5 * (lo + hi)
-        n_use = 512 if i < 42 else None
-        phi_mid = phi_from_infinity_inbound(mid, b, M, n=n_use)
+        phi_mid = phi_from_infinity_inbound(mid, b, M)
         if phi_mid < target_phi:
             lo = mid
         else:
@@ -882,11 +906,13 @@ def critical_x_of_phi(phi):
     """Invert critical_phi_of_x.  Returns x=M/r in (0, 1/3)."""
     if phi <= 0.0:
         return 0.0
-    arg = 0.5 * float(phi) + _ATANH_ONE_OVER_SQRT3
-    if arg > 16.0:
+    a = math.tanh(0.5 * float(phi) + _ATANH_ONE_OVER_SQRT3)
+    if a >= math.nextafter(1.0, 0.0):
         return None
-    a = math.tanh(arg)
-    return max(0.5 * (a * a - 1.0 / 3.0), 0.0)
+    x = 0.5 * (a * a - 1.0 / 3.0)
+    if x <= 0.0 or x >= 1.0 / 3.0:
+        return None
+    return x
 
 
 def _critical_crossing_radii(M, max_m):
@@ -920,6 +946,11 @@ def emitted_intensity(r, M, r_hot=None, width=None):
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
     width = _require_positive("width", width)
+    if width < HOT_RING_WIDTH_MIN * M:
+        raise ValueError(
+            f"width must be at least {HOT_RING_WIDTH_MIN:g} M "
+            "(narrower annuli are not resolved by the source table)."
+        )
     if r <= event_horizon(M):
         return 0.0
     return math.exp(-0.5 * ((r - r_hot) / width) ** 2)
@@ -1007,10 +1038,11 @@ def source_crossing_impacts(M, r_hot, max_m=4):
     r_hot = _require_positive("r_hot", r_hot)
     b_crit = critical_impact_parameter(M)
     b_max = max(2.0 * r_hot, 3.0 * b_crit)
-    inner = np.linspace(0.05 * M, 0.995 * b_crit, 48)
+    inner = np.linspace(0.05 * M, 0.99 * b_crit, 40)
     outer_hi = math.log10(max(b_max / b_crit - 1.0, 1.0e-3))
-    outer = b_crit * (1.0 + np.logspace(-6.0, outer_hi, 56))
-    bs = np.unique(np.concatenate([inner, outer]))
+    near_lo = b_crit * (1.0 - np.logspace(-9.0, -2.3, 20))
+    near_hi = b_crit * (1.0 + np.logspace(-9.0, outer_hi, 40))
+    bs = np.unique(np.concatenate([inner, near_lo, near_hi]))
     bs = bs[bs > 0.0]
     found = [None] * max_m
     prev_r = [None] * max_m
@@ -1207,7 +1239,8 @@ def patch_help_version(html_path):
     """Write MODEL_VERSION and BUILD_ID into the Help #version_build element."""
     import re
     path = os.fspath(html_path)
-    text = open(path, encoding="utf-8").read()
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
     pattern = r'(id="version_build"[^>]*>)(.*?)(</p>)'
     replacement = (
         rf'\1\n    Version {MODEL_VERSION}&nbsp;&nbsp;&nbsp;&nbsp;'

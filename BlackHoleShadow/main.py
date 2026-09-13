@@ -130,6 +130,18 @@ def _validate_args(args):
         physics_bhs.validate_user_value("r_hot", args.r_hot, positive=True)
         if args.r_hot <= 3.0:
             raise ValueError("--r_hot must exceed 3 (units of M)")
+        if args.mode == "image":
+            r_cap = physics_bhs.max_image_r_hot_over_M(
+                args.n_pix if args.n_pix is not None
+                else physics_bhs.DENSE_N_PIX_DEFAULT
+            )
+            if args.r_hot > r_cap:
+                raise ValueError(
+                    f"--r_hot={args.r_hot:g} M exceeds the renderable "
+                    f"maximum {r_cap:.3g} M at this --n_pix (framing plus "
+                    f"the {int(physics_bhs.SHADOW_MIN_INTERVALS)}-interval "
+                    "shadow rule)."
+                )
     if args.n_pix is not None:
         if int(args.n_pix) != args.n_pix or args.n_pix < 9:
             raise ValueError("n_pix must be an integer >= 9")

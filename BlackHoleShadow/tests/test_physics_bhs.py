@@ -31,6 +31,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-12  Grok.  Response to Audit7.  Version 0.8.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit7-2026091218.txt
+
+  2026-09-12  Grok.  Response to Audit8.  Version 0.9.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit8-2026091221.txt
 """
 
 from __future__ import annotations
@@ -358,6 +361,8 @@ class TestDiskImage(unittest.TestCase):
         self.assertAlmostEqual(above[0], rs[0], places=4)
         self.assertTrue(all(r > 3.0 for r in above))
         self.assertTrue(all(r > 2.0 for r in below if r is not None))
+        self.assertAlmostEqual(above[2], 3.002027687, places=4)
+        self.assertAlmostEqual(above[3], 3.003651952, places=4)
 
     def test_source_roots_for_default_annulus(self):
         peaks = phys.source_crossing_impacts(1.0, 6.0, max_m=4)
@@ -373,11 +378,19 @@ class TestDiskImage(unittest.TestCase):
         self.assertAlmostEqual(r, 4.0, places=5)
         self.assertLess(peaks[0], phys.critical_impact_parameter(1.0))
 
+    def test_near_photon_sphere_source_keeps_high_order_roots(self):
+        peaks = phys.source_crossing_impacts(1.0, 3.0001, max_m=4)
+        for m, b in enumerate(peaks, start=1):
+            self.assertIsNotNone(b, msg=f"missing m={m} at r_hot=3.0001")
+            r = phys.face_on_crossing_radii(b, 1.0, max_m=m)[m - 1]
+            self.assertAlmostEqual(r, 3.0001, places=4)
+
     def test_critical_high_m_stops_when_indistinguishable(self):
         rs = phys.face_on_crossing_radii(
             phys.critical_impact_parameter(1.0), 1.0, max_m=20,
         )
-        self.assertTrue(any(r is None for r in rs[12:]))
+        self.assertIsNotNone(rs[10])
+        self.assertTrue(all(r is None for r in rs[11:]))
 
     def test_transfer_resolves_r3_independent_of_fov(self):
         for fov in (8.0, 16.0, 24.0):
@@ -503,6 +516,11 @@ class TestHelpFile(unittest.TestCase):
         result = run_cli(["--mode", "rays", "--r_cam", "2.5"])
         self.assertNotEqual(result.returncode, 0)
 
+    def test_cli_rejects_unrenderable_image_r_hot(self):
+        result = run_cli(["--mode", "image", "--r_hot", "200"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("renderable", (result.stderr + result.stdout).lower())
+
     def test_cli_rejects_inclination_outside_range(self):
         result = run_cli(["--mode", "image", "--inclination", "30"])
         self.assertNotEqual(result.returncode, 0)
@@ -555,6 +573,8 @@ class TestScaleInvariance(unittest.TestCase):
     def test_width_must_be_positive(self):
         with self.assertRaises(ValueError):
             phys.emitted_intensity(6.0, 1.0, r_hot=6.0, width=0.0)
+        with self.assertRaises(ValueError):
+            phys.emitted_intensity(6.0, 1.0, r_hot=6.0, width=1.0e-12)
 
     def test_resolved_shadow_is_M_invariant(self):
         a = phys.require_resolved_shadow(1.0, 16.0, 81)
