@@ -308,7 +308,7 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
         "—" if p is None else f"{p / M:.5g}" for p in peaks
     )
     g4 = (1.0 - 2.0 / r_hot_over_M) ** 2
-    t_hi = float(parts[:, 2:].max()) if parts.shape[1] > 2 else 0.0
+    t_hi = float(parts[:, 2:].sum(axis=1).max()) if parts.shape[1] > 2 else 0.0
     t2 = float(parts[:, 1].max()) if parts.shape[1] > 1 else 0.0
     note = []
     if float(img2.max()) > float(img1.max()) * 1.02:

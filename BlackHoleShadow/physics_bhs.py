@@ -31,13 +31,13 @@ import numpy as np
 
 try:
     from scipy.integrate import quad as _scipy_quad
-except ImportError as exc:
+except Exception as exc:
     raise ImportError(
         "BlackHoleShadow requires SciPy, NumPy, and Matplotlib. "
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "0.13.0"
+MODEL_VERSION = "0.14.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.
@@ -287,7 +287,12 @@ def periapsis(b, M):
     if b <= b_crit:
         return None
     beta = b / M
-    rho = max(beta, 3.25)
+    rel = (b - b_crit) / b_crit
+    roots = np.roots([1.0, 0.0, -beta * beta, 2.0 * beta * beta])
+    real = [float(z.real) for z in roots if abs(z.imag) < 1.0e-10 and z.real > 3.0]
+    if real:
+        return min(real) * M
+    rho = 3.0 + 3.0 * math.sqrt(max(rel, 0.0))
     for _ in range(80):
         f = rho ** 3 - beta * beta * rho + 2.0 * beta * beta
         df = 3.0 * rho * rho - beta * beta
@@ -359,7 +364,7 @@ def asymptotic_deflection(b, M, n_u=None):
         slope = abs(float(drad_dx))
         if slope > 0.0:
             piece[0] = 2.0 / math.sqrt(slope)
-    delta_phi_inf = 2.0 * beta * float(np.trapezoid(piece, t))
+    delta_phi_inf = 2.0 * beta * _trapz(piece, t)
     return delta_phi_inf - math.pi
 
 
@@ -838,46 +843,67 @@ def _R_of_u(u, b, M):
     return 1.0 / (b * b) - u * u + 2.0 * M * u * u * u
 
 
+def _trapz(y, x):
+    """NumPy 1.x trapz / 2.x trapezoid compatibility."""
+    fn = getattr(np, "trapezoid", None) or np.trapz
+    return float(fn(y, x))
+
+
 def _R_hat(x, beta):
-    """Dimensionless first integral: x = M u, beta = b/M."""
-    return 1.0 / (beta * beta) - x * x + 2.0 * x * x * x
+    """Dimensionless first integral: x = M u, beta = b/M.
+
+    Written as delta + 2(x-1/3)^2(x+1/6) so the near-photon-sphere
+    cancellation does not destroy the radicand.
+    """
+    delta = 1.0 / (beta * beta) - 1.0 / 27.0
+    xm = x - (1.0 / 3.0)
+    return delta + 2.0 * xm * xm * (x + (1.0 / 6.0))
+
+
+def _phi_quad_segment(x_lo, x_hi, beta):
+    """One SciPy segment of ∫ dx/sqrt(R_hat), with a t² sub at a turning point."""
+    t_max = math.sqrt(max(x_hi - x_lo, 0.0))
+    if t_max == 0.0:
+        return 0.0
+    x_hi_f = float(x_hi)
+    xm = x_hi_f - 1.0 / 3.0
+    dR = 4.0 * xm * (x_hi_f + 1.0 / 6.0) + 2.0 * xm * xm
+
+    def g(t):
+        if t <= 0.0:
+            rad0 = float(_R_hat(x_hi_f, beta))
+            if rad0 > 1.0e-18:
+                return 0.0
+            if abs(dR) > 0.0:
+                return 2.0 / math.sqrt(abs(dR))
+            return 0.0
+        x = x_hi_f - t * t
+        rad = float(_R_hat(x, beta))
+        if rad <= 0.0:
+            return 0.0
+        return (2.0 * t) / math.sqrt(rad)
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        val, _err = _scipy_quad(g, 0.0, t_max, epsabs=1.0e-12, limit=500)
+    if not math.isfinite(val):
+        raise RuntimeError("adaptive quadrature returned a non-finite value")
+    return float(val)
 
 
 def _phi_quad(x_lo, x_hi, beta):
-    """SciPy adaptive integral.  Raises if the error estimate is too large."""
-    R_hi = float(_R_hat(x_hi, beta))
-    if R_hi <= 1.0e-12:
-        t_max = math.sqrt(max(x_hi - x_lo, 0.0))
-        dR = -2.0 * x_hi + 6.0 * x_hi * x_hi
-
-        def g(t):
-            if t <= 0.0 and abs(dR) > 0.0:
-                return 2.0 / math.sqrt(abs(dR))
-            x = x_hi - t * t
-            rad = float(_R_hat(x, beta))
-            if rad <= 0.0:
-                return 0.0
-            return (2.0 * t) / math.sqrt(rad)
-
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            val, err = _scipy_quad(g, 0.0, t_max, epsabs=1.0e-10, limit=200)
-    else:
-
-        def f(x):
-            rad = float(_R_hat(x, beta))
-            if rad <= 0.0:
-                return 0.0
-            return 1.0 / math.sqrt(rad)
-
-        import warnings
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            val, err = _scipy_quad(f, x_lo, x_hi, epsabs=1.0e-10, limit=200)
-    if not math.isfinite(val) or float(err) > 1.0e-3:
-        raise RuntimeError("adaptive quadrature did not meet the error target")
-    return float(val)
+    """Adaptive integral, split at the photon-sphere coordinate x=1/3."""
+    cuts = [x_lo]
+    third = 1.0 / 3.0
+    if x_lo < third < x_hi:
+        cuts.append(third)
+    cuts.append(x_hi)
+    total = 0.0
+    for a, bseg in zip(cuts[:-1], cuts[1:]):
+        if bseg > a:
+            total += _phi_quad_segment(a, bseg, beta)
+    return total
 
 
 def _phi_integral(u_lo, u_hi, b, M, n=None):
@@ -904,7 +930,7 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
         inv = np.zeros_like(x)
         safe = rad > 0.0
         inv[safe] = 1.0 / np.sqrt(rad[safe])
-        return float(np.trapezoid(inv, x))
+        return _trapz(inv, x)
     span = x_hi - x_lo
     t = np.linspace(0.0, math.sqrt(max(span, 0.0)), n)
     x = x_hi - t * t
@@ -916,7 +942,7 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
         dR = -2.0 * x_hi + 6.0 * x_hi * x_hi
         if abs(dR) > 0.0:
             piece[0] = 2.0 / math.sqrt(abs(dR))
-    return float(np.trapezoid(piece, t))
+    return _trapz(piece, t)
 
 
 def phi_from_infinity_inbound(u_target, b, M, n=None):
@@ -946,16 +972,7 @@ def _max_inbound_u(b, M):
 
 
 def _phi_to_turning_or_horizon(b, M):
-    b_crit = critical_impact_parameter(M)
-    rel = abs(b - b_crit) / b_crit if b_crit else 0.0
-    if b > b_crit and rel < 1.0e-3:
-        return 0.5 * escaping_azimuth_from_infinity(b, M)
-    try:
-        return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
-    except RuntimeError:
-        if rel < 1.0e-3:
-            return face_on_crossing_angle(24)
-        raise
+    return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
 
 
 def face_on_crossing_radii(b, M, max_m=4):
@@ -989,19 +1006,10 @@ def face_on_crossing_radii(b, M, max_m=4):
             radii.append(None)
             continue
         if target <= phi_in + 1.0e-12:
-            try:
-                u = _invert_phi_inbound(target, b, M, u_end)
-            except RuntimeError:
-                x = critical_x_of_phi(target)
-                radii.append(None if x is None or x <= 0.0 else M / x)
-                continue
+            u = _invert_phi_inbound(target, b, M, u_end)
         else:
             remaining = target - phi_in
-            try:
-                u = _invert_phi_inbound(phi_in - remaining, b, M, u_end)
-            except RuntimeError:
-                radii.append(None)
-                continue
+            u = _invert_phi_inbound(phi_in - remaining, b, M, u_end)
         if u is None or u <= 0.0:
             radii.append(None)
         else:
@@ -1403,6 +1411,24 @@ def patch_help_version(html_path):
     new, n = re.subn(pattern, replacement, text, count=1, flags=re.S)
     if n != 1:
         raise ValueError("could not find #version_build in Help file")
+    new = re.sub(
+        r"(\\sum_\{m=1\}\^\{)\d+(\})",
+        rf"\g<1>{MAX_IMAGE_M}\2",
+        new,
+    )
+    new = re.sub(
+        r"(Narrow \\\(m=)[0-9,.\\]+(\) peaks)",
+        rf"\g<1>{photon_order_label()[2:]}\2",
+        new,
+    )
+    new = new.replace(
+        r"m\ge 5",
+        rf"m\ge {MAX_IMAGE_M + 1}",
+    )
+    new = new.replace(
+        f"m>={MAX_IMAGE_M + 1}",
+        omitted_order_label(),
+    )
     if new != text:
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(new)

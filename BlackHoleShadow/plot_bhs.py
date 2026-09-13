@@ -492,6 +492,9 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
     extent = _extent_over_M(bx, by, M)
     vmax = max(float(np.max(img1)), float(np.max(img2)),
                float(np.max(img3)), 1.0e-12)
+    max_m = phys.MAX_IMAGE_M
+    if parts is not None:
+        max_m = int(np.asarray(parts).shape[1])
     titles = (
         "direct (m=1)",
         "+ lensing (m<=2)",
@@ -535,8 +538,8 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
         ax_r.legend(loc="upper right", fontsize=8)
     fig.suptitle(
         r"Beat 5 · Point-sampled face-on image  "
-        rf"$I_{{\mathrm{{obs}}}}\approx\sum_{{m=1}}^{{{phys.MAX_IMAGE_M}}} g^4 I_{{\mathrm{{em}}}}$"
-        rf"  (static emitters; {phys.omitted_order_label()} omitted)",
+        rf"$I_{{\mathrm{{obs}}}}\approx\sum_{{m=1}}^{{{max_m}}} g^4 I_{{\mathrm{{em}}}}$"
+        rf"  (static emitters; {phys.omitted_order_label(max_m)} omitted)",
         fontsize=11,
     )
     fig.tight_layout(rect=[0, 0.03, 1, 0.92])
@@ -553,12 +556,12 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
         "n_pix": str(bx.shape[0]),
         "n_samples": "None" if sample is None else str(len(sample)),
         "fov_over_M": repr(fov_over_M),
-        "I_obs": phys.image_sum_clause(),
+        "I_obs": phys.image_sum_clause(max_m),
         "pixel_contract": "point sample at pixel centre from adaptive I(b)",
         "false_colour": "inferno display scale; not a spectrum",
         "emitters": "static; no orbital Doppler",
         "sampling": "adaptive log cluster around b_crit; no peak stamp",
-        "max_m": str(phys.MAX_IMAGE_M),
+        "max_m": str(max_m),
     })
     if show:
         plt.show()
