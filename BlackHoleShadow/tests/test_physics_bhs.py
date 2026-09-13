@@ -34,6 +34,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-12  Grok.  Response to Audit8.  Version 0.9.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit8-2026091221.txt
+
+  2026-09-13  Grok.  Response to Audit9.  Version 0.10.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit9-2026091303.txt
 """
 
 from __future__ import annotations
@@ -247,6 +250,11 @@ class TestDeflection(unittest.TestCase):
         with self.assertRaises(ValueError):
             phys.asymptotic_deflection(5.0, 1.0)
 
+    def test_deflection_rejects_unresolved_near_critical_offset(self):
+        b_crit = phys.critical_impact_parameter(1.0)
+        with self.assertRaises(ValueError):
+            phys.asymptotic_deflection(math.nextafter(b_crit, math.inf), 1.0)
+
 
 class TestIntegratorAgreesWithCaptureRule(unittest.TestCase):
     def test_b5_is_captured_and_b6_escapes(self):
@@ -385,12 +393,30 @@ class TestDiskImage(unittest.TestCase):
             r = phys.face_on_crossing_radii(b, 1.0, max_m=m)[m - 1]
             self.assertAlmostEqual(r, 3.0001, places=4)
 
+    def test_source_root_is_a_verified_crossing(self):
+        for r_hot in (3.00012, 3.00013, 6.0):
+            peaks = phys.source_crossing_impacts(1.0, r_hot, max_m=4)
+            for m, b in enumerate(peaks, start=1):
+                if b is None:
+                    continue
+                r = phys.face_on_crossing_radii(b, 1.0, max_m=m)[m - 1]
+                self.assertIsNotNone(r)
+                self.assertAlmostEqual(r, r_hot, places=5)
+
     def test_critical_high_m_stops_when_indistinguishable(self):
         rs = phys.face_on_crossing_radii(
             phys.critical_impact_parameter(1.0), 1.0, max_m=20,
         )
         self.assertIsNotNone(rs[10])
-        self.assertTrue(all(r is None for r in rs[11:]))
+        self.assertIsNotNone(rs[11])
+        self.assertGreater(rs[10], rs[11])
+        self.assertTrue(all(r is None for r in rs[12:]))
+
+    def test_analytic_critical_radii_only_at_exact_b_crit(self):
+        b = phys.critical_impact_parameter(1.0)
+        exact = phys.face_on_crossing_radii(b, 1.0, max_m=4)
+        above = phys.face_on_crossing_radii(math.nextafter(b, math.inf), 1.0, max_m=4)
+        self.assertNotEqual(above[3], exact[3])
 
     def test_transfer_resolves_r3_independent_of_fov(self):
         for fov in (8.0, 16.0, 24.0):
@@ -497,6 +523,7 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn(phys.MODEL_VERSION, text)
         self.assertIn(phys.BUILD_ID, text)
         self.assertIn(rf"\sum_{{m=1}}^{{{phys.MAX_IMAGE_M}}}", text)
+        self.assertIn(rf"m\ge {phys.MAX_IMAGE_M + 1}", text)
         self.assertIn("pixel centre", text)
 
     def test_patch_help_version_is_idempotent(self):
@@ -520,6 +547,12 @@ class TestHelpFile(unittest.TestCase):
         result = run_cli(["--mode", "image", "--r_hot", "200"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("renderable", (result.stderr + result.stdout).lower())
+
+    def test_even_n_pix_uses_odd_r_hot_cap(self):
+        raw = phys.max_image_r_hot_over_M(400)
+        odd = phys.max_image_r_hot_over_M(phys.odd_n_pix(400))
+        self.assertLess(raw, 185.5)
+        self.assertGreater(odd, 185.5)
 
     def test_cli_rejects_inclination_outside_range(self):
         result = run_cli(["--mode", "image", "--inclination", "30"])
@@ -573,8 +606,11 @@ class TestScaleInvariance(unittest.TestCase):
     def test_width_must_be_positive(self):
         with self.assertRaises(ValueError):
             phys.emitted_intensity(6.0, 1.0, r_hot=6.0, width=0.0)
+        self.assertGreater(
+            phys.emitted_intensity(6.0, 1.0, r_hot=6.0, width=1.0e-12), 0.0,
+        )
         with self.assertRaises(ValueError):
-            phys.emitted_intensity(6.0, 1.0, r_hot=6.0, width=1.0e-12)
+            phys.intensity_table(1.0, 12.0, r_hot=6.0, width=1.0e-12)
 
     def test_resolved_shadow_is_M_invariant(self):
         a = phys.require_resolved_shadow(1.0, 16.0, 81)

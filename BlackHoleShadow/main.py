@@ -126,15 +126,17 @@ def _validate_args(args):
         physics_bhs.validate_user_value("r_cam", args.r_cam, positive=True)
         if args.r_cam <= 3.0:
             raise ValueError("--r_cam must exceed 3 (units of M)")
+    n_pix_eff = physics_bhs.DENSE_N_PIX_DEFAULT
+    if args.n_pix is not None:
+        if int(args.n_pix) != args.n_pix or args.n_pix < 9:
+            raise ValueError("n_pix must be an integer >= 9")
+        n_pix_eff = physics_bhs.odd_n_pix(int(args.n_pix))
     if args.r_hot is not None:
         physics_bhs.validate_user_value("r_hot", args.r_hot, positive=True)
         if args.r_hot <= 3.0:
             raise ValueError("--r_hot must exceed 3 (units of M)")
         if args.mode == "image":
-            r_cap = physics_bhs.max_image_r_hot_over_M(
-                args.n_pix if args.n_pix is not None
-                else physics_bhs.DENSE_N_PIX_DEFAULT
-            )
+            r_cap = physics_bhs.max_image_r_hot_over_M(n_pix_eff)
             if args.r_hot > r_cap:
                 raise ValueError(
                     f"--r_hot={args.r_hot:g} M exceeds the renderable "
@@ -142,9 +144,6 @@ def _validate_args(args):
                     f"the {int(physics_bhs.SHADOW_MIN_INTERVALS)}-interval "
                     "shadow rule)."
                 )
-    if args.n_pix is not None:
-        if int(args.n_pix) != args.n_pix or args.n_pix < 9:
-            raise ValueError("n_pix must be an integer >= 9")
 
 
 def main():

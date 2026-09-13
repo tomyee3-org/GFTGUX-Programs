@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "0.9.0"
+MODEL_VERSION = "0.10.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # m>=5 is omitted; the figure must say so.
@@ -122,7 +122,12 @@ WINDING_DELTA_PHI = 2.0 * math.pi
 
 # Emitted-annulus Gaussian half-width as a multiple of M.
 HOT_RING_WIDTH_DEFAULT = 0.45
-HOT_RING_WIDTH_MIN = 1.0e-4
+# Source-table / image contract.  emitted_intensity itself accepts any
+# positive width; the table sampler does not resolve narrower Gaussians.
+HOT_RING_WIDTH_MIN = 1.0e-2
+# asymptotic_deflection is not claimed at closer offsets than this
+# relative gap (b-b_crit)/b_crit.
+DEFLECTION_MIN_REL = 1.0e-4
 
 # Image-mode r_hot/M must stay below this at the n_pix cap so
 # containment (1.4 r_hot) and the 8-interval shadow rule can both hold.
@@ -280,10 +285,17 @@ def asymptotic_deflection(b, M, n_u=None):
     """
     b = _require_positive("b", b)
     M = _require_positive("M", M)
+    b_crit = critical_impact_parameter(M)
     if is_captured(b, M):
         raise ValueError(
             "asymptotic_deflection is defined only for escaping rays "
-            f"(b > b_crit = {critical_impact_parameter(M):g})."
+            f"(b > b_crit = {b_crit:g})."
+        )
+    if (b - b_crit) / b_crit < DEFLECTION_MIN_REL:
+        raise ValueError(
+            "asymptotic_deflection is not resolved closer than "
+            f"{DEFLECTION_MIN_REL:g} relative to b_crit; "
+            "the strong-field divergence is real, the number is not."
         )
     r_min = periapsis(b, M)
     beta = b / M
@@ -847,7 +859,7 @@ def face_on_crossing_radii(b, M, max_m=4):
         # of z=0 at φ=π/2 in this construction.
         return [None] * max_m
     b_crit = critical_impact_parameter(M)
-    if math.isclose(b, b_crit, rel_tol=0.0, abs_tol=4.0 * math.ulp(b_crit)):
+    if b == b_crit:
         return _critical_crossing_radii(M, max_m)
     captured = b < b_crit
     u_end = _max_inbound_u(b, M)
@@ -907,7 +919,7 @@ def critical_x_of_phi(phi):
     if phi <= 0.0:
         return 0.0
     a = math.tanh(0.5 * float(phi) + _ATANH_ONE_OVER_SQRT3)
-    if a >= math.nextafter(1.0, 0.0):
+    if a == 1.0:
         return None
     x = 0.5 * (a * a - 1.0 / 3.0)
     if x <= 0.0 or x >= 1.0 / 3.0:
@@ -923,18 +935,36 @@ def _critical_crossing_radii(M, max_m):
     """
     M = float(M)
     radii = []
+    prev = None
     for m in range(1, max_m + 1):
         x = critical_x_of_phi(face_on_crossing_angle(m))
         if x is None or x <= 0.0 or x >= 1.0 / 3.0:
             radii.append(None)
-        else:
-            radii.append(M / x)
+            continue
+        r = M / x
+        if prev is not None and not (r < prev):
+            radii.append(None)
+            continue
+        radii.append(r)
+        prev = r
     return radii
 
 
 def crossing_count(b, M, max_m=4):
     """How many face-on equatorial crossings exist at this b."""
     return sum(1 for r in face_on_crossing_radii(b, M, max_m=max_m) if r is not None)
+
+
+def _require_table_width(width, M):
+    """Table/image sampling cannot resolve Gaussians narrower than this."""
+    width = _require_positive("width", width)
+    floor = HOT_RING_WIDTH_MIN * M
+    if width < floor:
+        raise ValueError(
+            f"width must be at least {HOT_RING_WIDTH_MIN:g} M "
+            "for the source-aware intensity table."
+        )
+    return width
 
 
 def emitted_intensity(r, M, r_hot=None, width=None):
@@ -946,11 +976,6 @@ def emitted_intensity(r, M, r_hot=None, width=None):
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
     width = _require_positive("width", width)
-    if width < HOT_RING_WIDTH_MIN * M:
-        raise ValueError(
-            f"width must be at least {HOT_RING_WIDTH_MIN:g} M "
-            "(narrower annuli are not resolved by the source table)."
-        )
     if r <= event_horizon(M):
         return 0.0
     return math.exp(-0.5 * ((r - r_hot) / width) ** 2)
@@ -1096,23 +1121,25 @@ def _bisect_source_root(b_lo, b_hi, M, m, r_hot):
 
     flo = residual(b_lo)
     fhi = residual(b_hi)
-    if flo is None or fhi is None:
-        return 0.5 * (b_lo + b_hi)
-    if flo * fhi > 0.0:
-        return 0.5 * (b_lo + b_hi)
+    if flo is None or fhi is None or flo * fhi > 0.0:
+        return None
     lo, hi, f_lo = b_lo, b_hi, flo
+    mid = 0.5 * (lo + hi)
+    fm = None
     for _ in range(50):
         mid = 0.5 * (lo + hi)
         fm = residual(mid)
         if fm is None:
-            break
-        if abs(fm) <= 1.0e-10 * max(M, r_hot):
+            return None
+        if abs(fm) <= 1.0e-8 * max(M, abs(r_hot)):
             return mid
         if f_lo * fm <= 0.0:
             hi = mid
         else:
             lo, f_lo = mid, fm
-    return 0.5 * (lo + hi)
+    if fm is not None and abs(fm) <= 1.0e-6 * max(M, abs(r_hot)):
+        return mid
+    return None
 
 
 def source_aware_impact_samples(M, b_max, r_hot, width, max_m=4, peaks=None):
@@ -1122,6 +1149,7 @@ def source_aware_impact_samples(M, b_max, r_hot, width, max_m=4, peaks=None):
     already computed by source_crossing_impacts.
     """
     M = _require_positive("M", M)
+    width = _require_table_width(width, M)
     chunks = [adaptive_impact_samples(M, b_max)]
     if peaks is None:
         peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
@@ -1151,7 +1179,7 @@ def intensity_table(M, b_max, r_hot=None, width=None, max_m=None, peaks=None):
         r_hot = HOT_RING_R_DEFAULT * M
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
-    width = _require_positive("width", width)
+    width = _require_table_width(width, M)
     if peaks is None:
         peaks = source_crossing_impacts(M, r_hot, max_m=max_m)
     sample = source_aware_impact_samples(
@@ -1181,7 +1209,7 @@ def disk_image_components(bx, by, M, r_hot=None, width=None, max_m=None):
         r_hot = HOT_RING_R_DEFAULT * M
     if width is None:
         width = HOT_RING_WIDTH_DEFAULT * M
-    width = _require_positive("width", width)
+    width = _require_table_width(width, M)
     r_hot = _require_positive("r_hot", r_hot)
     if r_hot <= photon_sphere(M):
         raise ValueError(
