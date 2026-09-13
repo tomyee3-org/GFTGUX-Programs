@@ -49,6 +49,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-13  Grok.  Response to Audit13.  Version 0.14.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit13-2026091306.txt
+
+  2026-09-13  Grok.  Response to Audit14.  Version 0.15.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit14-2026091316.txt
 """
 
 from __future__ import annotations
@@ -558,6 +561,8 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("NumPy, Matplotlib, and SciPy", text)
         self.assertNotIn("SciPy is optional", text)
         self.assertIn("pixel centre", text)
+        self.assertEqual(text.count(r"\("), text.count(r"\)"))
+        self.assertIn(r"Narrow \(" + phys.photon_order_label() + r"\) peaks", text)
 
     def test_patch_help_version_is_idempotent(self):
         src = find_help_file()
@@ -571,6 +576,32 @@ class TestHelpFile(unittest.TestCase):
             text = dest.read_text(encoding="utf-8")
             self.assertEqual(text.count('id="version_build"'), 1)
             self.assertEqual(text.count(phys.BUILD_ID), 1)
+            self.assertEqual(text.count(r"\("), text.count(r"\)"))
+
+    def test_help_sync_follows_max_image_m(self):
+        src = find_help_file()
+        if src is None:
+            self.skipTest("Help file not shipped next to this build")
+        old = phys.MAX_IMAGE_M
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                dest = Path(tmp) / "BlackHoleShadow.html"
+                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+                phys.MAX_IMAGE_M = 5
+                phys.patch_help_version(dest)
+                text = dest.read_text(encoding="utf-8")
+                self.assertIn(r"\sum_{m=1}^{5}", text)
+                self.assertIn(r"m\ge 6", text)
+                self.assertIn(r"\(m=3..5\)", text)
+                phys.MAX_IMAGE_M = 6
+                phys.patch_help_version(dest)
+                text = dest.read_text(encoding="utf-8")
+                self.assertIn(r"\sum_{m=1}^{6}", text)
+                self.assertIn(r"m\ge 7", text)
+                self.assertIn(r"\(m=3..6\)", text)
+                self.assertEqual(text.count(r"\("), text.count(r"\)"))
+        finally:
+            phys.MAX_IMAGE_M = old
 
     def test_cli_rejects_camera_inside_photon_sphere(self):
         result = run_cli(["--mode", "rays", "--r_cam", "2.5"])
@@ -664,6 +695,22 @@ class TestScaleInvariance(unittest.TestCase):
         self.assertTrue(hasattr(np, "trapezoid") or hasattr(np, "trapz"))
         self.assertAlmostEqual(phys._trapz([0.0, 1.0], [0.0, 1.0]), 0.5)
 
+    def test_plot_image_titles_follow_parts_columns(self):
+        bx, by, _, _ = phys.make_impact_grid(9, 16.0, 1.0)
+        z = np.zeros_like(bx)
+        sample = np.linspace(5.2, 8.0, 8)
+        parts = np.zeros((8, 5))
+        fig, saved = plotting.plot_image(
+            bx, by, z, z, z, M=1.0, r_hot=6.0, peaks=None,
+            fov_over_M=16.0, sample=sample, parts=parts, show=False,
+        )
+        titles = [ax.get_title() for ax in fig.axes if ax.get_title()]
+        joined = " ".join(titles) + " " + fig._suptitle.get_text()
+        self.assertIn("m=3..5", joined)
+        self.assertNotIn("m=3,4", joined)
+        self.assertIn("{5}", fig._suptitle.get_text() or "")
+        self.assertIn("m>=6", fig._suptitle.get_text() or "")
+
     def test_photon_order_label_starts_at_m3(self):
         self.assertEqual(phys.photon_order_label(3), "m=3")
         self.assertEqual(phys.photon_order_label(4), "m=3,4")
@@ -671,11 +718,17 @@ class TestScaleInvariance(unittest.TestCase):
 
     def test_escaping_ulps_keep_high_order_crossings(self):
         b = phys.critical_impact_parameter(1.0) * (1.0 + 2.05e-15)
+        self.assertAlmostEqual(phys.periapsis(b, 1.0), 3.000000111678677, places=8)
         rs = phys.face_on_crossing_radii(b, 1.0, max_m=12)
         none_at = [i for i, r in enumerate(rs) if r is None]
         if none_at:
             self.assertTrue(all(r is None for r in rs[none_at[0]:]))
         self.assertIsNotNone(rs[6])
+        self.assertIsNotNone(rs[11])
+        self.assertGreater(rs[11], 10.0)
+        self.assertLess(rs[11], 14.0)
+        self.assertAlmostEqual(2.0 * phys._phi_to_turning_or_horizon(b, 1.0),
+                               36.54840226874896, delta=0.03)
 
     def test_captured_near_crit_crossing_count(self):
         b = phys.critical_impact_parameter(1.0) * (1.0 - 1.0e-13)

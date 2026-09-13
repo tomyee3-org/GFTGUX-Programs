@@ -498,7 +498,7 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
     titles = (
         "direct (m=1)",
         "+ lensing (m<=2)",
-        f"+ photon-ring/subring ({phys.image_order_pair_label()})",
+        f"+ photon-ring/subring ({phys.photon_order_label(max_m)})",
     )
     for ax, img, title in zip(axes, (img1, img2, img3), titles):
         ax.imshow(img, origin="lower", cmap="inferno",

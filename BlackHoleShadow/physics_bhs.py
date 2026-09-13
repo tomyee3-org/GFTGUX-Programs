@@ -37,7 +37,7 @@ except Exception as exc:
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "0.14.0"
+MODEL_VERSION = "0.15.0"
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.
@@ -286,26 +286,41 @@ def periapsis(b, M):
     b_crit = critical_impact_parameter(M)
     if b <= b_crit:
         return None
-    beta = b / M
+    beta, eps = _beta_offset(b, M)
+    if eps <= 0.0:
+        return None
     rel = (b - b_crit) / b_crit
-    roots = np.roots([1.0, 0.0, -beta * beta, 2.0 * beta * beta])
-    real = [float(z.real) for z in roots if abs(z.imag) < 1.0e-10 and z.real > 3.0]
-    if real:
-        return min(real) * M
-    rho = 3.0 + 3.0 * math.sqrt(max(rel, 0.0))
-    for _ in range(80):
-        f = rho ** 3 - beta * beta * rho + 2.0 * beta * beta
-        df = 3.0 * rho * rho - beta * beta
-        if df == 0.0:
-            rho = 3.5 + 0.5 * beta
-            continue
-        rho_new = rho - f / df
-        if rho_new <= 3.0:
-            rho_new = 0.5 * (rho + 3.0) + 0.05
-        if abs(rho_new - rho) <= 1.0e-14 * max(1.0, abs(rho)):
+    if rel < 1.0e-2:
+        # ρ = 3+σ, β² = 27+ε  =>  σ²(9+σ) = ε(1+σ).  Stable at the double root.
+        sig = math.sqrt(eps / 9.0)
+        for _ in range(40):
+            f = sig * sig * (9.0 + sig) - eps * (1.0 + sig)
+            df = 2.0 * sig * (9.0 + sig) + sig * sig - eps
+            if df == 0.0:
+                break
+            sig_new = sig - f / df
+            if sig_new <= 0.0:
+                sig_new = 0.5 * sig
+            if abs(sig_new - sig) <= 1.0e-16 * max(1.0, abs(sig)):
+                sig = sig_new
+                break
+            sig = sig_new
+        rho = 3.0 + sig
+    else:
+        rho = max(beta, 3.25)
+        for _ in range(80):
+            f = rho ** 3 - beta * beta * rho + 2.0 * beta * beta
+            df = 3.0 * rho * rho - beta * beta
+            if df == 0.0:
+                rho = 3.5 + 0.5 * beta
+                continue
+            rho_new = rho - f / df
+            if rho_new <= 3.0:
+                rho_new = 0.5 * (rho + 3.0) + 0.05
+            if abs(rho_new - rho) <= 1.0e-14 * max(1.0, abs(rho)):
+                rho = rho_new
+                break
             rho = rho_new
-            break
-        rho = rho_new
     if rho <= 3.0 or not math.isfinite(rho):
         raise RuntimeError("periapsis solver failed for the given b, M.")
     return rho * M
@@ -849,13 +864,22 @@ def _trapz(y, x):
     return float(fn(y, x))
 
 
+def _beta_offset(b, M):
+    """(beta, eps) with eps = beta^2 - 27 formed as a product, not a difference."""
+    beta = float(b) / float(M)
+    beta_c = 3.0 * math.sqrt(3.0)
+    eps = (beta - beta_c) * (beta + beta_c)
+    return beta, eps
+
+
 def _R_hat(x, beta):
     """Dimensionless first integral: x = M u, beta = b/M.
 
-    Written as delta + 2(x-1/3)^2(x+1/6) so the near-photon-sphere
-    cancellation does not destroy the radicand.
+    R = delta + 2(x-1/3)^2(x+1/6) with delta = (27-beta^2)/(27 beta^2).
     """
-    delta = 1.0 / (beta * beta) - 1.0 / 27.0
+    beta_c = 3.0 * math.sqrt(3.0)
+    eps = (beta - beta_c) * (beta + beta_c)
+    delta = -eps / (27.0 * beta * beta)
     xm = x - (1.0 / 3.0)
     return delta + 2.0 * xm * xm * (x + (1.0 / 6.0))
 
@@ -1417,17 +1441,14 @@ def patch_help_version(html_path):
         new,
     )
     new = re.sub(
-        r"(Narrow \\\(m=)[0-9,.\\]+(\) peaks)",
-        rf"\g<1>{photon_order_label()[2:]}\2",
+        r"Narrow \\\([^\\)]*\\\) peaks",
+        "Narrow \\\\(" + photon_order_label() + "\\\\) peaks",
         new,
     )
-    new = new.replace(
-        r"m\ge 5",
-        rf"m\ge {MAX_IMAGE_M + 1}",
-    )
-    new = new.replace(
-        f"m>={MAX_IMAGE_M + 1}",
-        omitted_order_label(),
+    new = re.sub(
+        r"m\\ge \d+",
+        rf"m\\ge {MAX_IMAGE_M + 1}",
+        new,
     )
     if new != text:
         with open(path, "w", encoding="utf-8") as handle:
