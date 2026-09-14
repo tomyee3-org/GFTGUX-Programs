@@ -40,7 +40,7 @@ except Exception as exc:
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "0.21.0"
+MODEL_VERSION = "1.0.0"
 _MP_DPS = utilities_bhs.MP_DPS
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.

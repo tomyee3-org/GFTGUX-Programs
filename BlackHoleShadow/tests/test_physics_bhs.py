@@ -70,6 +70,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-14  Grok.  Response to Audit20.  Version 0.21.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit20-2026091402.txt
+
+  2026-09-14  Grok.  Version 1.0.0 first numbered release.
+    ReleaseNotes and SampleOutputs_Guide added after Audit 20.
 """
 
 from __future__ import annotations
