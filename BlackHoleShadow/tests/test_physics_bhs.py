@@ -64,6 +64,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-13  Grok.  Response to Audit18.  Version 0.19.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit18-2026091323.txt
+
+  2026-09-14  Grok.  Response to Audit19.  Version 0.20.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit19-2026091401.txt
 """
 
 from __future__ import annotations
@@ -89,7 +92,7 @@ CORE_MODULE_FILES = (
 
 
 def find_module_dir(start):
-    """Find the nearest ancestor containing all four core program modules."""
+    """Find the nearest ancestor containing all core program modules."""
     candidate = Path(start).resolve()
     if candidate.is_file():
         candidate = candidate.parent
@@ -821,6 +824,64 @@ class TestScaleInvariance(unittest.TestCase):
             _b, eps_c, esc_c = phys._dimensionless_state(b_cap, M)
             self.assertFalse(esc_c)
             self.assertLess(eps_c, 0.0)
+            import mpmath as mp
+            with mp.workdps(phys._MP_DPS):
+                exact_c = float((mp.mpf(b_cap) / mp.mpf(M)) ** 2 - 27)
+            self.assertAlmostEqual(eps_c, exact_c, delta=abs(exact_c) * 1.0e-9 + 1.0e-18)
+
+    def test_captured_nextafter_high_order_radii(self):
+        refs = {
+            0.023: 2.93004406104,
+            0.139: 2.72158614174,
+            1.0: 2.79155590796,
+        }
+        for M, r12_over_M in refs.items():
+            b = math.nextafter(phys.critical_impact_parameter(M), -math.inf)
+            rs = phys.face_on_crossing_radii(b, M, max_m=12)
+            self.assertIsNotNone(rs[11])
+            self.assertAlmostEqual(rs[11] / M, r12_over_M, delta=5.0e-9)
+
+    def test_mpf_apis_keep_requested_dps(self):
+        import mpmath as mp
+        import utilities_bhs
+        beta = utilities_bhs.to_mpf(6.0)
+        old = mp.mp.dps
+        try:
+            mp.mp.dps = 15
+            a = utilities_bhs.phi_segment_mpf(0, 0.2, beta, dps=30, turning=False)
+            mp.mp.dps = 80
+            c = utilities_bhs.phi_segment_mpf(0, 0.2, beta, dps=30, turning=False)
+        finally:
+            mp.mp.dps = old
+        self.assertGreaterEqual(a._mpf_[3], 96)
+        self.assertGreaterEqual(c._mpf_[3], 96)
+        self.assertAlmostEqual(float(a), float(c), places=12)
+
+    def test_quad_fallback_calls_utilities_phi_segment(self):
+        import utilities_bhs
+        called = {"n": 0}
+        orig = utilities_bhs.phi_segment
+
+        def wrapped(*args, **kwargs):
+            called["n"] += 1
+            return orig(*args, **kwargs)
+
+        utilities_bhs.phi_segment = wrapped
+        phys._phi_segment_cached.cache_clear()
+        try:
+            def fake_quad(*args, **kwargs):
+                return (1.0, 1.0)
+            old = phys._scipy_quad
+            phys._scipy_quad = fake_quad
+            try:
+                val = phys._phi_quad_segment(0.0, 0.2, 6.0, b=6.0, M=1.0)
+            finally:
+                phys._scipy_quad = old
+        finally:
+            utilities_bhs.phi_segment = orig
+            phys._phi_segment_cached.cache_clear()
+        self.assertGreaterEqual(called["n"], 1)
+        self.assertTrue(math.isfinite(val))
 
     def test_first_escaping_ray_survives_awkward_masses(self):
         for M in (0.139, 0.278, 1.0):

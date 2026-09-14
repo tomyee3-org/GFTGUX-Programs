@@ -153,7 +153,9 @@ def periapsis_over_M_mpf(beta: mp.mpf, dps: int = MP_DPS) -> mp.mpf:
                 break
             sig = sig_new
         rho = 3 + sig
-    return +rho  # round back to the requested dps on return (mpmath idiom)
+        with mp.workdps(dps):
+            rho = +rho
+    return rho
 
 
 def periapsis_over_M(b, M, dps: int = MP_DPS) -> float:
@@ -268,7 +270,9 @@ def phi_segment_mpf(
                 total += _turning_segment_mpf(beta, a, c)
             else:
                 total += _plain_segment_mpf(beta, a, c)
-    return +total
+        with mp.workdps(dps):
+            total = +total
+    return total
 
 
 def phi_segment(x_lo, x_hi, b, M, dps: int = MP_DPS, turning: bool | None = None) -> float:

@@ -40,10 +40,8 @@ except Exception as exc:
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "0.19.0"
+MODEL_VERSION = "0.20.0"
 _MP_DPS = utilities_bhs.MP_DPS
-_NEAR_CRIT_REL = 1.0e-8
-
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.
 MAX_IMAGE_M = 4
@@ -295,7 +293,7 @@ def periapsis(b, M):
         # b > b_crit already; do not reclassify by a rounded beta.
         eps = math.ulp(27.0)
     rel = (b - b_crit) / b_crit
-    if rel < _NEAR_CRIT_REL:
+    if _is_near_critical(b, M):
         return _mp_periapsis(b, M)
     if rel < 1.0e-2:
         # ρ = 3+σ, β² = 27+ε  =>  σ²(9+σ) = ε(1+σ).  Stable at the double root.
@@ -895,24 +893,37 @@ def _beta_sq_minus_27(beta):
 
 
 def _dimensionless_state(b, M):
-    """beta = b/M and eps = beta^2-27, with the dimensional capture sign."""
+    """beta = b/M and eps = beta^2-27 from the supplied float ratio.
+
+    Classification is dimensional (b vs b_crit).  The polynomial residual
+    is the compensated square of that same ratio.  Rebuild only when the
+    ratio has lost the capture sign.
+    """
     b = float(b)
     M = float(M)
     b_crit = critical_impact_parameter(M)
-    beta = b / M
-    eps = _beta_sq_minus_27(beta)
     escaped = b > b_crit
     captured = b < b_crit
-    beta_c = 3.0 * math.sqrt(3.0)
+    with mp.workdps(_MP_DPS):
+        beta_mp = mp.mpf(b) / mp.mpf(M)
+        eps_mp = beta_mp * beta_mp - 27
+        beta = float(beta_mp)
+        eps = float(eps_mp)
+    if escaped and eps > 0.0:
+        return beta, eps, True
+    if captured and eps < 0.0:
+        return beta, eps, False
+    if not escaped and not captured:
+        return beta, eps, False
     dbeta = (b - b_crit) / M
-    needs_rebuild = (
-        (escaped and (dbeta <= 0.0 or beta <= beta_c or eps <= 0.0))
-        or (captured and (dbeta >= 0.0 or beta >= beta_c or eps >= 0.0))
-    )
-    if needs_rebuild and math.isfinite(dbeta) and dbeta != 0.0:
-        extra = _beta_sq_minus_27(beta_c)
-        eps = extra + (2.0 * beta_c + dbeta) * dbeta
-        beta = beta_c + dbeta
+    if not math.isfinite(dbeta) or dbeta == 0.0:
+        return beta, eps, escaped
+    with mp.workdps(_MP_DPS):
+        beta_c = 3 * mp.sqrt(mp.mpf(3))
+        extra = beta_c * beta_c - 27
+        dbeta_mp = mp.mpf(b) / mp.mpf(M) - beta_c
+        eps = float(extra + (2 * beta_c + dbeta_mp) * dbeta_mp)
+        beta = float(beta_c + dbeta_mp)
     return beta, eps, escaped
 
 
@@ -927,10 +938,13 @@ def _beta_offset(b, M):
 
 
 def _is_near_critical(b, M):
-    b_crit = critical_impact_parameter(M)
-    if b_crit <= 0.0:
+    """Single production gate: |eps| from the supplied-float ratio."""
+    b = float(b)
+    M = float(M)
+    if M == 0.0 or not math.isfinite(b) or not math.isfinite(M):
         return False
-    return abs(float(b) - b_crit) / b_crit < _NEAR_CRIT_REL
+    eps = _beta_sq_minus_27(b / M)
+    return utilities_bhs.is_near_critical(eps)
 
 
 @lru_cache(maxsize=256)
@@ -1005,27 +1019,13 @@ def _phi_quad_segment(x_lo, x_hi, beta, eps=None, b=None, M=None):
         or (warned and not rel_ok)
         or (err is not None and float(err) > 1.0e-5)
     ):
-        if b is not None and M is not None:
-            turning = abs(float(_R_hat(x_hi_f, beta, eps))) < 1.0e-14
-            return _phi_segment_cached(
-                float(x_lo), float(x_hi), float(b), float(M), turning,
-            )
-        return _phi_factored_trap(x_lo, x_hi, beta, eps, n=4096)
+        if b is None or M is None:
+            raise RuntimeError("near-critical quadrature fallback requires b and M")
+        turning = abs(float(_R_hat(x_hi_f, beta, eps))) < 1.0e-14
+        return _phi_segment_cached(
+            float(x_lo), float(x_hi), float(b), float(M), turning,
+        )
     return float(val)
-
-
-def _phi_factored_trap(x_lo, x_hi, beta, eps=None, n=4096):
-    """Fixed-grid t² integral of the factorized radicand; no SciPy warnings."""
-    t_max = math.sqrt(max(x_hi - x_lo, 0.0))
-    if t_max == 0.0:
-        return 0.0
-    t = np.linspace(0.0, t_max, max(int(n), 8))
-    x = x_hi - t * t
-    rad = np.maximum(_R_hat(x, beta, eps), 0.0)
-    piece = np.zeros_like(t)
-    safe = rad > 0.0
-    piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
-    return _trapz(piece, t)
 
 
 def _phi_quad(x_lo, x_hi, beta, eps=None, b=None, M=None):
