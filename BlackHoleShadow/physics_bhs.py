@@ -33,14 +33,15 @@ import numpy as np
 try:
     from scipy.integrate import quad as _scipy_quad
     import mpmath as mp
+    import utilities_bhs
 except Exception as exc:
     raise ImportError(
         "BlackHoleShadow requires SciPy, NumPy, Matplotlib, and mpmath. "
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "0.18.0"
-_MP_DPS = 30
+MODEL_VERSION = "0.19.0"
+_MP_DPS = utilities_bhs.MP_DPS
 _NEAR_CRIT_REL = 1.0e-8
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
@@ -79,12 +80,11 @@ def image_sum_clause(max_m=None):
 # program; the copy exists so a BlackHoleShadow zip runs standalone.
 PHOTONORBIT_SYNC_VERSION = "1.4.0"
 
-# Tom's explicit intent: the live build id hashes only the four program
-# modules.  Help and tests are versioned separately and are not part of
-# BUILD_ID.  Changing BlackHoleShadow.html or the suite must not rewrite
-# the student-facing build stamp.
+# Tom's explicit intent: BUILD_ID hashes the live program modules.
+# Help and tests are versioned separately and are not part of BUILD_ID.
 BUILD_ID_COVERS = (
     "physics_bhs.py",
+    "utilities_bhs.py",
     "driver_bhs.py",
     "main.py",
     "plot_bhs.py",
@@ -92,7 +92,7 @@ BUILD_ID_COVERS = (
 
 
 def compute_build_id_from_directory(directory):
-    """Hash the four covered files found in ``directory``.
+    """Hash the covered program modules found in ``directory``.
 
     Tests copy those files into a temporary folder and call this; they
     must not write the live source tree.
@@ -935,77 +935,26 @@ def _is_near_critical(b, M):
 
 @lru_cache(maxsize=256)
 def _mp_periapsis(b, M):
-    """Outer turning point r > 3M from a 50-digit sigma-Newton solve."""
-    with mp.workdps(_MP_DPS):
-        beta = mp.mpf(float(b)) / mp.mpf(float(M))
-        eps = beta * beta - mp.mpf(27)
-        if eps <= 0:
-            raise RuntimeError("mpmath periapsis solver failed.")
-        sig = mp.sqrt(eps / 9)
-        for _ in range(80):
-            f = sig * sig * (9 + sig) - eps * (1 + sig)
-            df = 2 * sig * (9 + sig) + sig * sig - eps
-            if df == 0:
-                break
-            sig_new = sig - f / df
-            if sig_new <= 0:
-                sig_new = sig / 2
-            if abs(sig_new - sig) <= mp.mpf("1e-40") * max(mp.mpf(1), abs(sig)):
-                sig = sig_new
-                break
-            sig = sig_new
-        return float((3 + sig) * mp.mpf(float(M)))
+    """Public float periapsis via utilities_bhs; not used to build x_hi."""
+    return utilities_bhs.periapsis_over_M(b, M, dps=_MP_DPS) * float(M)
 
 
 @lru_cache(maxsize=256)
 def _mp_phi_to_endpoint(b, M):
-    """Inbound φ from infinity to periapsis or the horizon at 50 digits."""
+    """Inbound φ with periapsis kept as mpf inside utilities_bhs."""
     captured = is_captured(b, M)
-    if captured:
-        x_hi = mp.mpf(float(M)) / mp.mpf(event_horizon(M) * 1.0000001)
-    else:
-        rmin = _mp_periapsis(b, M)
-        x_hi = mp.mpf(float(M)) / mp.mpf(rmin)
-    with mp.workdps(_MP_DPS):
-        beta = mp.mpf(float(b)) / mp.mpf(float(M))
+    return utilities_bhs.phi_to_endpoint_over_M(
+        b, M, captured=captured,
+        horizon_over_M=event_horizon(M) / float(M),
+        dps=_MP_DPS,
+    )
 
-        def rad(x):
-            return 1 / beta ** 2 - x * x + 2 * x ** 3
 
-        third = mp.mpf(1) / 3
-        cuts = [mp.mpf(0)]
-        if cuts[0] < third < x_hi:
-            cuts.append(third)
-        cuts.append(x_hi)
-        total = mp.mpf(0)
-        turning = (not captured) and (abs(rad(x_hi)) < mp.mpf("1e-20"))
-        for a, c in zip(cuts[:-1], cuts[1:]):
-            if c <= a:
-                continue
-            if turning and c == x_hi:
-                t_max = mp.sqrt(c - a)
-
-                def g(t):
-                    x = c - t * t
-                    rval = rad(x)
-                    if t == 0:
-                        dR = -2 * c + 6 * c * c
-                        return 2 / mp.sqrt(abs(dR)) if dR != 0 else mp.mpf(0)
-                    if rval <= 0:
-                        return mp.mpf(0)
-                    return 2 * t / mp.sqrt(rval)
-
-                total += mp.quad(g, [mp.mpf(0), t_max])
-            else:
-
-                def f(x):
-                    rval = rad(x)
-                    if rval <= 0:
-                        return mp.mpf(0)
-                    return 1 / mp.sqrt(rval)
-
-                total += mp.quad(f, [a, c])
-        return float(total)
+@lru_cache(maxsize=512)
+def _phi_segment_cached(x_lo, x_hi, b, M, turning):
+    return utilities_bhs.phi_segment(
+        x_lo, x_hi, b, M, dps=_MP_DPS, turning=turning,
+    )
 
 
 def _R_hat(x, beta, eps=None):
@@ -1017,7 +966,7 @@ def _R_hat(x, beta, eps=None):
     return delta + 2.0 * xm * xm * (x + (1.0 / 6.0))
 
 
-def _phi_quad_segment(x_lo, x_hi, beta, eps=None):
+def _phi_quad_segment(x_lo, x_hi, beta, eps=None, b=None, M=None):
     """One SciPy segment of ∫ dx/sqrt(R_hat), with a t² sub at a turning point."""
     t_max = math.sqrt(max(x_hi - x_lo, 0.0))
     if t_max == 0.0:
@@ -1046,11 +995,21 @@ def _phi_quad_segment(x_lo, x_hi, beta, eps=None):
         warnings.simplefilter("always", IntegrationWarning)
         val, err = _scipy_quad(g, 0.0, t_max, epsabs=1.0e-10, limit=500)
     warned = any(issubclass(w.category, IntegrationWarning) for w in caught)
+    rel_ok = (
+        err is None
+        or abs(val) < 1.0e-30
+        or float(err) <= 1.0e-6 * max(1.0, abs(val))
+    )
     if (
-        warned
-        or not math.isfinite(val)
-        or (err is not None and float(err) > 1.0e-8)
+        not math.isfinite(val)
+        or (warned and not rel_ok)
+        or (err is not None and float(err) > 1.0e-5)
     ):
+        if b is not None and M is not None:
+            turning = abs(float(_R_hat(x_hi_f, beta, eps))) < 1.0e-14
+            return _phi_segment_cached(
+                float(x_lo), float(x_hi), float(b), float(M), turning,
+            )
         return _phi_factored_trap(x_lo, x_hi, beta, eps, n=4096)
     return float(val)
 
@@ -1069,7 +1028,7 @@ def _phi_factored_trap(x_lo, x_hi, beta, eps=None, n=4096):
     return _trapz(piece, t)
 
 
-def _phi_quad(x_lo, x_hi, beta, eps=None):
+def _phi_quad(x_lo, x_hi, beta, eps=None, b=None, M=None):
     """Adaptive integral, split at the photon-sphere coordinate x=1/3."""
     cuts = [x_lo]
     third = 1.0 / 3.0
@@ -1079,7 +1038,7 @@ def _phi_quad(x_lo, x_hi, beta, eps=None):
     total = 0.0
     for a, bseg in zip(cuts[:-1], cuts[1:]):
         if bseg > a:
-            total += _phi_quad_segment(a, bseg, beta, eps)
+            total += _phi_quad_segment(a, bseg, beta, eps, b=b, M=M)
     return total
 
 
@@ -1096,7 +1055,7 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
     R_hi = float(_R_hat(x_hi, beta, eps))
     delta = abs(beta - 3.0 * math.sqrt(3.0))
     if n is None and (delta < 1.0e-3 or abs(eps) < 1.0e-8):
-        return _phi_quad(x_lo, x_hi, beta, eps)
+        return _phi_quad(x_lo, x_hi, beta, eps, b=b, M=M)
     if n is None:
         n = 8192 if R_hi > 1.0e-8 else 4096
     n = max(int(n), 256)

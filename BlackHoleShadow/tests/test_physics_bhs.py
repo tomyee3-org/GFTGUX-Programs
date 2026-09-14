@@ -61,6 +61,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-13  Grok.  Response to Audit17.  Version 0.18.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit17-2026091320.txt
+
+  2026-09-13  Grok.  Response to Audit18.  Version 0.19.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit18-2026091323.txt
 """
 
 from __future__ import annotations
@@ -78,6 +81,7 @@ import numpy as np
 
 CORE_MODULE_FILES = (
     "physics_bhs.py",
+    "utilities_bhs.py",
     "driver_bhs.py",
     "main.py",
     "plot_bhs.py",
@@ -569,6 +573,9 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("near-critical whirling", text)
         self.assertIn("mpmath", text)
         self.assertIn("SciPy", text)
+        self.assertIn("utilities_bhs", text)
+        self.assertNotIn("~50 digits", text)
+        self.assertIn(str(phys._MP_DPS), text)
         self.assertNotIn("SciPy is optional", text)
         self.assertIn("pixel centre", text)
         self.assertEqual(text.count(r"\("), text.count(r"\)"))
@@ -741,10 +748,10 @@ class TestScaleInvariance(unittest.TestCase):
             self.assertTrue(all(r is None for r in rs[none_at[0]:]))
         self.assertIsNotNone(rs[6])
         self.assertIsNotNone(rs[11])
-        self.assertAlmostEqual(rs[11], 12.69529558460135, delta=0.02)
+        self.assertAlmostEqual(rs[11], 12.6952956793829, delta=0.005)
         self.assertLess(rs[11], 13.0)
         self.assertAlmostEqual(2.0 * phys._phi_to_turning_or_horizon(b, 1.0),
-                               36.54840226874896, delta=0.001)
+                               36.5484022654517, delta=2.0e-7)
         self.assertAlmostEqual(phys._beta_sq_minus_27(6.0), 9.0)
 
     def test_captured_near_crit_crossing_count(self):
@@ -771,6 +778,30 @@ class TestScaleInvariance(unittest.TestCase):
                     seen_none = True
                 elif seen_none:
                     self.fail("isolated missing crossing at rel=%g" % rel)
+
+    def test_endpoint_phi_independent_of_ambient_mp_dps(self):
+        import mpmath as mp
+        b = phys.critical_impact_parameter(1.0) * (1.0 + 2.05e-15)
+        phys._mp_phi_to_endpoint.cache_clear()
+        phys._mp_periapsis.cache_clear()
+        old = mp.mp.dps
+        try:
+            mp.mp.dps = 15
+            a = phys._phi_to_turning_or_horizon(b, 1.0)
+            phys._mp_phi_to_endpoint.cache_clear()
+            phys._mp_periapsis.cache_clear()
+            mp.mp.dps = 80
+            c = phys._phi_to_turning_or_horizon(b, 1.0)
+        finally:
+            mp.mp.dps = old
+        self.assertAlmostEqual(2.0 * a, 36.5484022654517, delta=2.0e-7)
+        self.assertAlmostEqual(2.0 * a, 2.0 * c, delta=1.0e-12)
+
+    def test_utilities_module_exports(self):
+        import utilities_bhs
+        self.assertEqual(utilities_bhs.MP_DPS, phys._MP_DPS)
+        self.assertTrue(hasattr(utilities_bhs, "phi_to_endpoint_over_M"))
+        self.assertTrue(hasattr(utilities_bhs, "periapsis_over_M_mpf"))
 
     def test_dekker_compensates_near_beta_c(self):
         beta_c = 3.0 * math.sqrt(3.0)
