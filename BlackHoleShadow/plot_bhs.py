@@ -426,11 +426,15 @@ def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0,
     fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
     ax = axes[0]
     colors = ("#0077b6", "#c9a227", "#c1121f")
-    labels = (r"$r_1/M$ (direct)", r"$r_2/M$ (lensing)",
-              r"$r_3/M$ (photon ring / subring)")
     for m in range(table.shape[1]):
         y = table[:, m]
-        ax.plot(bs / M, y, color=colors[m % 3], lw=1.6, label=labels[m])
+        if m == 0:
+            label = r"$r_1/M$ (direct)"
+        elif m == 1:
+            label = r"$r_2/M$ (lensing)"
+        else:
+            label = rf"$r_{{{m + 1}}}/M$ (photon ring / subring)"
+        ax.plot(bs / M, y, color=colors[m % 3], lw=1.6, label=label)
     ax.axvline(phys.critical_impact_parameter(M) / M, color=C_BC, ls=":",
                label=r"$b_{\rm crit}$")
     ax.axhline(3.0, color=C_PH, ls="--", lw=1.0, label=r"$r_{\rm ph}=3M$")

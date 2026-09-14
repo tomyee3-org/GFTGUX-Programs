@@ -67,6 +67,9 @@ plot_bhs.py docstrings or output):
 
   2026-09-14  Grok.  Response to Audit19.  Version 0.20.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit19-2026091401.txt
+
+  2026-09-14  Grok.  Response to Audit20.  Version 0.21.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit20-2026091402.txt
 """
 
 from __future__ import annotations
@@ -152,7 +155,7 @@ def run_cli(args, cwd=MODULE_DIR, timeout=90):
 
 
 class TestModuleDiscovery(unittest.TestCase):
-    def test_canonical_layout_finds_four_core_modules(self):
+    def test_canonical_layout_finds_core_modules(self):
         self.assertEqual(find_module_dir(Path(__file__)), MODULE_DIR)
         for name in CORE_MODULE_FILES:
             self.assertTrue((MODULE_DIR / name).is_file())
@@ -164,7 +167,7 @@ class TestBuildIdentity(unittest.TestCase):
         self.assertNotEqual(phys.BUILD_ID, "unknown")
         self.assertEqual(len(phys.BUILD_ID), 12)
 
-    def test_build_id_covers_exactly_the_four_core_files(self):
+    def test_build_id_covers_exactly_the_core_files(self):
         self.assertEqual(tuple(phys.BUILD_ID_COVERS), CORE_MODULE_FILES)
 
     def test_cli_version_string(self):
@@ -184,6 +187,9 @@ class TestBuildIdentity(unittest.TestCase):
                 )
             copied = phys.compute_build_id_from_directory(tmp_path)
             self.assertEqual(copied, phys.BUILD_ID)
+            (tmp_path / CORE_MODULE_FILES[0]).unlink()
+            with self.assertRaises((OSError, FileNotFoundError)):
+                phys.compute_build_id_from_directory(tmp_path)
 
     def test_mutating_help_does_not_change_build_id(self):
         help_path = find_help_file()
@@ -578,7 +584,9 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("SciPy", text)
         self.assertIn("utilities_bhs", text)
         self.assertNotIn("~50 digits", text)
-        self.assertIn(str(phys._MP_DPS), text)
+        self.assertIn("utilities_bhs.MP_DPS", text)
+        self.assertNotIn("GFTGU-Documentation", text)
+        self.assertIn("GFTGUX-Documentation", text)
         self.assertNotIn("SciPy is optional", text)
         self.assertIn("pixel centre", text)
         self.assertEqual(text.count(r"\("), text.count(r"\)"))
@@ -805,6 +813,27 @@ class TestScaleInvariance(unittest.TestCase):
         self.assertEqual(utilities_bhs.MP_DPS, phys._MP_DPS)
         self.assertTrue(hasattr(utilities_bhs, "phi_to_endpoint_over_M"))
         self.assertTrue(hasattr(utilities_bhs, "periapsis_over_M_mpf"))
+
+    def test_exact_b_crit_is_the_analytic_geodesic(self):
+        for M in (0.023, 0.139, 1.0):
+            b = phys.critical_impact_parameter(M)
+            beta, eps, escaped = phys._dimensionless_state(b, M)
+            self.assertFalse(escaped)
+            self.assertEqual(eps, 0.0)
+            self.assertAlmostEqual(beta, 3.0 * math.sqrt(3.0))
+            self.assertTrue(math.isinf(phys._phi_to_turning_or_horizon(b, M)))
+            x = (1.0 / 3.0) - 1.0e-10
+            u = x / M
+            self.assertAlmostEqual(
+                phys.phi_from_infinity_inbound(u, b, M),
+                phys.critical_phi_of_x(x),
+                delta=1.0e-12,
+            )
+
+    def test_ordinary_state_avoids_mpmath(self):
+        beta, eps, escaped = phys._dimensionless_state(6.0, 1.0)
+        self.assertTrue(escaped)
+        self.assertAlmostEqual(eps, phys._beta_sq_minus_27(6.0), delta=0.0)
 
     def test_dekker_compensates_near_beta_c(self):
         beta_c = 3.0 * math.sqrt(3.0)

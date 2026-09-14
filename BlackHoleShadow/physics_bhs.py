@@ -40,7 +40,7 @@ except Exception as exc:
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "0.20.0"
+MODEL_VERSION = "0.21.0"
 _MP_DPS = utilities_bhs.MP_DPS
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.
@@ -902,28 +902,27 @@ def _dimensionless_state(b, M):
     b = float(b)
     M = float(M)
     b_crit = critical_impact_parameter(M)
+    beta_c = 3.0 * math.sqrt(3.0)
+    if b == b_crit:
+        return beta_c, 0.0, False
     escaped = b > b_crit
     captured = b < b_crit
+    beta = b / M
+    eps = _beta_sq_minus_27(beta)
+    sign_ok = (escaped and eps > 0.0) or (captured and eps < 0.0)
+    if sign_ok and not utilities_bhs.is_near_critical(eps):
+        return beta, eps, escaped
     with mp.workdps(_MP_DPS):
         beta_mp = mp.mpf(b) / mp.mpf(M)
         eps_mp = beta_mp * beta_mp - 27
-        beta = float(beta_mp)
-        eps = float(eps_mp)
-    if escaped and eps > 0.0:
-        return beta, eps, True
-    if captured and eps < 0.0:
-        return beta, eps, False
-    if not escaped and not captured:
-        return beta, eps, False
-    dbeta = (b - b_crit) / M
-    if not math.isfinite(dbeta) or dbeta == 0.0:
-        return beta, eps, escaped
-    with mp.workdps(_MP_DPS):
-        beta_c = 3 * mp.sqrt(mp.mpf(3))
-        extra = beta_c * beta_c - 27
-        dbeta_mp = mp.mpf(b) / mp.mpf(M) - beta_c
-        eps = float(extra + (2 * beta_c + dbeta_mp) * dbeta_mp)
-        beta = float(beta_c + dbeta_mp)
+        if escaped and eps_mp > 0:
+            return float(beta_mp), float(eps_mp), True
+        if captured and eps_mp < 0:
+            return float(beta_mp), float(eps_mp), False
+        extra = mp.mpf(beta_c) * mp.mpf(beta_c) - 27
+        dbeta_mp = beta_mp - mp.mpf(beta_c)
+        eps = float(extra + (2 * mp.mpf(beta_c) + dbeta_mp) * dbeta_mp)
+        beta = float(mp.mpf(beta_c) + dbeta_mp)
     return beta, eps, escaped
 
 
@@ -1086,6 +1085,8 @@ def phi_from_infinity_inbound(u_target, b, M, n=None):
     u_target = float(u_target)
     if u_target <= 0.0:
         return 0.0
+    if float(b) == critical_impact_parameter(M):
+        return critical_phi_of_x(float(M) * u_target)
     return _phi_integral(0.0, u_target, b, M, n=n)
 
 
@@ -1108,6 +1109,8 @@ def _max_inbound_u(b, M):
 
 
 def _phi_to_turning_or_horizon(b, M):
+    if float(b) == critical_impact_parameter(M):
+        return float("inf")
     if _is_near_critical(b, M):
         return _mp_phi_to_endpoint(b, M)
     return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
