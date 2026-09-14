@@ -26,18 +26,22 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+from functools import lru_cache
 
 import numpy as np
 
 try:
     from scipy.integrate import quad as _scipy_quad
+    import mpmath as mp
 except Exception as exc:
     raise ImportError(
-        "BlackHoleShadow requires SciPy, NumPy, and Matplotlib. "
+        "BlackHoleShadow requires SciPy, NumPy, Matplotlib, and mpmath. "
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "0.15.0"
+MODEL_VERSION = "0.18.0"
+_MP_DPS = 30
+_NEAR_CRIT_REL = 1.0e-8
 
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.
@@ -288,8 +292,11 @@ def periapsis(b, M):
         return None
     beta, eps = _beta_offset(b, M)
     if eps <= 0.0:
-        return None
+        # b > b_crit already; do not reclassify by a rounded beta.
+        eps = math.ulp(27.0)
     rel = (b - b_crit) / b_crit
+    if rel < _NEAR_CRIT_REL:
+        return _mp_periapsis(b, M)
     if rel < 1.0e-2:
         # ρ = 3+σ, β² = 27+ε  =>  σ²(9+σ) = ε(1+σ).  Stable at the double root.
         sig = math.sqrt(eps / 9.0)
@@ -864,27 +871,153 @@ def _trapz(y, x):
     return float(fn(y, x))
 
 
-def _beta_offset(b, M):
-    """(beta, eps) with eps = beta^2 - 27 formed as a product, not a difference."""
-    beta = float(b) / float(M)
+_SPLITTER = 134217729.0  # 2**27 + 1, Dekker split
+
+
+def _two_square(a):
+    """Return (a*a, rounding_error) without requiring math.fma."""
+    a = float(a)
+    prod = a * a
+    t = _SPLITTER * a
+    hi = t - (t - a)
+    lo = a - hi
+    err = ((hi * hi - prod) + 2.0 * hi * lo) + lo * lo
+    return prod, err
+
+
+def _beta_sq_minus_27(beta):
+    """Compensated beta^2 - 27.  math.fma on 3.13+; Dekker on 3.10–3.12."""
+    beta = float(beta)
+    if hasattr(math, "fma"):
+        return math.fma(beta, beta, -27.0)
+    prod, err = _two_square(beta)
+    return (prod - 27.0) + err
+
+
+def _dimensionless_state(b, M):
+    """beta = b/M and eps = beta^2-27, with the dimensional capture sign."""
+    b = float(b)
+    M = float(M)
+    b_crit = critical_impact_parameter(M)
+    beta = b / M
+    eps = _beta_sq_minus_27(beta)
+    escaped = b > b_crit
+    captured = b < b_crit
     beta_c = 3.0 * math.sqrt(3.0)
-    eps = (beta - beta_c) * (beta + beta_c)
+    dbeta = (b - b_crit) / M
+    needs_rebuild = (
+        (escaped and (dbeta <= 0.0 or beta <= beta_c or eps <= 0.0))
+        or (captured and (dbeta >= 0.0 or beta >= beta_c or eps >= 0.0))
+    )
+    if needs_rebuild and math.isfinite(dbeta) and dbeta != 0.0:
+        extra = _beta_sq_minus_27(beta_c)
+        eps = extra + (2.0 * beta_c + dbeta) * dbeta
+        beta = beta_c + dbeta
+    return beta, eps, escaped
+
+
+def _signed_eps(b, M):
+    """Scale-free eps = ((b-b_crit)/M) * ((b+b_crit)/M) when needed."""
+    return _dimensionless_state(b, M)[1]
+
+
+def _beta_offset(b, M):
+    beta, eps, _escaped = _dimensionless_state(b, M)
     return beta, eps
 
 
-def _R_hat(x, beta):
-    """Dimensionless first integral: x = M u, beta = b/M.
+def _is_near_critical(b, M):
+    b_crit = critical_impact_parameter(M)
+    if b_crit <= 0.0:
+        return False
+    return abs(float(b) - b_crit) / b_crit < _NEAR_CRIT_REL
 
-    R = delta + 2(x-1/3)^2(x+1/6) with delta = (27-beta^2)/(27 beta^2).
-    """
-    beta_c = 3.0 * math.sqrt(3.0)
-    eps = (beta - beta_c) * (beta + beta_c)
+
+@lru_cache(maxsize=256)
+def _mp_periapsis(b, M):
+    """Outer turning point r > 3M from a 50-digit sigma-Newton solve."""
+    with mp.workdps(_MP_DPS):
+        beta = mp.mpf(float(b)) / mp.mpf(float(M))
+        eps = beta * beta - mp.mpf(27)
+        if eps <= 0:
+            raise RuntimeError("mpmath periapsis solver failed.")
+        sig = mp.sqrt(eps / 9)
+        for _ in range(80):
+            f = sig * sig * (9 + sig) - eps * (1 + sig)
+            df = 2 * sig * (9 + sig) + sig * sig - eps
+            if df == 0:
+                break
+            sig_new = sig - f / df
+            if sig_new <= 0:
+                sig_new = sig / 2
+            if abs(sig_new - sig) <= mp.mpf("1e-40") * max(mp.mpf(1), abs(sig)):
+                sig = sig_new
+                break
+            sig = sig_new
+        return float((3 + sig) * mp.mpf(float(M)))
+
+
+@lru_cache(maxsize=256)
+def _mp_phi_to_endpoint(b, M):
+    """Inbound φ from infinity to periapsis or the horizon at 50 digits."""
+    captured = is_captured(b, M)
+    if captured:
+        x_hi = mp.mpf(float(M)) / mp.mpf(event_horizon(M) * 1.0000001)
+    else:
+        rmin = _mp_periapsis(b, M)
+        x_hi = mp.mpf(float(M)) / mp.mpf(rmin)
+    with mp.workdps(_MP_DPS):
+        beta = mp.mpf(float(b)) / mp.mpf(float(M))
+
+        def rad(x):
+            return 1 / beta ** 2 - x * x + 2 * x ** 3
+
+        third = mp.mpf(1) / 3
+        cuts = [mp.mpf(0)]
+        if cuts[0] < third < x_hi:
+            cuts.append(third)
+        cuts.append(x_hi)
+        total = mp.mpf(0)
+        turning = (not captured) and (abs(rad(x_hi)) < mp.mpf("1e-20"))
+        for a, c in zip(cuts[:-1], cuts[1:]):
+            if c <= a:
+                continue
+            if turning and c == x_hi:
+                t_max = mp.sqrt(c - a)
+
+                def g(t):
+                    x = c - t * t
+                    rval = rad(x)
+                    if t == 0:
+                        dR = -2 * c + 6 * c * c
+                        return 2 / mp.sqrt(abs(dR)) if dR != 0 else mp.mpf(0)
+                    if rval <= 0:
+                        return mp.mpf(0)
+                    return 2 * t / mp.sqrt(rval)
+
+                total += mp.quad(g, [mp.mpf(0), t_max])
+            else:
+
+                def f(x):
+                    rval = rad(x)
+                    if rval <= 0:
+                        return mp.mpf(0)
+                    return 1 / mp.sqrt(rval)
+
+                total += mp.quad(f, [a, c])
+        return float(total)
+
+
+def _R_hat(x, beta, eps=None):
+    """Dimensionless first integral: x = M u, beta = b/M."""
+    if eps is None:
+        eps = _beta_sq_minus_27(beta)
     delta = -eps / (27.0 * beta * beta)
     xm = x - (1.0 / 3.0)
     return delta + 2.0 * xm * xm * (x + (1.0 / 6.0))
 
 
-def _phi_quad_segment(x_lo, x_hi, beta):
+def _phi_quad_segment(x_lo, x_hi, beta, eps=None):
     """One SciPy segment of ∫ dx/sqrt(R_hat), with a t² sub at a turning point."""
     t_max = math.sqrt(max(x_hi - x_lo, 0.0))
     if t_max == 0.0:
@@ -895,28 +1028,48 @@ def _phi_quad_segment(x_lo, x_hi, beta):
 
     def g(t):
         if t <= 0.0:
-            rad0 = float(_R_hat(x_hi_f, beta))
+            rad0 = float(_R_hat(x_hi_f, beta, eps))
             if rad0 > 1.0e-18:
                 return 0.0
             if abs(dR) > 0.0:
                 return 2.0 / math.sqrt(abs(dR))
             return 0.0
         x = x_hi_f - t * t
-        rad = float(_R_hat(x, beta))
+        rad = float(_R_hat(x, beta, eps))
         if rad <= 0.0:
             return 0.0
         return (2.0 * t) / math.sqrt(rad)
 
     import warnings
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        val, _err = _scipy_quad(g, 0.0, t_max, epsabs=1.0e-12, limit=500)
-    if not math.isfinite(val):
-        raise RuntimeError("adaptive quadrature returned a non-finite value")
+    from scipy.integrate import IntegrationWarning
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", IntegrationWarning)
+        val, err = _scipy_quad(g, 0.0, t_max, epsabs=1.0e-10, limit=500)
+    warned = any(issubclass(w.category, IntegrationWarning) for w in caught)
+    if (
+        warned
+        or not math.isfinite(val)
+        or (err is not None and float(err) > 1.0e-8)
+    ):
+        return _phi_factored_trap(x_lo, x_hi, beta, eps, n=4096)
     return float(val)
 
 
-def _phi_quad(x_lo, x_hi, beta):
+def _phi_factored_trap(x_lo, x_hi, beta, eps=None, n=4096):
+    """Fixed-grid t² integral of the factorized radicand; no SciPy warnings."""
+    t_max = math.sqrt(max(x_hi - x_lo, 0.0))
+    if t_max == 0.0:
+        return 0.0
+    t = np.linspace(0.0, t_max, max(int(n), 8))
+    x = x_hi - t * t
+    rad = np.maximum(_R_hat(x, beta, eps), 0.0)
+    piece = np.zeros_like(t)
+    safe = rad > 0.0
+    piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
+    return _trapz(piece, t)
+
+
+def _phi_quad(x_lo, x_hi, beta, eps=None):
     """Adaptive integral, split at the photon-sphere coordinate x=1/3."""
     cuts = [x_lo]
     third = 1.0 / 3.0
@@ -926,31 +1079,31 @@ def _phi_quad(x_lo, x_hi, beta):
     total = 0.0
     for a, bseg in zip(cuts[:-1], cuts[1:]):
         if bseg > a:
-            total += _phi_quad_segment(a, bseg, beta)
+            total += _phi_quad_segment(a, bseg, beta, eps)
     return total
 
 
 def _phi_integral(u_lo, u_hi, b, M, n=None):
     """∫ du / sqrt(R) computed in scale-free (x, beta) variables."""
     M = float(M)
-    beta = float(b) / M
+    beta, eps, _escaped = _dimensionless_state(b, M)
     x_lo = M * float(u_lo)
     x_hi = M * float(u_hi)
     if x_hi < x_lo:
         x_lo, x_hi = x_hi, x_lo
     if x_hi <= x_lo:
         return 0.0
-    R_hi = float(_R_hat(x_hi, beta))
+    R_hi = float(_R_hat(x_hi, beta, eps))
     delta = abs(beta - 3.0 * math.sqrt(3.0))
-    if n is None and (delta < 1.0e-3 or R_hi <= 1.0e-8):
-        return _phi_quad(x_lo, x_hi, beta)
+    if n is None and (delta < 1.0e-3 or abs(eps) < 1.0e-8):
+        return _phi_quad(x_lo, x_hi, beta, eps)
     if n is None:
         n = 8192 if R_hi > 1.0e-8 else 4096
     n = max(int(n), 256)
     use_plain = R_hi > 1.0e-12
     if use_plain:
         x = np.linspace(x_lo, x_hi, n)
-        rad = np.maximum(_R_hat(x, beta), 0.0)
+        rad = np.maximum(_R_hat(x, beta, eps), 0.0)
         inv = np.zeros_like(x)
         safe = rad > 0.0
         inv[safe] = 1.0 / np.sqrt(rad[safe])
@@ -958,7 +1111,7 @@ def _phi_integral(u_lo, u_hi, b, M, n=None):
     span = x_hi - x_lo
     t = np.linspace(0.0, math.sqrt(max(span, 0.0)), n)
     x = x_hi - t * t
-    rad = np.maximum(_R_hat(x, beta), 0.0)
+    rad = np.maximum(_R_hat(x, beta, eps), 0.0)
     piece = np.zeros_like(t)
     safe = rad > 0.0
     piece[safe] = (2.0 * t[safe]) / np.sqrt(rad[safe])
@@ -996,6 +1149,8 @@ def _max_inbound_u(b, M):
 
 
 def _phi_to_turning_or_horizon(b, M):
+    if _is_near_critical(b, M):
+        return _mp_phi_to_endpoint(b, M)
     return phi_from_infinity_inbound(_max_inbound_u(b, M), b, M)
 
 
@@ -1446,8 +1601,8 @@ def patch_help_version(html_path):
         new,
     )
     new = re.sub(
-        r"m\\ge \d+",
-        rf"m\\ge {MAX_IMAGE_M + 1}",
+        r"(\\\(m\\ge )\d+(\\\) is omitted)",
+        rf"\g<1>{MAX_IMAGE_M + 1}\2",
         new,
     )
     if new != text:

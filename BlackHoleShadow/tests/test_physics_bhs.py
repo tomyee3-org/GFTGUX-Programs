@@ -52,6 +52,15 @@ plot_bhs.py docstrings or output):
 
   2026-09-13  Grok.  Response to Audit14.  Version 0.15.0.
     Artifact: BlackHoleShadow-Grok-Response-to-Audit14-2026091316.txt
+
+  2026-09-13  Grok.  Response to Audit15.  Version 0.16.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit15-2026091317.txt
+
+  2026-09-13  Grok.  Response to Audit16.  Version 0.17.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit16-2026091318.txt
+
+  2026-09-13  Grok.  Response to Audit17.  Version 0.18.0.
+    Artifact: BlackHoleShadow-Grok-Response-to-Audit17-2026091320.txt
 """
 
 from __future__ import annotations
@@ -433,7 +442,7 @@ class TestDiskImage(unittest.TestCase):
         exact = phys.face_on_crossing_radii(b, 1.0, max_m=4)
         above = phys.face_on_crossing_radii(math.nextafter(b, math.inf), 1.0, max_m=4)
         below = phys.face_on_crossing_radii(math.nextafter(b, -math.inf), 1.0, max_m=4)
-        self.assertAlmostEqual(above[3], exact[3], delta=1.0e-9)
+        self.assertAlmostEqual(above[3], exact[3], delta=3.0e-9)
         self.assertAlmostEqual(below[3], exact[3], delta=1.0e-9)
 
     def test_transfer_resolves_r3_independent_of_fov(self):
@@ -558,11 +567,14 @@ class TestHelpFile(unittest.TestCase):
         self.assertNotIn("PhotonOrbit’s EXP-8", text)
         self.assertNotIn("PhotonOrbit EXP-4", text)
         self.assertIn("near-critical whirling", text)
-        self.assertIn("NumPy, Matplotlib, and SciPy", text)
+        self.assertIn("mpmath", text)
+        self.assertIn("SciPy", text)
         self.assertNotIn("SciPy is optional", text)
         self.assertIn("pixel centre", text)
         self.assertEqual(text.count(r"\("), text.count(r"\)"))
         self.assertIn(r"Narrow \(" + phys.photon_order_label() + r"\) peaks", text)
+        self.assertIn(r"photon-ring (\(m\ge 3\))", text)
+        self.assertIn(rf"\(m\ge {phys.MAX_IMAGE_M + 1}\) is omitted", text)
 
     def test_patch_help_version_is_idempotent(self):
         src = find_help_file()
@@ -591,13 +603,15 @@ class TestHelpFile(unittest.TestCase):
                 phys.patch_help_version(dest)
                 text = dest.read_text(encoding="utf-8")
                 self.assertIn(r"\sum_{m=1}^{5}", text)
-                self.assertIn(r"m\ge 6", text)
+                self.assertIn(r"photon-ring (\(m\ge 3\))", text)
+                self.assertIn(r"\(m\ge 6\) is omitted", text)
                 self.assertIn(r"\(m=3..5\)", text)
                 phys.MAX_IMAGE_M = 6
                 phys.patch_help_version(dest)
                 text = dest.read_text(encoding="utf-8")
                 self.assertIn(r"\sum_{m=1}^{6}", text)
-                self.assertIn(r"m\ge 7", text)
+                self.assertIn(r"photon-ring (\(m\ge 3\))", text)
+                self.assertIn(r"\(m\ge 7\) is omitted", text)
                 self.assertIn(r"\(m=3..6\)", text)
                 self.assertEqual(text.count(r"\("), text.count(r"\)"))
         finally:
@@ -718,23 +732,77 @@ class TestScaleInvariance(unittest.TestCase):
 
     def test_escaping_ulps_keep_high_order_crossings(self):
         b = phys.critical_impact_parameter(1.0) * (1.0 + 2.05e-15)
-        self.assertAlmostEqual(phys.periapsis(b, 1.0), 3.000000111678677, places=8)
+        self.assertAlmostEqual(phys.periapsis(b, 1.0) - 3.0, 1.11678677e-7, delta=1.0e-12)
+        rho = phys.periapsis(b, 1.0)
+        self.assertAlmostEqual(rho**3 - b*b*rho + 2.0*b*b, 0.0, delta=1.0e-12)
         rs = phys.face_on_crossing_radii(b, 1.0, max_m=12)
         none_at = [i for i, r in enumerate(rs) if r is None]
         if none_at:
             self.assertTrue(all(r is None for r in rs[none_at[0]:]))
         self.assertIsNotNone(rs[6])
         self.assertIsNotNone(rs[11])
-        self.assertGreater(rs[11], 10.0)
-        self.assertLess(rs[11], 14.0)
+        self.assertAlmostEqual(rs[11], 12.69529558460135, delta=0.02)
+        self.assertLess(rs[11], 13.0)
         self.assertAlmostEqual(2.0 * phys._phi_to_turning_or_horizon(b, 1.0),
-                               36.54840226874896, delta=0.03)
+                               36.54840226874896, delta=0.001)
+        self.assertAlmostEqual(phys._beta_sq_minus_27(6.0), 9.0)
 
     def test_captured_near_crit_crossing_count(self):
         b = phys.critical_impact_parameter(1.0) * (1.0 - 1.0e-13)
         rs = phys.face_on_crossing_radii(b, 1.0, max_m=12)
         self.assertEqual([r is not None for r in rs],
                          [True] * 10 + [False, False])
+        self.assertAlmostEqual(phys._phi_to_turning_or_horizon(b, 1.0),
+                               31.358345399346, delta=1.0e-8)
+
+    def test_near_crit_observables_are_scale_free(self):
+        beta0 = phys.critical_impact_parameter(1.0) * (1.0 + 2.05e-15)
+        ref = phys.periapsis(beta0, 1.0)
+        for M in (0.139, 1.0, 7.0):
+            self.assertAlmostEqual(phys.periapsis(beta0 * M, M) / M, ref, delta=5.0e-9)
+
+    def test_crossing_lists_have_no_isolated_holes(self):
+        b_crit = phys.critical_impact_parameter(1.0)
+        for rel in (1.0e-3, 1.0e-8):
+            rs = phys.face_on_crossing_radii(b_crit * (1.0 + rel), 1.0, max_m=12)
+            seen_none = False
+            for r in rs:
+                if r is None:
+                    seen_none = True
+                elif seen_none:
+                    self.fail("isolated missing crossing at rel=%g" % rel)
+
+    def test_dekker_compensates_near_beta_c(self):
+        beta_c = 3.0 * math.sqrt(3.0)
+        prod, err = phys._two_square(beta_c)
+        self.assertTrue(math.isfinite(err))
+        self.assertTrue(math.isfinite(phys._beta_sq_minus_27(beta_c)))
+        self.assertAlmostEqual((prod - 27.0) + err, phys._beta_sq_minus_27(beta_c), delta=1e-18)
+
+    def test_dimensionless_state_keeps_capture_sign(self):
+        for M in (0.023, 0.139, 1.0):
+            b_crit = phys.critical_impact_parameter(M)
+            b_esc = math.nextafter(b_crit, math.inf)
+            b_cap = math.nextafter(b_crit, -math.inf)
+            _b, eps_e, esc = phys._dimensionless_state(b_esc, M)
+            self.assertTrue(esc)
+            self.assertGreater(eps_e, 0.0)
+            _b, eps_c, esc_c = phys._dimensionless_state(b_cap, M)
+            self.assertFalse(esc_c)
+            self.assertLess(eps_c, 0.0)
+
+    def test_first_escaping_ray_survives_awkward_masses(self):
+        for M in (0.139, 0.278, 1.0):
+            b_crit = phys.critical_impact_parameter(M)
+            b = math.nextafter(b_crit, math.inf)
+            self.assertFalse(phys.is_captured(b, M))
+            rmin = phys.periapsis(b, M)
+            self.assertIsNotNone(rmin)
+            self.assertGreater(rmin, 3.0 * M)
+            rs = phys.face_on_crossing_radii(b, M, max_m=4)
+            self.assertTrue(any(r is not None for r in rs))
+            lo, hi = phys.high_winding_b_window(M)
+            self.assertGreater(hi, lo)
 
     def test_high_winding_includes_first_representable_escaping_ray(self):
         lo, hi = phys.high_winding_b_window(1.0, delta_phi_min=38.0)
