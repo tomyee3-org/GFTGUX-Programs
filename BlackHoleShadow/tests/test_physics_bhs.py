@@ -137,6 +137,7 @@ def find_help_file():
         here / "BlackHoleShadow.html",
         here.parent / "BlackHoleShadow.html",
         here.parent / "BlackHoleShadow-Documentation" / "BlackHoleShadow.html",
+        here.parent.parent / "GFTGUX-Documentation" / "BlackHoleShadow" / "BlackHoleShadow.html",
     ]
     for path in candidates:
         if path.is_file():
@@ -569,6 +570,24 @@ class TestModesAndCLI(unittest.TestCase):
 
 
 class TestHelpFile(unittest.TestCase):
+    def test_sync_help_uses_sibling_repository_layout(self):
+        source = find_help_file()
+        self.assertIsNotNone(source)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            program = root / "GFTGUX-Programs" / "BlackHoleShadow"
+            docs = root / "GFTGUX-Documentation" / "BlackHoleShadow"
+            program.mkdir(parents=True)
+            docs.mkdir(parents=True)
+            for name in CORE_MODULE_FILES:
+                (program / name).write_bytes((MODULE_DIR / name).read_bytes())
+            help_file = docs / "BlackHoleShadow.html"
+            help_file.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            result = run_cli(["--sync-help"], cwd=program)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(phys.BUILD_ID, result.stdout)
+            self.assertIn(phys.BUILD_ID, help_file.read_text(encoding="utf-8"))
+
     def test_help_version_line_matches_when_present(self):
         path = find_help_file()
         if path is None:
@@ -745,6 +764,8 @@ class TestScaleInvariance(unittest.TestCase):
         self.assertNotIn("m=3,4", joined)
         self.assertIn("{5}", fig._suptitle.get_text() or "")
         self.assertIn("m>=6", fig._suptitle.get_text() or "")
+        self.assertIn("False-color intensity", fig._suptitle.get_text())
+        self.assertIn("not observed wavelengths", fig._suptitle.get_text())
 
     def test_photon_order_label_starts_at_m3(self):
         self.assertEqual(phys.photon_order_label(3), "m=3")
@@ -990,4 +1011,3 @@ class TestScaleInvariance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

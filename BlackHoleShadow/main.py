@@ -151,6 +151,9 @@ def main():
     if args.sync_help:
         here = os.path.dirname(os.path.abspath(__file__))
         candidates = [
+            os.path.join(os.path.dirname(os.path.dirname(here)),
+                         "GFTGUX-Documentation", "BlackHoleShadow",
+                         "BlackHoleShadow.html"),
             os.path.join(os.path.dirname(here),
                          "BlackHoleShadow-Documentation", "BlackHoleShadow.html"),
             os.path.join(os.path.dirname(here), "BlackHoleShadow.html"),

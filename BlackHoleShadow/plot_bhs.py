@@ -543,10 +543,11 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
     fig.suptitle(
         r"Beat 5 · Point-sampled face-on image  "
         rf"$I_{{\mathrm{{obs}}}}\approx\sum_{{m=1}}^{{{max_m}}} g^4 I_{{\mathrm{{em}}}}$"
-        rf"  (static emitters; {phys.omitted_order_label(max_m)} omitted)",
+        rf"  (static emitters; {phys.omitted_order_label(max_m)} omitted)"
+        "\nFalse-color intensity (inferno colormap; colors are not observed wavelengths)",
         fontsize=11,
     )
-    fig.tight_layout(rect=[0, 0.03, 1, 0.92])
+    fig.tight_layout(rect=[0, 0.03, 1, 0.88])
     saved = _finish(fig, outdir, "image", dpi, provenance={
         "mode": "image",
         "M": repr(M),
