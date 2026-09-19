@@ -465,6 +465,77 @@ plot_sev.py docstrings or output):
         direct-call nondefault-figsize sidecar test, and the
         all-four-modes sidecar test rewritten to assert exact parsed
         key/value entries instead of substrings.
+
+  2026-09-19  Claude (principal developer).  Kickoff2 -- the Help file moves
+    to a Beats layout.  No change to any of the four BUILD_ID-covered modules
+    (main.py, driver_sev.py, physics_sev.py, plot_sev.py), so MODEL_VERSION
+    stays 1.5.0 and BUILD_ID stays 4ab0d0a5d73c.  This file changed only
+    to make the Help-file tests correct for two layouts of the same Help
+    content: the "classic" layout (Physical Background, Governing
+    Equations and Closures sections) and a "Beats" layout in the style of
+    GravitationalLensing and BlackHoleShadow, in which the material of
+    the classic Physical Background and Closures sections is
+    reorganised into eleven numbered beats.  This round ships the Beats
+    layout as the canonical StellarEvolutionTracks.html and does not ship
+    the classic file; the classic layout stays supported by the tests.
+    A second Help file placed beside it as StellarEvolutionTracks-
+    Beats.html (layout recognised from its content, whichever layout it
+    holds) is tested as well, and only then do TestHelpFileBeatsVariant
+    and the cross-variant test do anything.
+      * Run against the Beats file, the unmodified suite passed 17 of the
+        18 TestHelpFile tests; the one failure,
+        test_neutron_star_not_described_as_pure_degeneracy_pressure,
+        looked for a section id ("background") that only the classic
+        layout has.  That was a wrong reference in the test, not a defect
+        in the Help: the two statements it checks live in section beat8
+        in the Beats layout.
+      * The layout is now recognised from the page's content
+        (help_layout()), never from its file name, and
+        HELP_LAYOUT_SECTIONS records the one place the layouts differ.
+        TestHelpFile gained a ``help_name`` class attribute; every
+        TestHelpFile test runs unchanged on whichever layout the file
+        holds, and TestHelpFileBeatsVariant (defined only when
+        StellarEvolutionTracks-Beats.html sits beside the modules) is
+        TestHelpFile run again on the Beats file.  No existing
+        TestHelpFile assertion was removed or weakened.
+      * Six new TestHelpFile tests, each run on both layouts: (1) the
+        layout is recognised and consistent (sidebar links every section
+        once in page order; classic has background and closures; Beats has
+        beat0..beat10 in order with "Beat N" headings and a command in
+        every beat); (2) the mode table's Beat column equals, mode by
+        mode, the beats whose <pre> commands actually use that mode, read
+        through the program's real argparse parser (classic: no Beat
+        column); (3) every command the Help shows -- <pre> and inline
+        <code> -- is accepted by main.parse_args(), passes only flags the
+        chosen --mode uses (driver.PARAMS_BY_MODE), and every mode is
+        shown at least once; (4) experiment numbers are consecutive and
+        every "EXP-n" cited anywhere on the page is an existing card;
+        (5) the Sun's terminal-age helium core quoted in the Help equals
+        the program's own mc_tams at the quoted precision; (6) the Beats
+        claim that --no_postms belongs to Beats 0-2 only is true of the
+        commands (classic: nothing to check).  Test (2) also compares the
+        table with the same claim made in prose in "How to read this
+        page" ("Beats 0-3 and 5 use tracks, ...").  Test (5) fails
+        on the Help files as they stood at the start of this round: both
+        quoted 0.113 solar masses, the pre-Audit1-P1-3 value (0.1125),
+        while the program prints 0.1123.  The one-digit correction
+        (0.113 -> 0.112) is the only change made to the classic Help
+        text this round; the Beats layout carries it.
+      * New TestHelpFileReferences (4 tests): the canonical Help file is
+        present and every variant has a recognised layout; when both
+        variants are present, the sections the Beats layout carries over
+        (algorithm, modules, parameters, output, experiments, validity,
+        related, license), the version banner and every equation block are
+        identical in text, so an edit to one variant that is not carried
+        to the other fails here and names the section; physics_sev's
+        docstring names the canonical Help file; main.py's docstring
+        reference to the Help's "Model Handoffs" discussion resolves to an
+        experiment title in every variant.
+      * The full regression suite grew from 210 to 220 tests with one Help
+        file present (6 new TestHelpFile tests and 4 in
+        TestHelpFileReferences), and to 244 when a second Help file sits
+        beside it (TestHelpFileBeatsVariant adds the 24 TestHelpFile
+        tests again).
 """
 
 import ast
@@ -480,6 +551,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -497,6 +569,25 @@ CORE_MODULE_FILES = (
     "plot_sev.py",
 )
 HELP_FILE = "StellarEvolutionTracks.html"
+# Optional second presentation of the same Help content (the "Beats"
+# layout used by GravitationalLensing and BlackHoleShadow).  It is a
+# variant, not a replacement: the layout is recognised from the page's
+# content, never from its file name, so promoting either variant to the
+# canonical HELP_FILE name needs no change to this suite.
+BEATS_HELP_FILE = "StellarEvolutionTracks-Beats.html"
+
+# Where each layout keeps material that the classic layout holds in a
+# dedicated section.  Every other section the tests read (description,
+# modes, equations, algorithm, modules, parameters, output, experiments,
+# validity) has the same id in both layouts.
+HELP_LAYOUT_SECTIONS = {
+    "classic": {"neutron_star_matter": ("background",)},
+    "beats": {"neutron_star_matter": ("beat8",)},
+}
+BEAT_SECTION_IDS = tuple(f"beat{n}" for n in range(11))
+# Sections the Beats layout carries over from the classic layout unchanged.
+SHARED_SECTION_IDS = ("algorithm", "modules", "parameters", "output",
+                      "experiments", "validity", "related", "license")
 
 
 def find_module_dir(start):
@@ -647,6 +738,92 @@ def has_class(node, class_name):
 
 def nodes_by_id(root, element_id):
     return descendants(root, lambda node: node.attrs.get("id") == element_id)
+
+
+def help_layout(root):
+    """Recognise which Help layout a parsed page uses, from its content.
+
+    "classic" has a dedicated ``background`` section and no beat sections;
+    "beats" has ``beat0`` ... ``beatN`` sections and no ``background``.
+    Anything else (both, or neither) is "unrecognised", which the layout
+    test reports as a failure rather than guessing.
+    """
+    ids = {node.attrs["id"]
+           for node in descendants(root, lambda node: "id" in node.attrs)}
+    has_beats = any(re.fullmatch(r"beat\d+", name) for name in ids)
+    has_background = "background" in ids
+    if has_beats and not has_background:
+        return "beats"
+    if has_background and not has_beats:
+        return "classic"
+    return "unrecognised"
+
+
+def parse_beat_list(text):
+    """Expand a Beat-column entry such as "0-3, 5" (en dash or hyphen)."""
+    beats = set()
+    for part in text.replace("–", "-").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        low, dash, high = part.partition("-")
+        beats.update(range(int(low), int(high) + 1) if dash else [int(low)])
+    return beats
+
+
+def documented_commands(root):
+    """Every ``python main.py ...`` line the Help shows, with its section.
+
+    Returns ``(section_id, argument_list, in_pre_block)`` tuples.  Lines in
+    a ``<pre>`` block are the commands a student is told to run; lines in
+    an inline ``<code>`` element are pointers to a command.  ``#`` comments
+    are dropped by shlex; blank and comment-only lines are skipped.
+    """
+    found = []
+    prefix = "python main.py"
+    for section in descendants(
+            root, lambda node: node.tag == "section" and "id" in node.attrs):
+        pres = descendants(section, lambda node: node.tag == "pre")
+        inside_pre = {id(item) for pre in pres for item in descendants(pre)}
+        inline = [code for code in descendants(
+            section, lambda node: node.tag == "code")
+            if id(code) not in inside_pre]
+        for blocks, in_pre in ((pres, True), (inline, False)):
+            for block in blocks:
+                for line in block.text().splitlines():
+                    line = line.strip()
+                    if line.startswith(prefix):
+                        found.append((
+                            section.attrs["id"],
+                            shlex.split(line[len(prefix):], comments=True),
+                            in_pre,
+                        ))
+    return found
+
+
+def parse_with_real_cli(arguments):
+    """Run main.py's own argparse parser on ``arguments``; never compute.
+
+    Returns ``(namespace, exit_code, stderr_text)``.  ``namespace`` is None
+    when the parser exited (``--help`` / ``--version`` exit 0; a rejected
+    flag or value exits 2 with the message in ``stderr_text``).
+    """
+    import main as cli_main
+    stderr, stdout = io.StringIO(), io.StringIO()
+    with mock.patch.object(sys, "argv", ["main.py", *arguments]), \
+            contextlib.redirect_stderr(stderr), \
+            contextlib.redirect_stdout(stdout):
+        try:
+            return cli_main.parse_args(), None, ""
+        except SystemExit as exit_request:
+            return None, exit_request.code, stderr.getvalue()
+
+
+# Flags that belong to no single mode, and the one flag whose argparse
+# destination differs from its spelling.
+CLI_MODE_INDEPENDENT_FLAGS = frozenset(
+    {"mode", "outdir", "csvdir", "no_plot", "dpi", "lw", "help", "version"})
+CLI_FLAG_DESTINATIONS = {"no_postms": "postms"}
 
 
 # ======================================================================
@@ -2792,14 +2969,43 @@ class TestPlotting(unittest.TestCase):
 
 # ======================================================================
 class TestHelpFile(unittest.TestCase):
+    """Help-file regression tests for whichever layout ``help_name`` holds.
+
+    Every test below runs unchanged against both layouts (classic and
+    Beats); the layout is recognised from the page's content
+    (``help_layout``).  Only two things differ between layouts and both go
+    through ``layout_text`` / the layout-specific structure test: the
+    neutron-star discussion lives in ``background`` (classic) or ``beat8``
+    (Beats), and the Beats layout adds a Beat column to the mode table.
+    ``TestHelpFileBeatsVariant`` re-runs this whole class on the Beats
+    file when that file is present next to the program modules.
+    """
+
+    help_name = HELP_FILE
+
     @classmethod
     def setUpClass(cls):
-        cls.path = MODULE_DIR / HELP_FILE
+        cls.path = MODULE_DIR / cls.help_name
         cls.html = cls.path.read_text(encoding="utf-8")
         parser = HtmlTreeParser()
         parser.feed(cls.html)
         parser.close()
         cls.root = parser.root
+        cls.layout = help_layout(cls.root)
+
+    def layout_text(self, key):
+        """Normalized text of the section(s) this layout uses for ``key``."""
+        self.assertIn(self.layout, HELP_LAYOUT_SECTIONS,
+                      f"{self.help_name}: layout not recognised")
+        parts = []
+        for section_id in HELP_LAYOUT_SECTIONS[self.layout][key]:
+            nodes = nodes_by_id(self.root, section_id)
+            self.assertEqual(
+                len(nodes), 1,
+                f"{self.help_name} ({self.layout} layout) has no unique "
+                f"section id={section_id!r} for {key!r}")
+            parts.append(normalized_text(nodes[0]))
+        return " ".join(parts)
 
     def test_help_file_exists(self):
         self.assertTrue(self.path.is_file())
@@ -2836,9 +3042,13 @@ class TestHelpFile(unittest.TestCase):
         self.assertNotIn("Electrons per nucleon", self.html)
 
     def test_neutron_star_not_described_as_pure_degeneracy_pressure(self):
-        background = normalized_text(nodes_by_id(self.root, "background")[0])
-        self.assertIn("strongly interacting", background)
-        self.assertIn("Oppenheimer and Volkoff", background)
+        # The classic layout keeps this discussion in "background"; the
+        # Beats layout keeps it in its neutron-star beat ("beat8").  The
+        # two statements are required in whichever section the layout
+        # uses, so the check is as local in one layout as in the other.
+        matter = self.layout_text("neutron_star_matter")
+        self.assertIn("strongly interacting", matter)
+        self.assertIn("Oppenheimer and Volkoff", matter)
 
     def test_paczynski_relation_explicitly_disclaimed(self):
         equations = normalized_text(nodes_by_id(self.root, "equations")[0])
@@ -2933,6 +3143,240 @@ class TestHelpFile(unittest.TestCase):
         # Radius grows by "about a hundred" (2 orders), luminosity by three;
         # they must not be conflated.
         self.assertIn("hundred", output_text)
+
+    def test_layout_is_recognised_and_structurally_consistent(self):
+        self.assertIn(self.layout, ("classic", "beats"),
+                      f"{self.help_name}: neither a classic nor a Beats layout")
+        sections = descendants(
+            self.root,
+            lambda node: node.tag == "section" and "id" in node.attrs)
+        section_ids = [node.attrs["id"] for node in sections]
+        # The sidebar links to every section, once, in page order.  (Read
+        # from the sidebar itself: in-page cross-references elsewhere also
+        # link to some sections and must not stand in for a missing entry.)
+        sidebar = nodes_by_id(self.root, "sidebar")
+        self.assertEqual(len(sidebar), 1)
+        sidebar_targets = [
+            node.attrs["href"][1:] for node in descendants(
+                sidebar[0], lambda item: item.tag == "a" and
+                item.attrs.get("href", "").startswith("#"))]
+        self.assertEqual(sidebar_targets, section_ids)
+        if self.layout == "classic":
+            for required in ("background", "closures"):
+                self.assertIn(required, section_ids)
+            return
+        beat_ids = [name for name in section_ids
+                    if re.fullmatch(r"beat\d+", name)]
+        self.assertEqual(tuple(beat_ids), BEAT_SECTION_IDS)
+        self.assertIn("beats", section_ids)  # "How to read this page"
+        commands = documented_commands(self.root)
+        for number, section_id in enumerate(BEAT_SECTION_IDS):
+            with self.subTest(beat=number):
+                node = nodes_by_id(self.root, section_id)[0]
+                headings = descendants(node, lambda item: item.tag == "h2")
+                self.assertEqual(len(headings), 1)
+                self.assertRegex(normalized_text(headings[0]),
+                                 rf"^Beat {number} · \S")
+                runs =[entry for entry in commands
+                        if entry[0] == section_id and entry[2]]
+                self.assertTrue(runs, "every beat shows a command to run")
+
+    def test_mode_table_beat_column_matches_the_commands_the_beats_run(self):
+        tables = descendants(
+            nodes_by_id(self.root, "modes")[0],
+            lambda node: node.tag == "table" and has_class(node, "mode-table"))
+        self.assertEqual(len(tables), 1)
+        headers = [normalized_text(node) for node in descendants(
+            tables[0], lambda node: node.tag == "th")]
+        if self.layout == "classic":
+            self.assertNotIn("Beats", headers)
+            return
+        self.assertEqual(headers[:2], ["Mode", "Beats"])
+        listed = {}
+        for row in descendants(tables[0], lambda node: node.tag == "tr"):
+            if not descendants(row, lambda cell: has_class(cell, "mname")):
+                continue  # header row
+            cells = [normalized_text(cell) for cell in descendants(
+                row, lambda node: node.tag == "td")]
+            listed[cells[0]] = parse_beat_list(cells[1])
+        self.assertEqual(set(listed), set(driver.MODES))
+        # What each beat actually runs, read from its own <pre> commands
+        # through the program's real argument parser (a beat's inline
+        # <code> pointers to other modes, e.g. Beat 5's hand-off to
+        # wdcool, are not runs and are deliberately not counted).
+        ran = {mode: set() for mode in driver.MODES}
+        for section_id, arguments, in_pre in documented_commands(self.root):
+            if in_pre and re.fullmatch(r"beat\d+", section_id):
+                namespace, _, stderr = parse_with_real_cli(arguments)
+                self.assertIsNotNone(namespace, stderr)
+                ran[namespace.mode].add(int(section_id[len("beat"):]))
+        self.assertEqual(listed, ran)
+        every_beat = set().union(*listed.values())
+        self.assertEqual(every_beat, set(range(len(BEAT_SECTION_IDS))))
+        # The "How to read this page" section says the same thing in prose
+        # ("Beats 0-3 and 5 use tracks, Beats 1 and 4 use hr, ...").  It
+        # must agree with the table and with the commands.
+        intro = normalized_text(nodes_by_id(self.root, "beats")[0])
+        prose = {mode: parse_beat_list(spec.replace(" and ", ","))
+                 for spec, mode in re.findall(
+                     r"Beats? ([\d–,\- and]+?) uses? (tracks|hr|wdcool|nsmr)\b",
+                     intro)}
+        self.assertEqual(prose, ran)
+
+    def test_no_postms_claim_matches_the_beats_commands(self):
+        # The Beats page says Beats 0-2 add --no_postms (stop at the
+        # terminal-age main sequence) and Beat 3 removes it.  Read from the
+        # commands themselves: every tracks/hr run in Beats 0-2 passes it,
+        # and no tracks/hr run from Beat 3 on does.
+        if self.layout == "classic":
+            return
+        checked = 0
+        for section_id, arguments, in_pre in documented_commands(self.root):
+            match = re.fullmatch(r"beat(\d+)", section_id)
+            if not (in_pre and match):
+                continue
+            namespace, _, stderr = parse_with_real_cli(arguments)
+            self.assertIsNotNone(namespace, stderr)
+            if namespace.mode not in ("tracks", "hr"):
+                continue
+            with self.subTest(beat=int(match.group(1)),
+                              command=" ".join(arguments)):
+                self.assertEqual(
+                    namespace.postms, int(match.group(1)) >= 3,
+                    "--no_postms belongs to Beats 0-2 only")
+                checked += 1
+        self.assertGreater(checked, 0)
+
+    def test_documented_commands_parse_with_the_real_cli(self):
+        commands = documented_commands(self.root)
+        self.assertTrue(commands)
+        modes_shown = set()
+        for section_id, arguments, _ in commands:
+            with self.subTest(section=section_id, command=" ".join(arguments)):
+                namespace, code, stderr = parse_with_real_cli(arguments)
+                if namespace is None:
+                    # Only --help and --version may stop the parser early,
+                    # and they must do so cleanly.
+                    self.assertEqual(code, 0, stderr)
+                    self.assertTrue({"--help", "--version"} & set(arguments))
+                    continue
+                modes_shown.add(namespace.mode)
+                applicable = (set(driver.PARAMS_BY_MODE[namespace.mode])
+                              | CLI_MODE_INDEPENDENT_FLAGS)
+                for token in arguments:
+                    if token.startswith("--"):
+                        name = CLI_FLAG_DESTINATIONS.get(token[2:], token[2:])
+                        self.assertIn(
+                            name, applicable,
+                            f"{token} is not used by --mode {namespace.mode}")
+        self.assertEqual(modes_shown, set(driver.MODES))
+
+    def test_experiment_numbers_are_consecutive_and_every_reference_resolves(self):
+        experiments = nodes_by_id(self.root, "experiments")[0]
+        numbers = []
+        for label in descendants(experiments, lambda n: has_class(n, "ec-num")):
+            match = re.match(r"EXP-(\d+)\b", normalized_text(label))
+            self.assertIsNotNone(match, normalized_text(label))
+            numbers.append(int(match.group(1)))
+        self.assertEqual(numbers, list(range(1, len(numbers) + 1)))
+        page = " ".join(
+            normalized_text(node) for node in descendants(
+                self.root, lambda node: node.tag == "section"))
+        cited = {int(n) for n in re.findall(r"EXP-(\d+)\b", page)}
+        self.assertTrue(cited)
+        self.assertFalse(cited - set(numbers),
+                         f"references to experiments that do not exist: "
+                         f"{sorted(cited - set(numbers))}")
+
+    def test_quoted_solar_helium_core_at_tams_matches_the_program(self):
+        # Regression test for a stale Help number found in Kickoff2: the
+        # Help quoted 0.113 solar masses for the Sun's terminal-age helium
+        # core, the value (0.1125) from before Audit1 P1-3 made mc_tams
+        # honour the (1 - Xc_end/X) factor; the program has printed
+        # 0.1123 ever since.  The quoted figure must be the program's own
+        # value at the precision the Help states.
+        page = normalized_text(self.root)
+        quoted = re.findall(
+            r"helium core at (\d\.\d+) solar masses at the terminal-age "
+            r"main sequence", page)
+        self.assertEqual(len(quoted), 1, quoted)
+        printed = phys.integrate_track(m_msun=1.0)["summary"]["mc_tams"]
+        digits = len(quoted[0].partition(".")[2])
+        self.assertEqual(quoted[0], f"{printed:.{digits}f}")
+
+
+if (MODULE_DIR / BEATS_HELP_FILE).is_file():
+    class TestHelpFileBeatsVariant(TestHelpFile):
+        """Every TestHelpFile test, run on the Beats-layout Help file."""
+
+        help_name = BEATS_HELP_FILE
+
+
+# ======================================================================
+class TestHelpFileReferences(unittest.TestCase):
+    """What the program says about the Help file must be true of every
+    Help variant shipped beside it."""
+
+    @staticmethod
+    def variants():
+        return [name for name in (HELP_FILE, BEATS_HELP_FILE)
+                if (MODULE_DIR / name).is_file()]
+
+    @staticmethod
+    def parse(name):
+        parser = HtmlTreeParser()
+        parser.feed((MODULE_DIR / name).read_text(encoding="utf-8"))
+        parser.close()
+        return parser.root
+
+    def test_canonical_help_file_is_present_and_every_variant_recognised(self):
+        self.assertIn(HELP_FILE, self.variants())
+        for name in self.variants():
+            with self.subTest(help_file=name):
+                self.assertIn(help_layout(self.parse(name)),
+                              ("classic", "beats"))
+
+    def test_shared_content_is_identical_across_variants(self):
+        # The layouts are two presentations of one body of content.  If
+        # one Help file is edited and the change is not carried to the
+        # other, the shared content diverges and this test names what
+        # differs.  With only one variant present there is nothing to
+        # compare.
+        names = self.variants()
+        if len(names) < 2:
+            return
+        roots = [self.parse(name) for name in names]
+        hint = f"variants {names} disagree; carry the edit to the other file"
+        banners = [normalized_text(nodes_by_id(root, "version_build")[0])
+                   for root in roots]
+        self.assertEqual(banners[0], banners[1], hint)
+        for section_id in SHARED_SECTION_IDS:
+            with self.subTest(section=section_id):
+                texts = [normalized_text(nodes_by_id(root, section_id)[0])
+                         for root in roots]
+                self.assertEqual(texts[0], texts[1], hint)
+        blocks = [Counter(normalized_text(node) for node in descendants(
+            root, lambda item: has_class(item, "eq-block"))) for root in roots]
+        self.assertTrue(blocks[0])
+        self.assertEqual(blocks[0], blocks[1], hint)
+
+    def test_program_names_the_canonical_help_file(self):
+        # physics_sev's module docstring points readers at this file name.
+        # Because layouts are recognised from content, this stays true if
+        # either layout is promoted to the canonical name.
+        self.assertIn(HELP_FILE, phys.__doc__)
+
+    def test_cli_docstring_handoff_reference_resolves_in_every_variant(self):
+        import main as cli_main
+        self.assertIn('"Model Handoffs"', cli_main.__doc__)
+        for name in self.variants():
+            with self.subTest(help_file=name):
+                root = self.parse(name)
+                experiments = nodes_by_id(root, "experiments")[0]
+                titles = [normalized_text(node) for node in descendants(
+                    experiments, lambda item: item.tag == "h4")]
+                self.assertTrue(any("Model Handoffs" in t for t in titles),
+                                titles)
 
 
 if __name__ == "__main__":
