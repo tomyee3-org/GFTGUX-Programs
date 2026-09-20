@@ -37,6 +37,22 @@ def _finite(name, value):
     return value
 
 
+def _boolean(name, value):
+    """
+    Require a literal True or False for a public on/off control.
+
+    Without this a direct-Python caller passing a truthy non-bool (for
+    example the string "False", or 1) had it silently read by Python's
+    truthiness rules: run(no_plot="False") suppressed the figure, and
+    run(newtonian="False") selected Newtonian gravity.  The command line
+    always supplies a real bool, so only the reusable Python API was
+    exposed.  Same contract as physics_sev._require_bool.
+    """
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be True or False; got {value!r}.")
+    return value
+
+
 def _validate_output(outdir, csvdir, dpi, lw):
     dpi = _finite("dpi", dpi)
     lw = _finite("lw", lw)
@@ -371,9 +387,11 @@ def _print_wd_summary(s):
     print(f"  Cooling points      : {s['n_points']:,}")
     print(SEP)
     print("  Model: zero-temperature Chandrasekhar electron structure with")
-    print("  classical Mestel cooling.  The core mu_e sets the structure,")
-    print("  A_ion sets the ionic heat capacity, and the ENVELOPE X and Z")
-    print("  set the opacity and therefore the cooling clock.")
+    print("  classical Mestel cooling.  The core mu_e sets the structure and")
+    print("  does not enter the cooling law; the ENVELOPE X and Z set the")
+    print("  opacity and so the Mestel coefficient, A_ion sets the ionic heat")
+    print("  capacity, and the coefficient and the heat capacity together")
+    print("  set the cooling clock.")
     print(SEP)
     _print_warnings(s)
 
@@ -664,9 +682,20 @@ def run(mode="tracks",
         "hr"      an HR diagram built from several tracks
         "wdcool"  white-dwarf structure and cooling
         "nsmr"    neutron-star mass-radius relation
+
+    postms, homology, newtonian and no_plot must be literal True or False;
+    anything else (including 0, 1 or a string) is refused.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}.")
+
+    # The four on/off controls are checked for every mode, including a mode
+    # in which a given one has no effect, so a wrong type is never silently
+    # ignored because of the mode it happened to be passed with.
+    postms = _boolean("postms", postms)
+    homology = _boolean("homology", homology)
+    newtonian = _boolean("newtonian", newtonian)
+    no_plot = _boolean("no_plot", no_plot)
 
     dpi, lw = _validate_output(outdir, csvdir, dpi, lw)
     step_frac = _finite("step_frac", step_frac)

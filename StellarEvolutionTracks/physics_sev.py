@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.5.0"
+MODEL_VERSION = "1.6.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -1172,6 +1172,79 @@ def build_hr_grid(masses, isochrone_gyr=None, **track_kwargs):
 _FERMI_SMALL_X = 0.05
 
 
+def _real_finite_array(name, value):
+    """
+    Coerce ``value`` (a scalar or array_like) to a float64 ndarray, rejecting
+    a bool or bool array, a complex or non-numeric value, and any NaN or
+    infinity, all with this module's ordinary ValueError contract.
+
+    Shared by every public equation-of-state evaluator, so that the Fermi
+    gas and the polytrope reject the same bad inputs in the same way
+    (the polytrope's evaluators had been left without the checks the
+    Fermi gas received earlier).  The sign check is left to each caller
+    because what a negative value means differs (a relativity parameter
+    versus a density).
+    """
+    # Fast path for a plain scalar float (Python float or numpy float64,
+    # neither of which is a bool): the structure integrators call the
+    # equation-of-state evaluators several times per Runge-Kutta stage with
+    # exactly such scalars, and the general path below costs several array
+    # constructions per call.  The result is identical to the general path.
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"{name} must be finite; got {value!r}.")
+        return np.asarray(value, dtype=float)
+    if isinstance(value, bool) or (isinstance(value, np.generic)
+                                   and value.dtype == np.bool_):
+        raise ValueError(
+            f"{name} must be a real number (or array of real numbers), not "
+            f"a bool; got {value!r}."
+        )
+    bare = np.asarray(value)
+    if bare.dtype == np.bool_:
+        raise ValueError(
+            f"{name} must be a real number (or array of real numbers), not "
+            f"a bool array; got {value!r}."
+        )
+    if bare.dtype.kind == "c":
+        # Converting a complex array with dtype=float would silently drop
+        # the imaginary part (with only a ComplexWarning) instead of
+        # refusing it.
+        raise ValueError(
+            f"{name} must be a real finite number or array of real finite "
+            f"numbers; got {value!r}."
+        )
+    try:
+        arr = np.asarray(value, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a real finite number or array of real finite "
+            f"numbers; got {value!r}."
+        ) from exc
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must be finite; got {value!r}.")
+    return arr
+
+
+def _require_nonneg_density(name, rho):
+    """
+    Validate a rest-mass density for a public PolytropeEOS evaluator:
+    real, finite, not a bool, and >= 0 (rho = 0 is the legitimate
+    zero-density limit, where the pressure and sound speed vanish).
+    Returns a float64 ndarray, 0-d for a scalar input.
+    """
+    # Scalar fast path (see _real_finite_array): NaN fails ">= 0.0" and is
+    # sent to the general path, which rejects it with the usual message.
+    if isinstance(rho, float) and 0.0 <= rho < math.inf:
+        return np.asarray(rho, dtype=float)
+    arr = _real_finite_array(name, rho)
+    if np.any(arr < 0.0):
+        raise ValueError(
+            f"{name} is a rest-mass density and must be >= 0; got {rho!r}."
+        )
+    return arr
+
+
 def _require_nonneg_x(name, x):
     """
     Validate the Fermi-gas relativity parameter x = p_F/(m c), which is
@@ -1205,26 +1278,7 @@ def _require_nonneg_x(name, x):
     caught and re-raised as a ValueError so every rejection from this
     validator looks the same to a caller.
     """
-    if isinstance(x, bool) or (isinstance(x, np.generic) and x.dtype == np.bool_):
-        raise ValueError(
-            f"{name} must be a real number (or array of real numbers), not "
-            f"a bool; got {x!r}."
-        )
-    bare = np.asarray(x)
-    if bare.dtype == np.bool_:
-        raise ValueError(
-            f"{name} must be a real number (or array of real numbers), not "
-            f"a bool array; got {x!r}."
-        )
-    try:
-        arr = np.asarray(x, dtype=float)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"{name} must be a real finite number or array of real finite "
-            f"numbers; got {x!r}."
-        ) from exc
-    if not np.all(np.isfinite(arr)):
-        raise ValueError(f"{name} must be finite; got {x!r}.")
+    arr = _real_finite_array(name, x)
     if np.any(arr < 0.0):
         raise ValueError(
             f"{name} is the Fermi-gas relativity parameter x = p_F/(m c), "
@@ -1400,18 +1454,27 @@ class PolytropeEOS:
             self.K = self.p_nuc * RHO_NUCLEAR * c**2 / RHO_NUCLEAR ** self.gamma
         self.mass_per_particle = m_n
 
+    # Every public evaluator validates its density argument with the same
+    # contract as FermiGasEOS (Audit21 Codex A21-P3-01 / Grok A21-P3-6): a
+    # negative density used to return NaN with a RuntimeWarning, and a bool
+    # was silently read as 0.0 or 1.0.  Nothing inside this module ever
+    # passes a negative density (the structure integrator floors its
+    # intermediate stages at 1e-30 and treats any evaluator failure as a
+    # failed model), so the integrations are unchanged.
     def pressure(self, rho):
-        return self.K * np.asarray(rho, dtype=float) ** self.gamma
+        rho = _require_nonneg_density("rho", rho)
+        return self.K * rho ** self.gamma
 
     def dP_dx(self, rho):
-        return self.K * self.gamma * np.asarray(rho, dtype=float) ** (self.gamma - 1.0)
+        rho = _require_nonneg_density("rho", rho)
+        return self.K * self.gamma * rho ** (self.gamma - 1.0)
 
     def rest_mass_density(self, rho):
-        return np.asarray(rho, dtype=float)
+        return _require_nonneg_density("rho", rho)
 
     def mass_energy_density(self, rho):
-        rho = np.asarray(rho, dtype=float)
-        return rho + self.pressure(rho) / ((self.gamma - 1.0) * c**2)
+        rho = _require_nonneg_density("rho", rho)
+        return rho + (self.K * rho ** self.gamma) / ((self.gamma - 1.0) * c**2)
 
     def sound_speed_ratio(self, rho):
         """
@@ -1423,7 +1486,7 @@ class PolytropeEOS:
         so a sufficiently stiff polytrope becomes acausal (c_s > c) above
         some density.  Checking where that happens is one of the exercises.
         """
-        rho = np.asarray(rho, dtype=float)
+        rho = _require_nonneg_density("rho", rho)
         dPdrho = self.gamma * self.K * rho ** (self.gamma - 1.0)
         depsdrho = c**2 + dPdrho / (self.gamma - 1.0)
         return np.sqrt(dPdrho / depsdrho)
@@ -1620,7 +1683,16 @@ def check_mu_e(mu_e):
 
 
 def chandrasekhar_mass(mu_e):
-    """The Chandrasekhar limit, M_Ch = 5.836 mu_e^-2 solar masses."""
+    """
+    The Chandrasekhar limit, M_Ch = 5.836 mu_e^-2 solar masses.
+
+    mu_e goes through check_mu_e(), so a zero, negative, non-finite or
+    non-physical value is refused with a clear ValueError instead of
+    leaking a ZeroDivisionError or returning a positive mass for a
+    negative mu_e.  The accepted range is that of the rest of the
+    white-dwarf code, 1 <= mu_e <= 3.
+    """
+    mu_e = check_mu_e(mu_e)
     return 5.836 / mu_e**2
 
 
@@ -2004,7 +2076,14 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     The turning point of M(rho_c) marks the onset of radial instability
     for cold, non-rotating, one-parameter equilibrium sequences of this
     kind.  It is reported only when the sequence actually turns over
-    within the sampled range, and only for the TOV equations.
+    within the sampled range, and only for the TOV equations: the stability
+    criterion is a result of general relativity, so for a Newtonian
+    sequence ``turning_point`` is always False and ``M_max`` (the name is
+    kept for API stability) is only the largest sampled mass.  A Newtonian
+    sequence can show an interior peak of M(rho_c) in a regime where
+    Newtonian gravity has already failed (GM/Rc^2 > 1/2), and in that
+    regime the position and height of the peak move with the integration
+    step, so it is not a physical maximum.
     """
     n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
     relativistic = _require_bool("relativistic", relativistic)
@@ -2103,8 +2182,48 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     # as a resolved turning point.
     interior = bool(gi[0] < i_max < gi[-1])
     neighbors_converged = (interior and good[i_max - 1] and good[i_max + 1])
-    turning_point = bool(interior and neighbors_converged)
-    if not turning_point:
+    # The turning-point stability criterion belongs to general relativity.
+    # A Newtonian sequence never has one, however its sampled masses happen
+    # to be ordered (Audit21 Codex A21-P2-02: an extreme Newtonian
+    # neutron-gas sequence used to be reported as having a "Maximum mass"
+    # whose value and central density moved by orders of magnitude with the
+    # integration step).
+    turning_point = bool(relativistic and interior and neighbors_converged)
+    if not turning_point and not relativistic:
+        if i_max >= gi[-1]:
+            where = ("the mass is still rising at the highest central "
+                     "density sampled")
+            advice = ("A Newtonian sequence has no turning-point criterion "
+                      "(that is a result of general relativity), so raising "
+                      "--rho_hi will not find one.")
+        elif i_max <= gi[0]:
+            where = ("the largest sampled mass is the one at the lowest "
+                     "central density sampled")
+            advice = ("A Newtonian sequence has no turning-point criterion "
+                      "(that is a result of general relativity), so lowering "
+                      "--rho_lo will not find one, and this is not a maximum "
+                      "mass.")
+        else:
+            where = ("the largest sampled mass lies inside the sampled "
+                     "range of central densities")
+            advice = ("A Newtonian sequence has no turning-point criterion "
+                      "(that is a result of general relativity), so this is "
+                      "not a maximum mass.  At densities where Newtonian "
+                      "gravity has failed, the position and height of such "
+                      "a peak can change with --step_frac and --n_mr.")
+        note = (f"{where}, so no turning point was reported.  The value "
+                "shown is the largest sampled mass, not a maximum mass, and "
+                f"no model in this sequence has been shown to be unstable.  "
+                f"{advice}")
+        n_inside = int(np.sum(compact[good] > 0.5))
+        if n_inside:
+            note += (f"  {n_inside} of the {int(good.sum())} sampled models "
+                     "have GM/Rc^2 > 1/2, that is, a radius smaller than the "
+                     "Schwarzschild radius 2GM/c^2 of their own mass, which "
+                     "Newtonian gravity has no way to recognise as "
+                     "impossible.")
+        warnings.append(note)
+    elif not turning_point:
         if i_max >= gi[-1]:
             warnings.append(
                 "the mass is still rising at the highest central density "
