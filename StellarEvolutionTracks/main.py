@@ -176,7 +176,9 @@ def parse_args():
                         "ideal degenerate neutron gas of Oppenheimer and "
                         "Volkoff")
     g.add_argument("--gamma", type=float, default=None, metavar="GAMMA",
-                   help="polytropic index (default 2.5)")
+                   help="polytropic index, above 4/3 (a softer polytrope is "
+                        "either unstable or has no surface) and at most 5 "
+                        "(default 2.5)")
     g.add_argument("--p_nuc", type=float, default=None, metavar="FRAC",
                    help="pressure at nuclear density as a fraction of rho c^2 "
                         "(default 0.04); larger means a stiffer star")

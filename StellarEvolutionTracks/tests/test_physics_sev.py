@@ -596,6 +596,91 @@ plot_sev.py docstrings or output):
         and the white-dwarf structure solves in the experiment checks).
         With a second Help file beside it the count is 275
         (TestHelpFileBeatsVariant adds the 24 TestHelpFile tests).
+
+  2026-09-19  Claude (principal developer).  Response to Audit22 (Codex,
+    Grok, Copilot reviewing the Response-to-Audit21 package).  Version
+    1.6.0 -> 1.7.0 (MINOR: public behaviour changes -- a constant, a
+    refused input range, new refusals), BUILD_ID b57e37aa8a99 -> a28c8d1a30e0.
+    Full disposition of every finding is in
+    StellarEvolutionTracks-Claude-Response-to-Audit22-20260919.txt; this
+    entry lists only what changed in the source tree.
+      * ERRATUM to the Audit21 entry above: it says the turning-point
+        "stability criterion is a result of general relativity".  That is
+        false (Newtonian stars have radial-stability criteria; a polytrope
+        is stable for Gamma > 4/3) and Codex A22-P2-03 was right to say so.
+        What is true, and what the code and the Help now say, is that this
+        program applies its turning-point test only to TOV sequences and
+        does not classify the stability of a Newtonian one.
+      * physics_sev: the Chandrasekhar coefficient was typed in as 5.836.
+        The exact electron-gas structure integration in this same module
+        converges to 1.4563 Msun for mu_e = 2, and the n = 3 Lane-Emden
+        derivation gives 5.8252/mu_e^2 = 1.4563, so the typed constant was
+        0.18 per cent high.  It is now derived from the Lane-Emden mass
+        2.01824 and the module's constants (CHANDRASEKHAR_MASS_MU1).  Found
+        while answering Codex A22-P3-04 (the independent-oracle layer); no
+        reviewer had noticed it, and every Help number and test that
+        quoted 1.459, 5.836 or 5.736 moved with it.
+      * physics_sev.PolytropeEOS: the index must lie in (4/3, 5]
+        (Codex A22-P2-02, P2-03).  At or below 6/5 the polytrope has no
+        finite surface and the reported radius is set by the y_floor
+        cutoff; at or below 4/3 it has no radially stable star, and the
+        Newtonian mass falls with central density.  Codex asked for 6/5;
+        4/3 is stronger and was chosen because there is no stable star at
+        any central density below it (in TOV as in Newtonian gravity the
+        mass falls from the first model of the sequence, measured for
+        1.3 and 1.33), so the turning-point rule, which assumes a stable
+        low-density end, has nothing to find.  Between 4/3 and 1.4 the
+        radius converges slowly with the cutoff, and a run says so.
+      * physics_sev: bools are refused by every scalar numeric parameter
+        (_require_finite), inside mixed lists ([True, 1.0]), by
+        mestel_constant (which validated nothing), by turnoff_mass and by
+        the FermiGasEOS constructor (Codex A22-P3-01, Grok A22-P3-1).  The
+        last three were found by the table-driven matrix that this round
+        added, not by the reviewers.
+      * physics_sev.mestel_constant / integrate_wd_cooling and the wdcool
+        summary: the boundary composition is stated (envelope material) and
+        its consequence (a factor of 14 in C, 79.8 Gyr instead of 5.62 for
+        the default) is documented (Codex A22-P2-01).  No behaviour change.
+      * driver_sev.run(): m_observed is validated in every mode (Codex
+        A22-P3-02).
+      * Help: see the Response for the itemised list; every finding was
+        accepted except that the boundary composition of the Mestel model
+        was kept as envelope material and documented, not changed.
+      * Tests: 251 -> 309 (58 new, none removed or weakened).  New classes:
+        TestScientificOracles (9: Lane-Emden solved independently; the
+        Chandrasekhar coefficient derived from it; the program's own
+        structure solver converging to it; Sirius B; Mestel exponents;
+        Mestel K1; envelope-only composition dependence; an independent
+        cooling age; the size of the boundary choice), TestPolytropeDomain
+        (11: the refused range, the accepted edge, the Newtonian mass
+        exponent and its sign change at 4/3, the y_floor tables at 1.1,
+        1.2, 1.21 and the 2.5 control, convergence above 4/3, the warning,
+        the default cutoff by result, the Lane-Emden scaling laws and
+        the exact n = 1 solution),
+        TestBooleanRefusalMatrix (5: 45 entry points, 408 bool cases),
+        TestDriverObservedMass (4), TestRegimeTransitions (6),
+        TestTovStepConvergence (3: the TOV star and the white dwarf at second
+        order, and what halving the step does to the quoted white-dwarf
+        models), TestHelpEquationClassification (3),
+        TestHelpClaimsAgreeAcrossLayers (12), TestBuildIdentityCoverage
+        (1), TestPerformanceGuardrails (3), TestExerciseArtifactsExist
+        (1).  Changed existing tests, each with its reason in place: the
+        quoted limits and shortfalls (1.459 -> 1.456, 5.836 -> 5.825,
+        5.736 -> 5.726, 0.56/0.26 -> 0.38/0.08 per cent) follow the
+        corrected constant; three white-dwarf tests (the near-limit
+        structure test and two bracket-failure tests) use 1.454 instead of
+        1.455 (0.9985 of the derived limit; 1.455 is above the 0.999
+        cutoff); the horizon test uses Gamma = 1.4 because the old
+        Gamma = 1.01 is no longer constructible; the Newtonian-note tests
+        assert the corrected wording; test_gamma_out_of_range_rejected and
+        the chandrasekhar_mass bad-input list gain the values that used to
+        pass.  Running time with one Help file, measured in the
+        environment that produced this round: 309 s for these 309 tests
+        (233 s for the 251 of the previous round).  Run alone,
+        TestScientificOracles takes about 27 s and
+        TestHelpClaimsAgreeAcrossLayers about 30 s.  With a second Help
+        file beside it the count would be 333 (TestHelpFileBeatsVariant
+        adds the 24 TestHelpFile tests).
 """
 
 import ast
@@ -920,7 +1005,7 @@ class TestModuleDiscovery(unittest.TestCase):
                 "import sys\n"
                 "sys.path.insert(0, '.')\n"
                 "import physics_sev as p\n"
-                "assert p.chandrasekhar_mass(2.0) == 1.459\n"
+                "assert abs(p.chandrasekhar_mass(2.0) - 1.4563) < 1e-4\n"
                 "print('FLAT_SMOKE_OK')\n",
                 encoding="utf-8",
             )
@@ -1906,7 +1991,10 @@ class TestStructureIntegration(unittest.TestCase):
         # TOV metric non-positive on the very first derivs() call (k1,
         # before any RK4 stage has been taken) -- exactly the call that
         # used to sit outside the try/except.
-        eos = phys.PolytropeEOS(p_nuc=0.999999, gamma=1.01)
+        # (Gamma = 1.4: the polytrope must have a stable star and a finite
+        # radius to be constructible at all; the horizon failure does not
+        # depend on the index.  This used Gamma = 1.01.)
+        eos = phys.PolytropeEOS(p_nuc=0.999999, gamma=1.4)
         x_c = eos.x_from_density(1.0e21)
         with self.assertRaisesRegex(RuntimeError, "structure integration failed"):
             phys.integrate_structure(eos, x_c, relativistic=True,
@@ -1921,7 +2009,11 @@ class TestPolytropeEos(unittest.TestCase):
                                 places=6)
 
     def test_gamma_out_of_range_rejected(self):
-        for bad in (1.0, 5.1, math.nan):
+        # The range is (4/3, 5]: 1.0 (Lane-Emden n = infinity), 1.2 and
+        # 4/3 itself (see TestPolytropeDomain for what goes wrong there),
+        # anything above 5, NaN, infinity and the booleans.
+        for bad in (1.0, 1.2, 4.0 / 3.0, 5.1, math.nan, math.inf, True,
+                    False):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     phys.PolytropeEOS(gamma=bad)
@@ -2019,8 +2111,10 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         self.assertEqual(phys.check_mu_e(2.0), 2.0)
 
     def test_chandrasekhar_mass_scaling(self):
-        # Analytic scaling M_Ch ~ mu_e^-2, and the standard headline value.
-        self.assertAlmostEqual(phys.chandrasekhar_mass(2.0), 1.459, places=3)
+        # Analytic scaling M_Ch ~ mu_e^-2, and the headline value 1.456
+        # (the independent derivation of the constant from the n = 3
+        # Lane-Emden polytrope is in TestScientificOracles).
+        self.assertAlmostEqual(phys.chandrasekhar_mass(2.0), 1.4563, places=4)
         m1 = phys.chandrasekhar_mass(1.0)
         m2 = phys.chandrasekhar_mass(2.0)
         self.assertAlmostEqual(m1 / m2, 4.0, places=6)
@@ -2031,8 +2125,10 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         # check_mu_e(), so mu_e = 0 raised a raw ZeroDivisionError and
         # mu_e = 0.5 or 4 returned a "limiting mass" for matter that cannot
         # exist.  It now refuses exactly what check_mu_e() refuses.
+        # True and False are refused too (float(True) is 1.0, a legal mu_e:
+        # chandrasekhar_mass(True) used to return the mu_e = 1 limit).
         for bad in (0.0, -1.0, math.nan, math.inf, 0.5, 0.999, 3.5, None,
-                    1 + 0j, "abc"):
+                    1 + 0j, "abc", True, False, np.True_):
             with self.subTest(mu_e=bad):
                 with self.assertRaises(ValueError):
                     phys.chandrasekhar_mass(bad)
@@ -2040,10 +2136,11 @@ class TestWhiteDwarfStructure(unittest.TestCase):
                     phys.check_mu_e(bad)
         for good in (1.0, 1.00866, 2.0, 2.15, 3.0):
             with self.subTest(mu_e=good):
-                self.assertAlmostEqual(phys.chandrasekhar_mass(good),
-                                       5.836 / good ** 2, places=9)
+                self.assertAlmostEqual(
+                    phys.chandrasekhar_mass(good),
+                    phys.CHANDRASEKHAR_MASS_MU1 / good ** 2, places=9)
         self.assertAlmostEqual(phys.chandrasekhar_mass(np.float64(2.0)),
-                               1.459, places=9)
+                               phys.CHANDRASEKHAR_MASS_MU1 / 4.0, places=9)
 
     def test_default_white_dwarf_reproduces_documented_structure(self):
         rho_c, M_kg, R_m = phys.wd_structure(0.6, mu_e=2.0)
@@ -2055,15 +2152,18 @@ class TestWhiteDwarfStructure(unittest.TestCase):
             phys.wd_structure(1.6, mu_e=2.0)
 
     def test_mass_close_to_chandrasekhar_limit_widens_bracket_and_succeeds(self):
-        # Regression test for the Audit1 P2-1 fix: 1.455 Msun (mu_e=2, so
-        # M_Ch = 1.459 Msun) is below the default bisection bracket's reach
+        # Regression test for the Audit1 P2-1 fix: 1.454 Msun (mu_e=2, so
+        # M_Ch = 1.456 Msun and 1.454 is 0.9985 of it, below the 0.999
+        # cutoff; this test used 1.455 while the limit was typed in as
+        # 1.459, and 1.455 is above 0.999 of the derived 1.4563) is below
+        # the default bisection bracket's reach
         # at rho_c in [1e7, 1e13] kg/m^3 -- the old code raised RuntimeError
         # here even though the mass is well inside the allowed range (below
         # the hard 0.999*M_Ch cutoff).  wd_structure must now widen the
         # bracket automatically and return a converged, physically sensible
         # (very compact, very dense) white dwarf instead of failing.
-        rho_c, M_kg, R_m = phys.wd_structure(1.455, mu_e=2.0)
-        self.assertAlmostEqual(M_kg / phys.M_sun, 1.455, delta=1e-3)
+        rho_c, M_kg, R_m = phys.wd_structure(1.454, mu_e=2.0)
+        self.assertAlmostEqual(M_kg / phys.M_sun, 1.454, delta=1e-3)
         self.assertGreater(rho_c, 1.0e13)          # outside the old default bracket
         self.assertLess(R_m, 5.0e5)                # much smaller than a 0.6 Msun WD
 
@@ -2086,8 +2186,11 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         # clear, documented RuntimeError, never crash or hang -- the
         # adaptive search is a convenience, not a way to silently hide a
         # bracket that truly cannot be found.
+        # (1.454 Msun: above the default bracket's reach and below 0.999 of
+        # the derived limit 1.4563.  This used 1.455, which is above 0.999
+        # of the derived limit and is now refused before any bracketing.)
         with self.assertRaisesRegex(RuntimeError, "bracket"):
-            phys.wd_structure(1.455, mu_e=2.0, max_bracket_expansions=0)
+            phys.wd_structure(1.454, mu_e=2.0, max_bracket_expansions=0)
 
     def test_mass_too_close_to_chandrasekhar_limit_rejected_outright(self):
         # Above the hard 0.999*M_Ch cutoff: rejected before any bisection
@@ -2114,11 +2217,12 @@ class TestWhiteDwarfStructure(unittest.TestCase):
         # The opposite direction: even the HIGHEST central density tried
         # still falls short, so the requested mass really is too close to
         # the Chandrasekhar limit and the advice must point to a SMALLER
-        # mass.  1.455 Msun is above the default bracket's high-density
-        # reach (about 1.433 Msun) with widening disabled.
+        # mass.  1.454 Msun is above the default bracket's high-density
+        # reach (about 1.433 Msun) with widening disabled (this used 1.455,
+        # which the derived limit 1.4563 now refuses outright).
         with self.assertRaisesRegex(RuntimeError, "too close to the "
                                     "Chandrasekhar limit") as ctx:
-            phys.wd_structure(1.455, mu_e=2.0, max_bracket_expansions=0)
+            phys.wd_structure(1.454, mu_e=2.0, max_bracket_expansions=0)
         msg = str(ctx.exception)
         self.assertIn("smaller mass", msg)
         self.assertNotIn("larger mass", msg)
@@ -2370,12 +2474,17 @@ class TestNeutronStarSequence(unittest.TestCase):
         # 24-point 1e17-1e24 sequence peaks at its 20th model.  The old
         # code required only "interior and both neighbours converged", so
         # it reported turning_point=True, a "Maximum mass" and a stable
-        # branch for a sequence that has no turning-point criterion at all
-        # (the criterion is a result of general relativity).  The peak is
-        # also a numerical artifact: it sits above the analytic Newtonian
-        # limit 5.836/mu_e^2 = 5.736 Msun, which converged models approach
-        # only from below, and its position and height move with
-        # --step_frac.  Nothing about that should be reported as physics.
+        # branch for a Newtonian sequence.  The peak is a numerical
+        # artifact: it sits above the analytic Newtonian limit
+        # 5.825/mu_e^2 = 5.726 Msun, which converged models approach only
+        # from below, and its position and height move with --step_frac.
+        # Nothing about that should be reported as physics.  (The first
+        # version of this fix also called the criterion "a result of
+        # general relativity", which is wrong -- Newtonian stars have
+        # stability criteria of their own, e.g. Gamma > 4/3 for a
+        # polytrope -- so the note now says only that the program applies
+        # its turning-point test to TOV sequences and does not classify a
+        # Newtonian one; the assertions below were reworded to match.)
         result = phys.ns_mass_radius_curve(
             eos_name="neutron", n=24, rho_lo=1.0e17, rho_hi=1.0e24,
             relativistic=False, step_frac=0.01)
@@ -2388,7 +2497,10 @@ class TestNeutronStarSequence(unittest.TestCase):
         self.assertFalse(s["stable_branch"])
         text = " ".join(s["warnings"])
         self.assertIn("not a maximum mass", text)
-        self.assertIn("no turning-point criterion", text)
+        self.assertIn("does not classify the radial stability of a "
+                      "Newtonian one", text)
+        self.assertNotIn("result of general relativity", text)
+        self.assertNotIn("no turning-point criterion", text)
         self.assertIn("--step_frac", text)
         self.assertIn("Schwarzschild", text)
 
@@ -2457,7 +2569,7 @@ class TestNeutronStarSequence(unittest.TestCase):
         self.assertFalse(s["turning_point"])
         text = " ".join(s["warnings"])
         self.assertIn("at the lowest central density sampled", text)
-        self.assertIn("lowering --rho_lo will not find one", text)
+        self.assertIn("Lowering --rho_lo will not find a turning point", text)
         self.assertNotIn("lies inside the sampled range", text)
         self.assertNotIn("Newtonian gravity has failed", text)
         self.assertNotIn("GM/Rc^2 > 1/2", text)
@@ -2471,7 +2583,13 @@ class TestNeutronStarSequence(unittest.TestCase):
             relativistic=False)["summary"]
         text = " ".join(newtonian["warnings"])
         self.assertIn("still rising", text)
-        self.assertIn("raising --rho_hi will not find one", text)
+        # "will not find a turning point", not the ambiguous "will not find
+        # one": Beat 10's next command raises --rho_hi and the largest
+        # sampled mass DOES grow (3.54 -> 5.09), so the note has to say what
+        # it is that will not be found, and what raising it does do.
+        self.assertIn("Raising --rho_hi will not find a turning point", text)
+        self.assertIn("more massive models at ever larger GM/Rc^2", text)
+        self.assertNotIn("will not find one", text)
         self.assertNotIn("Raise --rho_hi", text)
         tov = phys.ns_mass_radius_curve(
             eos_name="neutron", n=12, rho_lo=1.0e17, rho_hi=3.0e18)["summary"]
@@ -2479,12 +2597,12 @@ class TestNeutronStarSequence(unittest.TestCase):
         self.assertTrue(any("Raise --rho_hi" in w for w in tov["warnings"]))
 
     def test_analytic_newtonian_limit_bounds_the_converged_sequence(self):
-        # The Newtonian neutron gas approaches M = 5.836/mu_e^2 (mu_e =
-        # m_n/m_u = 1.00866, i.e. 5.736 Msun) only as rho_c -> infinity.
+        # The Newtonian neutron gas approaches M = 5.825/mu_e^2 (mu_e =
+        # m_n/m_u = 1.00866, i.e. 5.726 Msun) only as rho_c -> infinity.
         # Converged models lie below it: a sampled mass above it is a
         # step-size artifact, which is why no maximum is ever reported.
         limit = phys.chandrasekhar_mass(1.00866)
-        self.assertAlmostEqual(limit, 5.736, places=3)
+        self.assertAlmostEqual(limit, 5.7256, places=3)
         result = phys.ns_mass_radius_curve(
             eos_name="neutron", n=16, rho_lo=1.0e17, rho_hi=1.0e21,
             relativistic=False)
@@ -3831,7 +3949,7 @@ HELP_PROGRAM_CHECKS = [
         ("main-sequence lifetime, quoted 45 Gyr", "MS lifetime : 45.05 Gyr", "spends 45 Gyr")]),
     ("6", "--mode wdcool --wd_mass 0.6", [
         ("radius, quoted 8841", "8840.9 km", "8841 km (1.388 Earth radii)"),
-        ("Chandrasekhar limit", "1.4590 Msun", "1.459 solar masses")]),
+        ("Chandrasekhar limit", "1.4563 Msun", "1.456 solar masses")]),
     ("6", "--mode wdcool --wd_mass 1.2", [
         ("radius, quoted 4165", "4164.9 km", "4165 km (0.654)"),
         ("in Earth radii", "0.654 Earth radii", None)]),
@@ -3841,7 +3959,7 @@ HELP_PROGRAM_CHECKS = [
     ("6", "--mode wdcool --wd_mass 0.6 --mu_e 1.0", [
         ("radius, quoted 32,637", "32637.2 km", "32,637 km, 5.12 Earth radii"),
         ("in Earth radii, quoted 5.12", "5.123 Earth radii", None),
-        ("limiting mass", "5.8360 Msun", "5.836 solar masses")]),
+        ("limiting mass", "5.8252 Msun", "5.825 solar masses")]),
     ("7", "--mode wdcool --wd_mass 0.6", [
         ("surface temperature, start and end", "25254 K  ->  3368 K",
          "25,254 K to 3,368 K"),
@@ -3999,7 +4117,7 @@ class TestHelpQuotedNumbers(unittest.TestCase):
                          "commands a beat tells the student to run that "
                          "have no row in HELP_PROGRAM_CHECKS")
         # Beat 6 quotes the mu_e = 1 white dwarf (32,637 km, 5.12 Earth
-        # radii, 5.836 solar masses) in prose, as a flag to add to the
+        # radii, 5.825 solar masses) in prose, as a flag to add to the
         # command it has just shown, not as a command of its own.
         described_in_prose = {
             ("--mode", "wdcool", "--wd_mass", "0.6", "--mu_e", "1.0")}
@@ -4050,10 +4168,13 @@ class TestHelpQuotedNumbers(unittest.TestCase):
     def test_white_dwarf_limit_shortfalls_quoted_in_the_equations_beat(self):
         # Audit21 Grok A21-P3-4(e): "reproduces that limit to about 0.3 per
         # cent with the default step size" was not what the default curve
-        # does (its top model is 0.56 per cent below the limit).  The page
-        # now quotes two specific shortfalls; both are the program's.
+        # does.  The page quotes two specific shortfalls; both are the
+        # program's.  They are measured from the DERIVED limit 1.4563
+        # (0.38 and 0.08 per cent); they were 0.56 and 0.26 per cent from
+        # the typed-in 1.459, which is not the mass this equation of state
+        # converges to (see TestScientificOracles).
         limit = phys.chandrasekhar_mass(2.0)
-        for rho_c, quoted in ((1.0e14, "0.56"), (1.0e15, "0.26")):
+        for rho_c, quoted in ((1.0e14, "0.38"), (1.0e15, "0.08")):
             with self.subTest(rho_c=rho_c):
                 _, mass, _ = phys.wd_mass_radius_curve(
                     n=3, rho_lo=rho_c / 100.0, rho_hi=rho_c)
@@ -4062,6 +4183,8 @@ class TestHelpQuotedNumbers(unittest.TestCase):
                 self.assertIn(f"{quoted} per cent below", self.page)
         self.assertNotIn("to about 0.3 per cent with the default step size",
                          self.page)
+        self.assertNotIn("0.56 per cent below", self.page)
+        self.assertNotIn("0.26 per cent below", self.page)
 
     def test_hayashi_relation_is_the_unclipped_power_law_the_page_describes(self):
         # Audit21 Codex A21-P3-03 / Grok A21-P3-1: the displayed fit used to
@@ -4167,7 +4290,8 @@ class TestHelpQuotedNumbers(unittest.TestCase):
         self.assertIn("within about 0.3 per cent over", text)
         for mu in (1.0, 1.5, 2.0, 2.15):
             self.assertAlmostEqual(
-                phys.chandrasekhar_mass(mu) * mu ** 2, 5.836, places=9)
+                phys.chandrasekhar_mass(mu) * mu ** 2,
+                phys.CHANDRASEKHAR_MASS_MU1, places=9)
 
     def test_exp13_newtonian_versus_tov_numbers(self):
         text = self.experiment_text(13)
@@ -4422,6 +4546,1332 @@ class TestHelpQuotedNumbers(unittest.TestCase):
         self.assertIn("A_ion sets the ionic heat capacity", printed)
         self.assertIn("together set the cooling clock", printed)
         self.assertIn("the coefficient and the ionic heat content", self.page)
+
+
+
+# ======================================================================
+# Independent scientific oracles (Audit22)
+#
+# The classes above check the program against itself: a documented number
+# is reproduced, a helper agrees with a re-implementation of the same
+# formula, a Help figure is one the program prints.  A wrong physical
+# assumption or a wrong typed-in constant passes all of that, and one did
+# (the Chandrasekhar coefficient was typed in as 5.836, 0.18 per cent above
+# the value the program's own electron equation of state converges to; the
+# Help's numbers and the tests inherited it).  The checks below take their
+# expected values from somewhere else: a separate solution of the
+# Lane-Emden equation, exact solutions, scaling laws that follow from the
+# equations rather than from the code, and an observed white dwarf.
+# ======================================================================
+
+# CODATA 2022 / IAU 2015 values written out here on purpose, so that the
+# tests do not read their constants back from the module they test.
+ORACLE_HBAR = 1.054571817e-34          # J s
+ORACLE_C = 299792458.0                 # m s^-1
+ORACLE_G = 6.67430e-11                 # m^3 kg^-1 s^-2
+ORACLE_M_U = 1.66053906892e-27         # kg
+ORACLE_M_SUN = 1.3271244e20 / 6.67430e-11   # kg (nominal GM_sun / G)
+
+
+def lane_emden_surface(n, h=1.0e-3):
+    """Solve theta'' + (2/xi) theta' + theta^n = 0 to its first zero.
+
+    Returns (xi_1, -xi_1^2 theta'(xi_1)): the dimensionless radius and
+    mass.  A small fixed-step RK4 written here, independent of the
+    program's integrator, which is the point.
+    """
+    def slope(xi, theta, phi):
+        return phi, -max(theta, 0.0) ** n - 2.0 * phi / xi
+
+    xi, theta, phi = 1.0e-6, 1.0 - 1.0e-12 / 6.0, -1.0e-6 / 3.0
+    while True:
+        k1 = slope(xi, theta, phi)
+        k2 = slope(xi + h / 2, theta + h / 2 * k1[0], phi + h / 2 * k1[1])
+        k3 = slope(xi + h / 2, theta + h / 2 * k2[0], phi + h / 2 * k2[1])
+        k4 = slope(xi + h, theta + h * k3[0], phi + h * k3[1])
+        theta_next = theta + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0])
+        phi_next = phi + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1])
+        if theta_next <= 0.0:
+            frac = theta / (theta - theta_next)
+            xi_1 = xi + frac * h
+            phi_1 = phi + frac * (phi_next - phi)
+            return xi_1, -xi_1 ** 2 * phi_1
+        xi, theta, phi = xi + h, theta_next, phi_next
+
+
+def unchecked_polytrope(gamma, p_nuc=0.04):
+    """A PolytropeEOS with the index check bypassed, for reproduction only.
+
+    PolytropeEOS refuses gamma <= 4/3.  The tests that show WHY it does
+    (the mass falls with central density; the radius follows the surface
+    cutoff) need such an object, so it is built without running __init__,
+    with exactly the constructor's own definition of K and of the
+    particle mass.
+    """
+    eos = phys.PolytropeEOS.__new__(phys.PolytropeEOS)
+    eos.gamma = gamma
+    eos.p_nuc = p_nuc
+    eos.K = (p_nuc * phys.RHO_NUCLEAR * phys.c ** 2
+             / phys.RHO_NUCLEAR ** gamma)
+    eos.mass_per_particle = phys.m_n
+    return eos
+
+
+class TestScientificOracles(unittest.TestCase):
+    """Expected values from outside the code under test."""
+
+    def test_lane_emden_solver_reproduces_the_textbook_constants(self):
+        # Calibrates the helper itself: n = 1 has the closed form
+        # (pi, pi), n = 3 has (6.89685, 2.01824).
+        xi, mass = lane_emden_surface(1)
+        self.assertAlmostEqual(xi, math.pi, places=4)
+        self.assertAlmostEqual(mass, math.pi, places=4)
+        xi, mass = lane_emden_surface(3)
+        self.assertAlmostEqual(xi, 6.89685, places=4)
+        self.assertAlmostEqual(mass, 2.01824, places=4)
+
+    def test_chandrasekhar_coefficient_follows_from_the_n3_polytrope(self):
+        # M_Ch = M3 sqrt(3 pi)/2 (hbar c/G)^(3/2) / (mu_e m_u)^2 with M3 the
+        # n = 3 Lane-Emden mass.  This is a derivation from the ultra-
+        # relativistic electron gas, not a lookup: the constant the module
+        # carries must agree with it, and the old typed value 5.836 (0.18
+        # per cent too high) must not come back.
+        _, m3 = lane_emden_surface(3)
+        coefficient = (m3 * math.sqrt(3.0 * math.pi) / 2.0
+                       * (ORACLE_HBAR * ORACLE_C / ORACLE_G) ** 1.5
+                       / ORACLE_M_U ** 2 / ORACLE_M_SUN)
+        self.assertAlmostEqual(coefficient, 5.8252, places=3)
+        self.assertAlmostEqual(phys.CHANDRASEKHAR_MASS_MU1 / coefficient,
+                               1.0, delta=1.0e-4)
+        self.assertGreater(abs(phys.CHANDRASEKHAR_MASS_MU1 - 5.836), 0.005)
+        self.assertAlmostEqual(phys.chandrasekhar_mass(2.0),
+                               coefficient / 4.0, delta=2.0e-4)
+
+    def test_program_structure_solver_converges_to_that_limit(self):
+        # The exact-EOS integration is a separate code path from the
+        # constant.  At high central density the mass approaches the limit
+        # from below like x_c^-2, that is rho_c^(-2/3); with a fine step
+        # a Richardson extrapolation of two decades lands on it.  (At the
+        # default step the top of the range overshoots the limit, as the
+        # Help says for the neutron gas: at rho_c = 1e17 the default-step
+        # mass is 1.4595, above 1.4563.)
+        eos = phys.FermiGasEOS(phys.m_e, 2.0 * phys.m_u)
+        mass = []
+        for rho_c in (1.0e15, 1.0e16):
+            m_kg, _, _ = phys.integrate_structure(
+                eos, eos.x_from_density(rho_c), relativistic=False,
+                r_scale=1.0e7 * (rho_c / 1.0e9) ** (-1.0 / 6.0),
+                step_frac=0.002)
+            mass.append(m_kg / phys.M_sun)
+        limit = mass[1] + (mass[1] - mass[0]) / (10.0 ** (2.0 / 3.0) - 1.0)
+        self.assertAlmostEqual(limit, phys.chandrasekhar_mass(2.0),
+                               delta=2.0e-4)
+        for value in mass:
+            self.assertLess(value, phys.chandrasekhar_mass(2.0))
+
+    def test_sirius_b_is_reproduced_by_the_zero_temperature_model(self):
+        # Observed: M = 1.018 +/- 0.011 solar masses, R = 5634 +/- 34 km
+        # (Bond et al. 2017, ApJ 840, 70: HST astrometry; the radius is
+        # 0.008098 solar radii +/- 0.6 per cent).
+        # A zero-temperature C/O white dwarf, mu_e = 2, has no envelope and
+        # no thermal expansion, so its radius should be a little smaller
+        # than the observed one and inside the same per cent.  The
+        # observed radius must lie inside the band the model gives for the
+        # 1-sigma mass range.
+        radius = {}
+        for mass in (1.007, 1.018, 1.029):
+            _, _, r_m = phys.wd_structure(mass, mu_e=2.0)
+            radius[mass] = r_m / 1.0e3
+        observed = 5634.0
+        self.assertAlmostEqual(radius[1.018], observed,
+                               delta=0.02 * observed)
+        self.assertLess(radius[1.018], observed)
+        self.assertLess(radius[1.029], radius[1.018])
+        self.assertLess(radius[1.018], radius[1.007])
+        self.assertLess(radius[1.029], observed)
+        self.assertGreater(radius[1.007], observed)
+
+    def test_mestel_coefficient_has_the_documented_scaling(self):
+        # C is proportional to mu_env^4, mu_e_env^-5 and kappa0^-1.  The
+        # exponents follow from the derivation in the docstring (the
+        # matching pressure balance and the cube of the bracket), so they
+        # are a test of the formula's structure, not of a stored number.
+        base = phys.mestel_constant(0.6, 1.2, 6.0e18)
+        for factor in (2.0, 3.0, 0.5):
+            with self.subTest(factor=factor):
+                self.assertAlmostEqual(
+                    phys.mestel_constant(0.6 * factor, 1.2, 6.0e18) / base,
+                    factor ** 4, delta=1.0e-12 * factor ** 4)
+                self.assertAlmostEqual(
+                    phys.mestel_constant(0.6, 1.2 * factor, 6.0e18) / base,
+                    factor ** -5, delta=1.0e-12)
+                self.assertAlmostEqual(
+                    phys.mestel_constant(0.6, 1.2, 6.0e18 * factor) / base,
+                    1.0 / factor, delta=1.0e-12)
+
+    def test_mestel_coefficient_uses_the_nonrelativistic_electron_constant(self):
+        # K1 in P = K1 (rho/mu_e)^(5/3) is (1/20)(3/pi)^(2/3) h^2/(m_e
+        # m_u^(5/3)), a textbook derivation from the Fermi gas.  Solving
+        # mestel_constant for K1 must return it, so the K1 the module
+        # carries is checked against physics rather than against itself.
+        h = 2.0 * math.pi * ORACLE_HBAR
+        m_e = 9.1093837139e-31
+        k1_derived = ((1.0 / 20.0) * (3.0 / math.pi) ** (2.0 / 3.0)
+                      * h ** 2 / (m_e * ORACLE_M_U ** (5.0 / 3.0)))
+        mu, mu_e, kappa0 = 0.6, 1.2, 6.0e18
+        prefactor = (32.0 * math.pi * phys.a_rad * ORACLE_C * ORACLE_G
+                     * phys.k_B / (25.5 * kappa0 * mu * ORACLE_M_U))
+        bracket_cubed = phys.mestel_constant(mu, mu_e, kappa0) / prefactor
+        k1_module = (bracket_cubed ** (1.0 / 3.0)
+                     / (mu * ORACLE_M_U / (phys.k_B * mu_e)) ** (5.0 / 3.0))
+        self.assertAlmostEqual(k1_module / k1_derived, 1.0, delta=1.0e-4)
+
+    def test_cooling_summary_coefficient_is_set_by_envelope_material_only(self):
+        # The degeneracy boundary is envelope material: mestel_C is built
+        # from the envelope's mu_env, mu_e_env and kappa0, and the core's
+        # mu_e (which sets only the structure) must not enter it or the
+        # age.  Recomputed here from (X_env, Z_env) alone.
+        results = []
+        for mu_e in (1.6, 2.0):
+            results.append(phys.integrate_wd_cooling(
+                m_msun=0.6, mu_e=mu_e, n_steps=100)["summary"])
+        X_env, Z_env = 0.7, 0.0
+        expected = phys.mestel_constant(
+            phys.mean_molecular_weight(X_env, Z_env),
+            2.0 / (1.0 + X_env),
+            phys.kramers_kappa0(X_env, Z_env))
+        for summary in results:
+            self.assertAlmostEqual(summary["mestel_C"] / expected, 1.0,
+                                   delta=1.0e-12)
+        self.assertNotEqual(results[0]["R_km"], results[1]["R_km"])
+        self.assertAlmostEqual(results[0]["t_end_analytic_gyr"],
+                               results[1]["t_end_analytic_gyr"], delta=1e-9)
+        # A different envelope does change it, through all three factors at
+        # once: a pure-helium envelope has mu_env = 4/3 (C up by
+        # (4/3 / 0.615)^4), mu_e_env = 2 (down by (2/1.176)^-5) and a
+        # smaller kappa0 (up by 6.256/3.68), 2.6 times the hydrogen value
+        # in all.
+        helium = phys.integrate_wd_cooling(
+            m_msun=0.6, mu_e=2.0, X_env=0.0, n_steps=100)["summary"]
+        self.assertAlmostEqual(helium["mu_env"], 4.0 / 3.0, places=12)
+        self.assertEqual(helium["mu_e_env"], 2.0)
+        self.assertAlmostEqual(helium["kappa0"], 3.68e18, delta=1.0e10)
+        self.assertAlmostEqual(
+            helium["mestel_C"] / results[1]["mestel_C"],
+            (helium["mu_env"] / results[1]["mu_env"]) ** 4
+            * (helium["mu_e_env"] / results[1]["mu_e_env"]) ** -5
+            * results[1]["kappa0"] / helium["kappa0"], delta=1.0e-9)
+
+    def test_default_cooling_age_is_reproduced_by_an_independent_evaluation(self):
+        # Every ingredient recomputed from constants written in this file:
+        # C from the envelope, the ionic heat content (3/2)(k/(A m_u)) M
+        # T_c, and the closed-form age.  Agreement with the summary to
+        # 0.1 per cent (constants differ in the seventh figure).
+        X, Z = 0.7, 0.0
+        mu = 1.0 / (2.0 * X + 0.75 * (1.0 - X - Z) + 0.5 * Z)
+        mu_e_env = 2.0 / (1.0 + X)
+        kappa0 = 1.0e-4 * (4.34e25 * Z * (1.0 + X)
+                           + 3.68e22 * (1.0 - Z) * (1.0 + X))
+        h = 2.0 * math.pi * ORACLE_HBAR
+        m_e = 9.1093837139e-31
+        k1 = ((1.0 / 20.0) * (3.0 / math.pi) ** (2.0 / 3.0)
+              * h ** 2 / (m_e * ORACLE_M_U ** (5.0 / 3.0)))
+        k_b = 1.380649e-23
+        a_rad = 7.5657332e-16
+        bracket = k1 * (mu * ORACLE_M_U / (k_b * mu_e_env)) ** (5.0 / 3.0)
+        coefficient = (32.0 * math.pi * a_rad * ORACLE_C * ORACLE_G * k_b
+                       / (25.5 * kappa0 * mu * ORACLE_M_U)) * bracket ** 3
+        heat_per_kg = 1.5 * k_b / (14.0 * ORACLE_M_U)
+        age_s = heat_per_kg / (2.5 * coefficient) * (3.0e6 ** -2.5
+                                                     - 3.0e7 ** -2.5)
+        age_gyr = age_s / (1.0e9 * 365.25 * 86400.0)
+        summary = phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0)["summary"]
+        self.assertAlmostEqual(age_gyr, summary["t_end_analytic_gyr"],
+                               delta=1.0e-3 * age_gyr)
+        self.assertAlmostEqual(age_gyr, 5.62, delta=0.02)
+
+    def test_the_mestel_boundary_choice_matters_by_the_documented_factor(self):
+        # The size of the modelling choice, so that the Help's statement
+        # ("about 14 between mu_e = 1.18 and 2") is a number the code
+        # gives: taking the core's mu_e = 2 for the boundary instead of
+        # the envelope's 2/(1+X) = 1.176 would raise the age by
+        # (2/1.1765)^5 = 14.2, from 5.6 to about 80 Gyr.
+        env = phys.mestel_constant(0.6153846153846154, 2.0 / 1.7, 6.256e18)
+        core = phys.mestel_constant(0.6153846153846154, 2.0, 6.256e18)
+        self.assertAlmostEqual(env / core, (2.0 / (2.0 / 1.7)) ** 5,
+                               delta=1.0e-9 * 14.0)
+        self.assertAlmostEqual(env / core, 14.19857, places=4)
+        age = phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0)[
+            "summary"]["t_end_analytic_gyr"]
+        self.assertAlmostEqual(age * env / core, 79.85, delta=0.01)
+
+
+class TestPolytropeDomain(unittest.TestCase):
+    """The polytrope index range (4/3, 5] and what the cutoff does."""
+
+    def test_indices_at_or_below_four_thirds_are_refused_with_reasons(self):
+        for gamma in (1.1, 1.2, 1.25, 1.3, 4.0 / 3.0):
+            with self.subTest(gamma=gamma):
+                with self.assertRaises(ValueError) as caught:
+                    phys.PolytropeEOS(gamma=gamma)
+                message = str(caught.exception)
+                self.assertIn("(4/3, 5]", message)
+                self.assertIn("radially stable only for Gamma > 4/3",
+                              message)
+                # The finite-radius reason is given only where it applies.
+                if gamma <= 6.0 / 5.0 + 1e-12:
+                    self.assertIn("6/5", message)
+                else:
+                    self.assertNotIn("Lane-Emden", message)
+
+    def test_the_smallest_accepted_indices_and_the_upper_end(self):
+        for gamma in (1.34, 1.4, 2.5, 5.0):
+            with self.subTest(gamma=gamma):
+                self.assertEqual(phys.PolytropeEOS(gamma=gamma).gamma, gamma)
+        with self.assertRaises(ValueError):
+            phys.PolytropeEOS(gamma=5.0000001)
+
+    def test_make_eos_and_the_sequence_route_refuse_soft_indices_too(self):
+        for gamma in (1.2, 4.0 / 3.0):
+            with self.subTest(gamma=gamma):
+                with self.assertRaises(ValueError):
+                    phys.make_eos("polytrope", gamma=gamma)
+                with self.assertRaises(ValueError):
+                    phys.ns_mass_radius_curve(eos_name="polytrope",
+                                              gamma=gamma, n=3)
+
+    def test_the_cli_refuses_a_soft_index_and_says_why(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(SystemExit) as caught:
+                run_main_in_process(["--mode", "nsmr", "--gamma", "1.3",
+                                     "--no_plot", "--csvdir", tmp])
+            self.assertEqual(os.listdir(tmp), [])
+        message = str(caught.exception.code)
+        self.assertIn("(4/3, 5]", message)
+        self.assertIn("radially stable only for Gamma > 4/3", message)
+
+    def test_soft_polytropes_are_the_ones_whose_mass_falls_with_density(self):
+        # Newtonian M is proportional to rho_c^((3 Gamma - 4)/2): rising for
+        # Gamma = 1.5, falling for Gamma = 1.3, which is why the range
+        # ends at 4/3.
+        def mass(eos, rho_c):
+            return phys.integrate_structure(
+                eos, rho_c, relativistic=False,
+                r_scale=1.5e4)[0] / phys.M_sun
+
+        stiff = phys.PolytropeEOS(gamma=1.5)
+        soft = unchecked_polytrope(1.3)
+        stiff_masses = [mass(stiff, rho) for rho in (1e17, 1e18, 1e19)]
+        soft_masses = [mass(soft, rho) for rho in (1e17, 1e18, 1e19)]
+        self.assertLess(stiff_masses[0], stiff_masses[1])
+        self.assertLess(stiff_masses[1], stiff_masses[2])
+        self.assertGreater(soft_masses[0], soft_masses[1])
+        self.assertGreater(soft_masses[1], soft_masses[2])
+        # The exponent (3 Gamma - 4)/2 = -0.05 gives 100^-0.05 = 0.794
+        # per two decades; the cutoff moves it a little.
+        self.assertAlmostEqual(soft_masses[2] / soft_masses[0], 0.794,
+                               delta=0.02)
+
+    def test_the_radius_of_a_polytrope_at_or_below_6_5_follows_the_cutoff(self):
+        # The reproduction behind the 6/5 half of the refusal, numbers as
+        # quoted in the Help (Newtonian, 1e18 kg/m^3, p_nuc = 0.04).
+        def radius_km(gamma, y_floor):
+            eos = (unchecked_polytrope(gamma)
+                   if gamma <= 4.0 / 3.0 else phys.PolytropeEOS(gamma=gamma))
+            return phys.integrate_structure(
+                eos, 1.0e18, relativistic=False, r_scale=1.5e4,
+                y_floor=y_floor)[1] / 1.0e3
+
+        floors = (1e-4, 1e-6, 1e-8, 1e-10)
+        for gamma, expected in ((1.2, (62.45, 158.57, 398.99, 1002.53)),):
+            got = [radius_km(gamma, f) for f in floors]
+            for value, want in zip(got, expected):
+                self.assertAlmostEqual(value, want, delta=0.01 * want)
+            self.assertEqual(got, sorted(got))
+        # Every further two decades of cutoff still grows it by well over
+        # 50 per cent for 1.1, 1.2 and 1.21; a Gamma = 2.5 star does not
+        # care about the cutoff.
+        for gamma in (1.1, 1.2, 1.21):
+            with self.subTest(gamma=gamma):
+                self.assertGreater(radius_km(gamma, 1e-8),
+                                   1.5 * radius_km(gamma, 1e-6))
+        stiff = [radius_km(2.5, f) for f in floors]
+        self.assertAlmostEqual(stiff[0], stiff[-1], delta=1.0e-4 * stiff[0])
+        self.assertAlmostEqual(stiff[0], 20.5, delta=0.05)
+
+    def test_radius_converges_with_the_cutoff_where_the_index_is_accepted(self):
+        def radius(gamma, y_floor):
+            return phys.integrate_structure(
+                phys.PolytropeEOS(gamma=gamma), 1.0e18, relativistic=False,
+                r_scale=1.5e4, y_floor=y_floor)[1]
+
+        # A stiff control converges at once.
+        self.assertAlmostEqual(radius(2.5, 1e-8) / radius(2.5, 1e-10), 1.0,
+                               delta=1.0e-4)
+        # Just above 4/3 it converges slowly and from below: a few tenths
+        # of a per cent per two decades, as the run's note and the Help say.
+        change = radius(1.35, 1e-10) / radius(1.35, 1e-8) - 1.0
+        self.assertGreater(change, 0.002)
+        self.assertLess(change, 0.01)
+
+    def test_the_default_surface_cutoff_is_the_one_the_note_and_help_quote(self):
+        # The slow-surface note and the Help both describe the reported
+        # radius as the one at which the density has fallen to 1e-8 of its
+        # central value.  The sequence routine must really use that value
+        # (checked by result, not by reading the signature).
+        self.assertEqual(
+            inspect.signature(phys.integrate_structure)
+            .parameters["y_floor"].default, 1.0e-8)
+        eos = phys.PolytropeEOS(gamma=1.35)
+        rho_c = 1.0e18
+        sequence = phys.ns_mass_radius_curve(
+            eos_name="polytrope", gamma=1.35, n=3, rho_lo=rho_c,
+            rho_hi=1.0e19, relativistic=False)
+        direct = phys.integrate_structure(
+            eos, rho_c, relativistic=False, r_scale=1.5e4,
+            y_floor=1.0e-8)[1] / 1.0e3
+        self.assertAlmostEqual(sequence["R"][0], direct, delta=1.0e-9 * direct)
+        looser = phys.integrate_structure(
+            eos, rho_c, relativistic=False, r_scale=1.5e4,
+            y_floor=1.0e-6)[1] / 1.0e3
+        self.assertGreater(abs(looser - direct) / direct, 0.01)
+
+    def test_slow_surface_warning_appears_below_1_4_and_only_there(self):
+        def warnings_for(gamma):
+            summary = phys.ns_mass_radius_curve(
+                eos_name="polytrope", gamma=gamma, n=3, rho_lo=1e17,
+                rho_hi=1e18, relativistic=False)["summary"]
+            return [w for w in summary["warnings"]
+                    if "cutoff" in w and "converged" in w]
+
+        self.assertEqual(len(warnings_for(1.35)), 1)
+        self.assertIn("roughly 0.1 per cent", warnings_for(1.35)[0])
+        self.assertEqual(warnings_for(1.5), [])
+        self.assertEqual(warnings_for(2.5), [])
+        self.assertEqual(phys.POLYTROPE_GAMMA_SLOW_SURFACE, 1.4)
+        self.assertEqual(phys.POLYTROPE_GAMMA_MIN, 4.0 / 3.0)
+        self.assertEqual(phys.POLYTROPE_GAMMA_NO_SURFACE, 6.0 / 5.0)
+
+    def test_newtonian_polytrope_scaling_laws(self):
+        # M ~ rho_c^((3 Gamma - 4)/2), R ~ rho_c^((Gamma - 2)/2), and at
+        # fixed rho_c M ~ K^(3/2), R ~ K^(1/2): all consequences of the
+        # Lane-Emden scaling, not of this code.
+        for gamma, lo, hi in ((1.5, 1e14, 1e16), (2.5, 1e16, 1e18)):
+            with self.subTest(gamma=gamma):
+                r = phys.ns_mass_radius_curve(
+                    eos_name="polytrope", n=5, rho_lo=lo, rho_hi=hi,
+                    relativistic=False, gamma=gamma)
+                log_rho = np.log(r["rho"])
+                self.assertAlmostEqual(
+                    np.polyfit(log_rho, np.log(r["M"]), 1)[0],
+                    (3.0 * gamma - 4.0) / 2.0, delta=1.0e-3)
+                self.assertAlmostEqual(
+                    np.polyfit(log_rho, np.log(r["R"]), 1)[0],
+                    (gamma - 2.0) / 2.0, delta=1.0e-3)
+        soft = phys.ns_mass_radius_curve(
+            eos_name="polytrope", n=3, rho_lo=1e15, rho_hi=1e16,
+            relativistic=False, gamma=1.5, p_nuc=0.02)
+        stiff = phys.ns_mass_radius_curve(
+            eos_name="polytrope", n=3, rho_lo=1e15, rho_hi=1e16,
+            relativistic=False, gamma=1.5, p_nuc=0.08)
+        # K is proportional to p_nuc, so 4x the stiffness is 4x the K.
+        np.testing.assert_allclose(stiff["M"] / soft["M"], 8.0, rtol=1e-4)
+        np.testing.assert_allclose(stiff["R"] / soft["R"], 2.0, rtol=1e-4)
+
+    def test_gamma_two_polytrope_matches_the_exact_n1_solution(self):
+        # n = 1 (Gamma = 2): rho = rho_c sin(xi)/xi, R = pi alpha and
+        # M = 4 pi^2 rho_c alpha^3 with alpha^2 = K/(2 pi G), and R does
+        # not depend on rho_c at all.
+        eos = phys.PolytropeEOS(p_nuc=0.04, gamma=2.0)
+        alpha = math.sqrt(eos.K / (2.0 * math.pi * phys.G))
+        for rho_c in (1.0e15, 1.0e17):
+            with self.subTest(rho_c=rho_c):
+                m_kg, r_m, _ = phys.integrate_structure(
+                    eos, rho_c, relativistic=False, r_scale=1.5e4)
+                self.assertAlmostEqual(
+                    m_kg / (4.0 * math.pi ** 2 * rho_c * alpha ** 3), 1.0,
+                    delta=2.0e-4)
+                self.assertAlmostEqual(r_m / (math.pi * alpha), 1.0,
+                                       delta=1.0e-6)
+
+
+
+class TestBooleanRefusalMatrix(unittest.TestCase):
+    """No public numeric parameter accepts True, False or np.True_.
+
+    ``float(True)`` is 1.0, so a bool is a legal-looking number that the
+    caller almost never means.  Earlier rounds refused it at a few named
+    entry points; a probe of every public numeric parameter found one more
+    that still took it (``mestel_constant``, where False reached a
+    division), so the guarantee is now asserted over a table of all of
+    them, and a new public function that takes numbers has to be added
+    here (``test_matrix_names_every_public_numeric_entry_point``).
+    """
+
+    BAD = (True, False, np.True_, np.False_)
+    EXPECTED_CHECKS = 408
+
+    @staticmethod
+    def table():
+        eos = phys.FermiGasEOS(phys.m_e, 2.0 * phys.m_u)
+        poly = phys.PolytropeEOS()
+        return [
+            ("check_composition", phys.check_composition,
+             dict(X=0.7, Z=0.02)),
+            ("mean_molecular_weight", phys.mean_molecular_weight,
+             dict(X=0.7, Z=0.02)),
+            ("mean_molecular_weight_per_electron",
+             phys.mean_molecular_weight_per_electron, dict(X=0.7)),
+            ("homology_exponents", phys.homology_exponents,
+             dict(nu=4.0, kappa_a=0.0, kappa_b=0.0)),
+            ("default_burning", phys.default_burning, dict(m_msun=1.0)),
+            ("default_core_fraction", phys.default_core_fraction,
+             dict(m_msun=1.0)),
+            ("zams_luminosity", phys.zams_luminosity, dict(m_msun=1.0)),
+            ("zams_radius", phys.zams_radius, dict(m_msun=1.0)),
+            ("effective_temperature", phys.effective_temperature,
+             dict(L_lsun=1.0, R_rsun=1.0)),
+            ("zams_curve", phys.zams_curve,
+             dict(m_lo=0.5, m_hi=5.0, n=10)),
+            ("core_mass_luminosity", phys.core_mass_luminosity,
+             dict(mc_msun=0.3)),
+            ("hayashi_teff", phys.hayashi_teff,
+             dict(m_msun=1.0, L_lsun=10.0)),
+            ("kelvin_helmholtz_time", phys.kelvin_helmholtz_time,
+             dict(m_msun=1.0, r_rsun=1.0, l_lsun=1.0)),
+            ("predicted_remnant", phys.predicted_remnant,
+             dict(m_msun=1.0)),
+            ("integrate_track", phys.integrate_track,
+             dict(m_msun=1.0, X=0.7, Z=0.02, qc=0.1, core_weight=0.36,
+                  expansion=1.7, core_efficiency=0.75, n_ms=100,
+                  n_post=100, t_max_gyr=15.0, x_end=1.0e-3)),
+            ("turnoff_mass", phys.turnoff_mass,
+             dict(masses=[1.0, 2.0], t_ms_gyr=[10.0, 1.0], age_gyr=3.0)),
+            ("build_hr_grid", phys.build_hr_grid,
+             dict(masses=[1.0, 2.0], isochrone_gyr=[1.0, 2.0])),
+            ("FermiGasEOS", phys.FermiGasEOS,
+             dict(particle_mass=phys.m_e, mass_per_particle=2.0 * phys.m_u)),
+            ("PolytropeEOS", phys.PolytropeEOS,
+             dict(p_nuc=0.04, gamma=2.5)),
+            ("PolytropeEOS(K)", phys.PolytropeEOS, dict(K=1.0e-3)),
+            ("make_eos", phys.make_eos,
+             dict(name="polytrope", p_nuc=0.04, gamma=2.5)),
+            ("make_eos(K)", phys.make_eos,
+             dict(name="polytrope", K=1.0e-3)),
+            ("integrate_structure", phys.integrate_structure,
+             dict(eos=eos, y_c=1.0, r_scale=1.0e7, y_floor=1.0e-8,
+                  step_frac=0.01, max_steps=400000)),
+            ("check_mu_e", phys.check_mu_e, dict(mu_e=2.0)),
+            ("chandrasekhar_mass", phys.chandrasekhar_mass,
+             dict(mu_e=2.0)),
+            ("wd_structure", phys.wd_structure,
+             dict(m_target_msun=0.6, mu_e=2.0, step_frac=0.01,
+                  rho_lo=1.0e7, rho_hi=1.0e13, tol=1.0e-5, max_iter=80,
+                  max_bracket_expansions=40)),
+            ("wd_mass_radius_curve", phys.wd_mass_radius_curve,
+             dict(mu_e=2.0, n=5, rho_lo=1.0e8, rho_hi=1.0e12,
+                  step_frac=0.01)),
+            ("mestel_constant", phys.mestel_constant,
+             dict(mu_env=0.6, mu_e_env=1.2, kappa0=6.0e18)),
+            ("kramers_kappa0", phys.kramers_kappa0, dict(X=0.7, Z=0.0)),
+            ("integrate_wd_cooling", phys.integrate_wd_cooling,
+             dict(m_msun=0.6, mu_e=2.0, A_ion=14.0, X_env=0.7, Z_env=0.0,
+                  Tc0=3.0e7, Tc_end=3.0e6, n_steps=100, step_frac=0.01)),
+            ("ns_mass_radius_curve", phys.ns_mass_radius_curve,
+             dict(eos_name="polytrope", n=5, rho_lo=1.0e17, rho_hi=5.0e18,
+                  p_nuc=0.04, gamma=2.5, step_frac=0.01)),
+            ("FermiGasEOS.pressure", eos.pressure, dict(x=1.0)),
+            ("FermiGasEOS.dP_dx", eos.dP_dx, dict(x=1.0)),
+            ("FermiGasEOS.number_density", eos.number_density,
+             dict(x=1.0)),
+            ("FermiGasEOS.rest_mass_density", eos.rest_mass_density,
+             dict(x=1.0)),
+            ("FermiGasEOS.energy_density", eos.energy_density,
+             dict(x=1.0)),
+            ("FermiGasEOS.mass_energy_density", eos.mass_energy_density,
+             dict(x=1.0)),
+            ("FermiGasEOS.sound_speed_ratio", eos.sound_speed_ratio,
+             dict(x=1.0)),
+            ("FermiGasEOS.x_from_density", eos.x_from_density,
+             dict(rho=1.0e9)),
+            ("PolytropeEOS.pressure", poly.pressure, dict(rho=1.0e17)),
+            ("PolytropeEOS.dP_dx", poly.dP_dx, dict(rho=1.0e17)),
+            ("PolytropeEOS.rest_mass_density", poly.rest_mass_density,
+             dict(rho=1.0e17)),
+            ("PolytropeEOS.mass_energy_density", poly.mass_energy_density,
+             dict(rho=1.0e17)),
+            ("PolytropeEOS.sound_speed_ratio", poly.sound_speed_ratio,
+             dict(rho=1.0e17)),
+            ("PolytropeEOS.x_from_density", poly.x_from_density,
+             dict(rho=1.0e17)),
+        ]
+
+    @staticmethod
+    def poisoned(value, bad):
+        """``value`` with ``bad`` in place of its number(s), or None."""
+        if isinstance(value, bool) or value is None or isinstance(value, str):
+            return None
+        if isinstance(value, list):
+            return [bad, *value[1:]]
+        return bad
+
+    def test_every_numeric_parameter_refuses_every_boolean(self):
+        checked = 0
+        for name, function, good in self.table():
+            for parameter, value in good.items():
+                for bad in self.BAD:
+                    replacement = self.poisoned(value, bad)
+                    if replacement is None or parameter == "eos":
+                        continue
+                    kwargs = dict(good)
+                    kwargs[parameter] = replacement
+                    with self.subTest(function=name, parameter=parameter,
+                                      bad=repr(bad)):
+                        with self.assertRaises(ValueError):
+                            function(**kwargs)
+                    checked += 1
+        # The number of (parameter, value, bool) cases tried is pinned so
+        # that dropping a row or a parameter cannot pass silently.
+        self.assertEqual(checked, self.EXPECTED_CHECKS)
+
+    def test_matrix_names_every_public_numeric_entry_point(self):
+        # A function added to physics_sev must be added to the table (or,
+        # if it takes no numeric argument, to the short exemption list).
+        public = {name for name, obj in vars(phys).items()
+                  if not name.startswith("_")
+                  and (inspect.isfunction(obj) or inspect.isclass(obj))
+                  and obj.__module__ == phys.__name__}
+        in_table = {name.split("(")[0] for name, _, _ in self.table()
+                    if "." not in name}
+        takes_no_numbers = {"helium_flash_core_mass"}
+        self.assertEqual(public - in_table - takes_no_numbers, set())
+        self.assertEqual(in_table - public, set())
+        self.assertEqual(
+            inspect.signature(phys.helium_flash_core_mass).parameters
+            .keys(), set())
+
+    def test_the_unpoisoned_baselines_are_valid_calls(self):
+        # The matrix proves nothing if the baseline itself is refused for
+        # another reason: every row must succeed as written.
+        for name, function, good in self.table():
+            with self.subTest(function=name):
+                function(**good)
+
+    def test_composition_and_mixed_lists_refuse_booleans(self):
+        with self.assertRaises(ValueError):
+            phys.check_composition(True, 0.0)
+        with self.assertRaises(ValueError):
+            phys.check_composition(0.7, False)
+        eos = phys.FermiGasEOS(phys.m_e, 2.0 * phys.m_u)
+        for bad in ([True, 1.0], [1.0, True], np.array([True, False]),
+                    (1.0, np.True_)):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(ValueError):
+                    eos.pressure(bad)
+
+    def test_mestel_constant_used_to_accept_a_boolean(self):
+        # The gap the probe found: mestel_constant took mu_env, mu_e_env
+        # and kappa0 without validation, so False reached a division
+        # (ZeroDivisionError) and True was read as 1.0.
+        for parameter in ("mu_env", "mu_e_env", "kappa0"):
+            for bad in (True, False):
+                kwargs = dict(mu_env=0.6, mu_e_env=1.2, kappa0=6.0e18)
+                kwargs[parameter] = bad
+                with self.subTest(parameter=parameter, bad=bad):
+                    with self.assertRaises(ValueError):
+                        phys.mestel_constant(**kwargs)
+        for bad in (0.0, -1.0, math.nan, math.inf):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    phys.mestel_constant(bad, 1.2, 6.0e18)
+
+
+class TestDriverObservedMass(unittest.TestCase):
+    """``m_observed`` is validated by run() in every mode, before any work.
+
+    The command line refuses a negative or non-finite value; a direct
+    run() call used to accept anything in the modes that do not draw the
+    reference line, and wrote it into the nsmr provenance unchecked.
+    """
+
+    MODE_KWARGS = {
+        "tracks": dict(mode="tracks", mass=1.0, n_ms=50, n_post=50),
+        "hr": dict(mode="hr", masses="1.0,2.0", n_ms=50, n_post=50),
+        "wdcool": dict(mode="wdcool", n_cool=50),
+        "nsmr": dict(mode="nsmr", n_mr=3, rho_hi=5.0e18),
+    }
+    BAD = (-3.0, -0.001, math.nan, math.inf, -math.inf, True, False, "abc",
+           [2.0], 1 + 0j)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def run_quietly(self, **kwargs):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return driver.run(no_plot=True, csvdir=self.tmp, **kwargs)
+
+    def test_a_bad_value_is_refused_in_every_mode_and_writes_nothing(self):
+        for mode, kwargs in self.MODE_KWARGS.items():
+            for bad in self.BAD:
+                with self.subTest(mode=mode, value=repr(bad)):
+                    with self.assertRaisesRegex(ValueError, "m_observed"):
+                        self.run_quietly(m_observed=bad, **kwargs)
+                    self.assertEqual(os.listdir(self.tmp), [])
+
+    def test_none_zero_and_a_positive_value_are_accepted(self):
+        for value in (None, 0, 0.0, 2.05):
+            with self.subTest(value=value):
+                self.run_quietly(m_observed=value, **self.MODE_KWARGS["nsmr"])
+        for mode in ("tracks", "wdcool"):
+            with self.subTest(mode=mode):
+                self.run_quietly(m_observed=2.05, **self.MODE_KWARGS[mode])
+
+    def test_the_provenance_records_the_validated_number(self):
+        self.run_quietly(m_observed=2.05, **self.MODE_KWARGS["nsmr"])
+        (name,) = os.listdir(self.tmp)
+        with open(os.path.join(self.tmp, name), encoding="utf-8") as handle:
+            header = [line for line in handle if line.startswith("#")]
+        self.assertIn("#     m_observed = 2.05\n", header)
+
+    def test_the_command_line_zero_still_means_no_reference_line(self):
+        out = run_main_in_process(["--mode", "nsmr", "--n_mr", "3",
+                                   "--rho_hi", "5e18", "--m_observed", "0",
+                                   "--no_plot", "--csvdir", self.tmp])
+        self.assertIn("neutron-star mass-radius", out)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            with self.assertRaises(SystemExit):
+                run_main_in_process(["--mode", "nsmr", "--n_mr", "3",
+                                     "--m_observed", "-1", "--no_plot",
+                                     "--csvdir", self.tmp])
+        self.assertIn("--m_observed", err.getvalue())
+
+
+class TestRegimeTransitions(unittest.TestCase):
+    """Behaviour on each side of every switch the model contains.
+
+    The prescriptions change form at a handful of thresholds.  A model
+    that is right at 1.0 and at 3.0 can still be wrong (or discontinuous)
+    at the switch, and the hand-checked values in the other classes never
+    land on one, so each is bracketed here: the discrete quantity flips
+    where it is documented to, and the quantities that are meant to be
+    continuous are.
+    """
+
+    EPS = 1.0e-9
+
+    def test_burning_chain_switches_at_1_2_and_the_core_fraction_does_not_jump(self):
+        self.assertEqual(phys.default_burning(1.2 - self.EPS), "pp")
+        self.assertEqual(phys.default_burning(1.2), "cno")
+        below = phys.default_core_fraction(1.2 - self.EPS)
+        above = phys.default_core_fraction(1.2 + self.EPS)
+        self.assertEqual(phys.default_core_fraction(1.2), 0.15)
+        self.assertAlmostEqual(below, above, delta=1.0e-8)
+        # ... and it saturates at 0.32 where the power law reaches it.
+        self.assertEqual(phys.default_core_fraction(60.0), 0.32)
+        self.assertLess(phys.default_core_fraction(10.0), 0.32)
+
+    def test_the_giant_branch_regime_flips_at_2_msun_and_the_ms_does_not(self):
+        below = phys.integrate_track(m_msun=2.0, n_ms=400, n_post=400)
+        above = phys.integrate_track(m_msun=2.0 + 1.0e-6, n_ms=400,
+                                     n_post=400)
+        sb, sa = below["summary"], above["summary"]
+        self.assertEqual(sb["post_regime"], "degenerate red-giant branch")
+        self.assertEqual(sa["post_regime"], "Hertzsprung-gap crossing")
+        # The main sequence is one calculation on both sides of the
+        # switch: lifetime and tip-of-the-MS luminosity are continuous.
+        self.assertAlmostEqual(sb["t_ms_gyr"], sa["t_ms_gyr"],
+                               delta=1.0e-4 * sb["t_ms_gyr"])
+        self.assertAlmostEqual(sb["L_tams"], sa["L_tams"],
+                               delta=1.0e-4 * sb["L_tams"])
+        # The post-main-sequence duration DOES change (about 0.06 Gyr on
+        # the red-giant branch, 0.002 across the gap): a discontinuity that
+        # is part of the model, not an accident.
+        self.assertGreater(sb["t_post_gyr"], 10.0 * sa["t_post_gyr"])
+
+    def test_remnant_class_and_mass_at_every_threshold(self):
+        eps = 1.0e-7
+        cases = (
+            (0.5, "helium white dwarf", "carbon-oxygen white dwarf"),
+            (6.5, "carbon-oxygen white dwarf", "oxygen-neon white dwarf"),
+            (8.0, "oxygen-neon white dwarf", "neutron star"),
+            (20.0, "neutron star", "black hole"),
+        )
+        for edge, low, high in cases:
+            with self.subTest(edge=edge):
+                self.assertEqual(phys.predicted_remnant(edge - eps)[0], low)
+                self.assertEqual(phys.predicted_remnant(edge)[0], high)
+        # The initial-final mass relation is one straight line across 0.5
+        # (only the name changes there), so the mass is continuous.
+        self.assertAlmostEqual(phys.predicted_remnant(0.5 - eps)[1],
+                               phys.predicted_remnant(0.5)[1], delta=1e-6)
+        self.assertAlmostEqual(phys.predicted_remnant(0.5)[1],
+                               0.109 * 0.5 + 0.394, places=12)
+        # The neutron-star and black-hole branches are schematic constants.
+        self.assertEqual(phys.predicted_remnant(10.0)[1], 1.4)
+        self.assertAlmostEqual(phys.predicted_remnant(20.0)[1], 4.0)
+
+    def test_remnant_basis_switches_between_0_67_and_0_68_msun(self):
+        # Below about 0.68 Msun the degenerate red-giant branch hits the
+        # model's core-mass cap before the helium-flash mass, and the
+        # track's own integration decides the remnant (a helium white
+        # dwarf); from 0.68 Msun up the core reaches the flash and the
+        # mass-only classification is used.  With a long enough t_max both
+        # stars reach the terminal-age main sequence; the remnant mass is
+        # nearly continuous across the switch, the label and its stated
+        # origin are not.
+        low = phys.integrate_track(m_msun=0.67, n_ms=400, n_post=400,
+                                   t_max_gyr=100.0)["summary"]
+        high = phys.integrate_track(m_msun=0.68, n_ms=400, n_post=400,
+                                    t_max_gyr=100.0)["summary"]
+        for summary in (low, high):
+            self.assertTrue(summary["reached_tams"])
+            self.assertEqual(summary["post_regime"],
+                             "degenerate red-giant branch")
+        self.assertFalse(low["helium_ignition"])
+        self.assertEqual(low["remnant_kind"], "helium white dwarf")
+        self.assertEqual(low["remnant_basis"],
+                         "this track's own post-main-sequence integration")
+        self.assertAlmostEqual(low["remnant_msun"], low["mc_ign"], places=12)
+        self.assertTrue(high["helium_ignition"])
+        self.assertEqual(high["remnant_kind"], "carbon-oxygen white dwarf")
+        self.assertEqual(high["remnant_basis"],
+                         "mass-only schematic classification")
+        self.assertAlmostEqual(high["remnant_msun"],
+                               phys.predicted_remnant(0.68)[1], places=12)
+        self.assertAlmostEqual(low["remnant_msun"], high["remnant_msun"],
+                               delta=0.005)
+
+    def test_the_track_is_truncated_exactly_when_t_max_is_below_the_lifetime(self):
+        # The main-sequence lifetime of one solar mass is 9.730 Gyr; a run
+        # stopped at 9.70 must say it was cut off (no turn-off, no post-MS)
+        # and one stopped at 9.76 must complete, with the same lifetime.
+        cut = phys.integrate_track(m_msun=1.0, n_ms=400, n_post=400,
+                                   t_max_gyr=9.70)["summary"]
+        whole = phys.integrate_track(m_msun=1.0, n_ms=400, n_post=400,
+                                     t_max_gyr=9.76)["summary"]
+        self.assertTrue(cut["truncated"])
+        self.assertFalse(cut["reached_tams"])
+        self.assertEqual(cut["post_regime"], "none")
+        self.assertTrue(math.isnan(cut["t_ms_gyr"]))
+        self.assertFalse(whole["truncated"])
+        self.assertTrue(whole["reached_tams"])
+        self.assertAlmostEqual(whole["t_ms_gyr"], 9.730, delta=0.005)
+        self.assertGreater(whole["t_post_gyr"], 0.0)
+
+    def test_turning_point_appears_only_once_the_sequence_passes_the_peak(self):
+        # TOV neutron gas, whose maximum is at 3.33e18 kg/m^3.  Ending the
+        # sequence 10 per cent below the peak must not report a turning
+        # point (or a stable/unstable split); ending it 30 per cent above
+        # must.  The classification follows the sampled data, not the
+        # equation of state's name.
+        peak = 3.33e18
+        short = phys.ns_mass_radius_curve(
+            eos_name="neutron", n=12, rho_lo=1.0e17,
+            rho_hi=0.9 * peak)["summary"]
+        past = phys.ns_mass_radius_curve(
+            eos_name="neutron", n=12, rho_lo=1.0e17,
+            rho_hi=1.3 * peak)["summary"]
+        self.assertFalse(short["turning_point"])
+        self.assertFalse(short["stable_branch"])
+        self.assertTrue(past["turning_point"])
+        self.assertTrue(past["stable_branch"])
+        self.assertAlmostEqual(past["M_max"], 0.7099, delta=0.002)
+
+
+class TestTovStepConvergence(unittest.TestCase):
+    def test_tov_mass_converges_at_second_order_in_the_step(self):
+        # A single TOV star (default polytrope, 1e18 kg/m^3) at four step
+        # fractions, each half the last.  Second-order convergence means
+        # every difference is a quarter of the one before; the last ratio
+        # must be at least 3.5 and the differences must shrink throughout.
+        eos = phys.PolytropeEOS()
+        mass = [phys.integrate_structure(
+            eos, 1.0e18, relativistic=True, r_scale=1.5e4,
+            step_frac=step)[0] / phys.M_sun
+            for step in (0.04, 0.02, 0.01, 0.005)]
+        differences = np.abs(np.diff(mass))
+        self.assertTrue(np.all(differences[1:] < differences[:-1]))
+        self.assertGreater(differences[-2] / differences[-1], 3.5)
+        # The default step is converged to well under the precision the
+        # program prints (4 decimals of a solar mass).
+        self.assertLess(abs(mass[-2] - mass[-1]), 2.0e-5)
+
+    def test_white_dwarf_mass_converges_at_second_order_too(self):
+        # The Help says the electron-gas integration converges at second
+        # order (the linear surface interpolation limits it, not the
+        # Runge-Kutta stages), so it is measured: at 1e9 kg/m^3, over four
+        # halvings, the successive differences fall by 4 each time.
+        eos = phys.FermiGasEOS(phys.m_e, 2.0 * phys.m_u)
+        x_c = eos.x_from_density(1.0e9)
+        mass = [phys.integrate_structure(
+            eos, x_c, relativistic=False, r_scale=1.0e7,
+            step_frac=step)[0] / phys.M_sun
+            for step in (0.04, 0.02, 0.01, 0.005)]
+        differences = np.abs(np.diff(mass))
+        self.assertTrue(np.all(differences[1:] < differences[:-1]))
+        self.assertGreater(differences[-2] / differences[-1], 3.5)
+        self.assertLess(differences[-2] / differences[-1], 4.5)
+
+    def test_step_halving_moves_the_white_dwarf_models_the_page_quotes(self):
+        # Halving --step_frac from 0.01 to 0.005 must change the mass of the
+        # 1e14 and 1e15 models by under 0.01 per cent (the page's argument
+        # that the quoted shortfalls are not a step-size effect) and the
+        # 1e16 model by about 0.04 per cent (the page's warning that the
+        # default step is too coarse there).
+        coarse = phys.wd_mass_radius_curve(
+            mu_e=2.0, n=3, rho_lo=1.0e14, rho_hi=1.0e16, step_frac=0.01)[1]
+        fine = phys.wd_mass_radius_curve(
+            mu_e=2.0, n=3, rho_lo=1.0e14, rho_hi=1.0e16, step_frac=0.005)[1]
+        change = 100.0 * np.abs(fine / coarse - 1.0)
+        self.assertLess(change[0], 0.01)
+        self.assertLess(change[1], 0.01)
+        self.assertAlmostEqual(change[2], 0.04, delta=0.01)
+
+
+
+class BeatsPageCase(unittest.TestCase):
+    """Base for tests that read the Beats-layout Help page.
+
+    A classic-layout canonical Help file skips them; a page whose layout
+    cannot be recognised fails, so an edit that made the page
+    unrecognisable cannot silently turn the checks off.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        parser = HtmlTreeParser()
+        parser.feed((MODULE_DIR / HELP_FILE).read_text(encoding="utf-8"))
+        parser.close()
+        cls.root = parser.root
+        layout = help_layout(cls.root)
+        if layout == "classic":
+            raise unittest.SkipTest(
+                f"{HELP_FILE}: these checks read the Beats page")
+        if layout != "beats":
+            raise AssertionError(
+                f"{HELP_FILE}: layout not recognised ({layout!r})")
+        cls.page = normalized_text(cls.root)
+        cls.csvdir = tempfile.mkdtemp()
+        cls.outputs = {}
+        cls.sections = {}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.csvdir, ignore_errors=True)
+
+    @classmethod
+    def printed_by(cls, command):
+        if command not in cls.outputs:
+            cls.outputs[command] = run_main_in_process(
+                [*command.split(), "--no_plot", "--csvdir", cls.csvdir])
+        return cls.outputs[command]
+
+    @classmethod
+    def section_text(cls, section_id):
+        if section_id not in cls.sections:
+            cls.sections[section_id] = normalized_text(
+                nodes_by_id(cls.root, section_id)[0])
+        return cls.sections[section_id]
+
+    def experiment_text(self, number):
+        section = nodes_by_id(self.root, HELP_EXPERIMENT_SECTION)[0]
+        for card in descendants(section,
+                                lambda node: has_class(node, "exp-card")):
+            text = normalized_text(card)
+            if text.startswith(f"EXP-{number} "):
+                return text
+        self.fail(f"no EXP-{number} card")
+
+    @staticmethod
+    def source(name):
+        return (MODULE_DIR / name).read_text(encoding="utf-8")
+
+
+class TestHelpEquationClassification(BeatsPageCase):
+    """Which of the five tags each displayed equation carries, by name.
+
+    The structural test (every block has one label with one tag) cannot
+    tell a correct tag from a wrong one, and cannot tell that a block
+    holds two relations of different kinds.  This one pins the tag of each
+    equation and checks that the blocks that used to combine a derived
+    formula with the rule that uses it, or an ODE with a closure, now hold
+    one relation each.
+    """
+
+    EXPECTED_TAGS = {
+        "Mean molecular weights, fully ionised": "DERIVED",
+        "Homology solution": "DERIVED",
+        "Empirical ZAMS luminosity and radius": "FIT",
+        "Nuclear-burning equation": "ODE",
+        "Core-weighted mean molecular weight": "CLOSURE",
+        "Main-sequence radius growth": "CLOSURE",
+        "Core-growth equation": "ODE",
+        "Blended giant-branch luminosity": "PRESCRIPTION",
+        "Core-mass–luminosity relation": "CLOSURE",
+        "Kelvin–Helmholtz time": "DERIVED",
+        "Hertzsprung-gap crossing": "PRESCRIPTION",
+        "Empirical Hayashi-line fit": "FIT",
+        "Exact degenerate electron gas": "DERIVED",
+        "Newtonian structure equations": "ODE",
+        "Ion heat content": "DERIVED",
+        "Mestel luminosity law": "DERIVED",
+        "Cooling equation": "ODE",
+        "Mestel coefficient": "DERIVED",
+        "Exact cooling age, and its late-time limit": "DERIVED",
+        "Tolman–Oppenheimer–Volkoff": "ODE",
+        "Fermi-gas energy density and sound speed": "DERIVED",
+        "Polytropic equation of state: the stiffness parameter": "CLOSURE",
+    }
+
+    def blocks(self):
+        found = {}
+        for block in descendants(self.root,
+                                 lambda node: has_class(node, "eq-block")):
+            (label,) = descendants(block,
+                                   lambda node: has_class(node, "eq-label"))
+            (tag,) = descendants(label,
+                                 lambda node: has_class(node, "tag"))
+            name = normalized_text(label)[:-len(normalized_text(tag))].strip()
+            self.assertNotIn(name, found, f"duplicate equation label {name}")
+            found[name] = (normalized_text(tag), normalized_text(block))
+        return found
+
+    def test_each_equation_carries_the_tag_named_here(self):
+        found = self.blocks()
+        self.assertEqual(set(found), set(self.EXPECTED_TAGS))
+        for name, expected in self.EXPECTED_TAGS.items():
+            with self.subTest(equation=name):
+                self.assertEqual(found[name][0], expected)
+        self.assertEqual(len(found), 22)
+
+    def test_every_block_holds_one_kind_of_relation(self):
+        # A block has a single tag, so everything displayed in it must be
+        # of that one kind.  Two blocks display two relations of the same
+        # kind (the exponents of the homology solution; the ZAMS
+        # luminosity and the ZAMS radius), and are named here; every other
+        # block displays exactly one.
+        two_of_one_kind = {"Homology solution",
+                           "Empirical ZAMS luminosity and radius"}
+        for name, (_, text) in self.blocks().items():
+            with self.subTest(equation=name):
+                expected = 2 if name in two_of_one_kind else 1
+                self.assertEqual(text.count("\\["), expected)
+                self.assertEqual(text.count("\\]"), expected)
+
+    def test_the_blocks_that_were_split_hold_what_their_labels_say(self):
+        found = self.blocks()
+
+        def body(name):
+            return found[name][1]
+
+        # ODE and closure, formerly one block.
+        self.assertIn("dM_c", body("Core-growth equation"))
+        self.assertIn("0.007", body("Core-growth equation"))
+        self.assertNotIn("L_{\\rm TAMS}", body("Core-growth equation"))
+        self.assertNotIn("2.3", body("Core-growth equation"))
+        # Rule and closure, formerly one block.
+        self.assertIn("L_{\\rm TAMS}^4", body("Blended giant-branch luminosity"))
+        self.assertNotIn("2.3", body("Blended giant-branch luminosity"))
+        self.assertIn("2.3\\times10^{5}",
+                      body("Core-mass–luminosity relation"))
+        self.assertNotIn("dM_c", body("Core-mass–luminosity relation"))
+        # Derived formula, law and ODE, formerly one block.
+        self.assertIn("U=", body("Ion heat content"))
+        self.assertNotIn("dT_c", body("Ion heat content"))
+        self.assertIn("T_c^{7/2}", body("Mestel luminosity law"))
+        self.assertNotIn("dU", body("Mestel luminosity law"))
+        self.assertIn("dT_c", body("Cooling equation"))
+        self.assertIn("dU", body("Cooling equation"))
+        # A rule stays a rule: the gap crossing is what the program adopts.
+        self.assertIn("t_{\\rm KH}", body("Hertzsprung-gap crossing"))
+
+
+class TestHelpClaimsAgreeAcrossLayers(BeatsPageCase):
+    """One statement of each modelling claim, everywhere it is made.
+
+    The source docstrings, the printed summaries, the Help's beats, its
+    parameter table, its validity section and its exercises are separate
+    texts that describe the same behaviour.  Two rounds each left one of
+    them describing the previous behaviour, so the claims that changed are
+    asserted in every layer that makes them, and the phrases that were
+    wrong are asserted absent from all of them.
+    """
+
+    SOURCES = CORE_MODULE_FILES
+
+    # ---- the Mestel boundary --------------------------------------------
+    def test_mestel_boundary_is_envelope_material_in_every_layer(self):
+        beat7 = self.section_text("beat7")
+        self.assertRegex(beat7, r"made of envelope material")
+        self.assertRegex(beat7, r"does not appear in \\\(C\\\)")
+        self.assertIn("2/(1+X_{\\rm env})".replace(" ", ""),
+                      beat7.replace(" ", ""))
+        parameters = self.section_text("parameters")
+        self.assertIn("does not enter the cooling law", parameters)
+        self.assertIn("does not enter the cooling law", beat7)
+        physics = self.source("physics_sev.py")
+        self.assertIn("of ENVELOPE material", physics)
+        self.assertIn("does not enter the cooling law", physics)
+        summary = " ".join(
+            self.printed_by("--mode wdcool --wd_mass 0.6").split())
+        self.assertIn("does not enter the cooling law", summary)
+        self.assertIn("degeneracy boundary at the base of the envelope",
+                      summary)
+
+    def test_the_size_of_the_boundary_choice_quoted_matches_the_code(self):
+        ratio = (phys.mestel_constant(0.6153846153846154, 2.0 / 1.7, 6.256e18)
+                 / phys.mestel_constant(0.6153846153846154, 2.0, 6.256e18))
+        age = phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0, n_steps=100)[
+            "summary"]["t_end_analytic_gyr"]
+        self.assertIn(f"{ratio:.1f} times smaller", self.section_text("beat7"))
+        self.assertIn(f"instead of {age:.2f}", self.section_text("beat7"))
+        # 5.6235 x 14.19857 = 79.846, which rounds to 79.8 (the page said
+        # 79.9 until the independent review of Audit22 checked the
+        # rounding: 79.85 is the two-decimal value, not the one-decimal).
+        rounded = f"{age * ratio:.1f} Gyr"
+        self.assertEqual(rounded, "79.8 Gyr")
+        self.assertIn(rounded, self.section_text("beat7"))
+        self.assertIn(rounded, self.experiment_text(16))
+
+    def test_a_core_mu_e_from_1_to_2_15_leaves_the_cooling_age_unchanged(self):
+        ages = [phys.integrate_wd_cooling(
+            m_msun=0.6, mu_e=mu_e, n_steps=100)["summary"][
+                "t_end_analytic_gyr"] for mu_e in (1.0, 2.15)]
+        self.assertAlmostEqual(ages[0], ages[1], delta=1.0e-9)
+        self.assertIn("from 1 to 2.15 leaves the cooling age unchanged",
+                      self.section_text("beat7"))
+
+    def test_exp16_hydrogen_free_envelope_numbers(self):
+        # "it is 2.64, and 5.6235 Gyr falls to 2.1313 Gyr"
+        default = phys.integrate_wd_cooling(
+            m_msun=0.6, mu_e=2.0, n_steps=100)["summary"]
+        helium = phys.integrate_wd_cooling(
+            m_msun=0.6, mu_e=2.0, X_env=0.0, Z_env=0.0,
+            n_steps=100)["summary"]
+        ratio = (default["t_end_analytic_gyr"]
+                 / helium["t_end_analytic_gyr"])
+        text = self.experiment_text(16)
+        self.assertIn(f"it is {ratio:.2f}", text)
+        self.assertIn(f"{default['t_end_analytic_gyr']:.4f} Gyr falls to "
+                      f"{helium['t_end_analytic_gyr']:.4f} Gyr", text)
+
+    # ---- Newtonian scope --------------------------------------------------
+    def test_newtonian_scope_is_the_same_statement_in_every_layer(self):
+        physics = " ".join(self.source("physics_sev.py").split())
+        self.assertIn("but this routine does not evaluate them", physics)
+        self.assertIn("the stability of the sequence is not classified",
+                      physics)
+        note = " ".join(phys.ns_mass_radius_curve(
+            eos_name="neutron", n=6, rho_lo=1.0e17, rho_hi=1.0e21,
+            relativistic=False)["summary"]["warnings"])
+        self.assertIn("does not classify the radial stability of a "
+                      "Newtonian one", note)
+        printed = " ".join(self.printed_by(
+            "--mode nsmr --eos neutron --newtonian --rho_hi 1e21").split())
+        self.assertIn("does not classify the radial stability of a "
+                      "Newtonian one", printed)
+        beat10 = self.section_text("beat10")
+        self.assertIn("applies its turning-point test only to TOV "
+                      "sequences and does not classify the stability of a "
+                      "Newtonian one", beat10)
+        self.assertIn("Newtonian stars have radial-stability criteria of "
+                      "their own; the program simply does not evaluate them",
+                      beat10)
+        self.assertIn("not that Newtonian stars have no stability limit",
+                      beat10)
+        exp13 = self.experiment_text(13)
+        self.assertIn("The program applies its turning-point test only to "
+                      "TOV sequences", exp13)
+        self.assertIn("does not mean that Newtonian stars have no "
+                      "stability limit", exp13)
+
+    def test_the_wrong_statements_are_absent_everywhere(self):
+        wrong = (
+            "no turning-point criterion",
+            "criterion is a result of general relativity",
+            "the turning-point criterion is a result of general relativity",
+            "stars have no stability criterion",
+            "Newtonian gravity has no stability criterion",
+            "5.836", "1.459 solar", "1.4590", "5.8360",
+            "5.736", "0.56 per cent below", "0.26 per cent below",
+        )
+        texts = {name: self.source(name) for name in self.SOURCES}
+        texts[HELP_FILE] = self.page
+        for phrase in wrong:
+            for name, text in texts.items():
+                with self.subTest(phrase=phrase, file=name):
+                    self.assertNotIn(phrase, text)
+
+    def test_the_newtonian_neutron_gas_limit_is_the_derived_one(self):
+        mu = phys.m_n / phys.m_u
+        limit = phys.chandrasekhar_mass(mu)
+        beat10 = self.section_text("beat10")
+        self.assertIn(f"{phys.CHANDRASEKHAR_MASS_MU1:.3f}", beat10)
+        self.assertIn(f"{limit:.2f}", beat10)
+        beat6 = self.section_text("beat6")
+        self.assertIn(f"{phys.CHANDRASEKHAR_MASS_MU1:.3f}", beat6)
+        self.assertIn(f"{phys.chandrasekhar_mass(2.0):.3f}", beat6)
+        self.assertIn("2.01824", beat6)
+
+    # ---- the polytrope index -----------------------------------------------
+    def test_index_range_is_four_thirds_to_five_in_every_layer(self):
+        self.assertIn("4/3<\\Gamma\\le5", self.section_text("beat9"))
+        self.assertIn("4/3<\\Gamma\\le5", self.section_text("algorithm"))
+        self.assertIn("(4/3,5]", self.section_text("parameters"))
+        self.assertIn("(4/3,5]", self.section_text("validity"))
+        self.assertIn("above 4/3", self.source("main.py"))
+        self.assertNotIn("above 6/5", self.source("main.py"))
+        physics = self.source("physics_sev.py")
+        self.assertIn("Gamma must exceed 4/3", physics)
+        self.assertIn("(4/3, 5]", physics)
+        for text in (self.page, physics):
+            self.assertNotIn("1<\\Gamma\\le5", text.replace(" ", ""))
+            self.assertNotIn("(1, 5]", text)
+
+    def test_cutoff_radii_quoted_for_a_soft_index_are_the_code_s(self):
+        radii = []
+        for floor in (1e-4, 1e-6, 1e-8, 1e-10):
+            radii.append(phys.integrate_structure(
+                unchecked_polytrope(1.2), 1.0e18, relativistic=False,
+                r_scale=1.5e4, y_floor=floor)[1] / 1.0e3)
+        quoted = ", ".join(f"{r:.0f}" for r in radii[:-1])
+        quoted += f" and {radii[-1]:.0f} km"
+        beat9 = self.section_text("beat9")
+        self.assertIn(quoted, beat9)
+        stiff = phys.integrate_structure(
+            phys.PolytropeEOS(gamma=2.5), 1.0e18, relativistic=False,
+            r_scale=1.5e4)[1] / 1.0e3
+        self.assertIn(f"{stiff:.1f} km at all four", beat9)
+
+    def test_slow_surface_percentages_quoted_are_the_code_s(self):
+        def growth(gamma):
+            eos = phys.PolytropeEOS(gamma=gamma)
+            r = [phys.integrate_structure(
+                eos, 1.0e18, relativistic=False, r_scale=1.5e4,
+                y_floor=floor)[1] for floor in (1e-8, 1e-10)]
+            return 100.0 * (r[1] / r[0] - 1.0)
+
+        self.assertAlmostEqual(growth(1.4), 0.1, delta=0.05)
+        self.assertAlmostEqual(growth(4.0 / 3.0 + 1.0e-4), 0.6, delta=0.1)
+        self.assertIn("roughly 0.1 per cent just below",
+                      self.section_text("beat9"))
+        self.assertIn("0.6 per cent just above", self.section_text("beat9"))
+
+    def test_the_help_states_the_order_and_step_effect_measured_above(self):
+        beat6 = self.section_text("beat6")
+        self.assertIn("at second order", beat6)
+        self.assertNotIn("fourth-order accurate", self.page)
+        self.assertIn("by less than 0.01 per cent", beat6)
+        self.assertIn("by about 0.04 per cent", beat6)
+
+    def test_the_help_gives_both_reasons_for_the_index_limit(self):
+        beat9 = self.section_text("beat9")
+        self.assertIn("radially stable only for", beat9)
+        self.assertIn("Lane–Emden index", beat9)
+        self.assertIn("and being causal is neither of them", beat9)
+
+
+
+class TestBuildIdentityCoverage(unittest.TestCase):
+    def test_build_id_covers_every_program_module_and_nothing_else(self):
+        # The identity printed in every run and in the Help banner is a hash
+        # of these files.  Adding a module the program imports without
+        # adding it here would let that module change under an unchanged
+        # BUILD_ID.
+        self.assertEqual(phys.BUILD_ID_COVERS, CORE_MODULE_FILES)
+        for name in phys.BUILD_ID_COVERS:
+            self.assertTrue((MODULE_DIR / name).is_file(), name)
+        covered = set(phys.BUILD_ID_COVERS)
+        for name in phys.BUILD_ID_COVERS:
+            tree = ast.parse((MODULE_DIR / name).read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    modules = [node.module or ""]
+                else:
+                    continue
+                for module in modules:
+                    beside = MODULE_DIR / (module.split(".")[0] + ".py")
+                    if beside.is_file():
+                        with self.subTest(importer=name, module=module):
+                            self.assertIn(beside.name, covered)
+        self.assertEqual(phys.BUILD_ID, recompute_build_id(MODULE_DIR))
+
+
+class TestPerformanceGuardrails(unittest.TestCase):
+    """Order-of-magnitude regressions, with margins of 20x or more.
+
+    These are not benchmarks.  Each bound is far above what the code takes
+    (measured in the environment that produced this round: 0.04 s, 1.5 s
+    and 0.03 s), so a slow or busy machine passes and only a change of
+    complexity (an array conversion on the scalar path, a per-model
+    re-solve of the whole sequence) fails.
+    """
+
+    def timed(self, function):
+        import time
+        start = time.perf_counter()
+        function()
+        return time.perf_counter() - start
+
+    def test_scalar_validation_stays_on_its_fast_path(self):
+        def hundred_thousand_calls():
+            for _ in range(100_000):
+                phys._real_finite_array("x", 1.0)
+                phys._require_finite("x", 1.0)
+
+        self.assertLess(self.timed(hundred_thousand_calls), 2.0)
+
+    def test_a_forty_model_polytrope_sequence_is_seconds_not_minutes(self):
+        self.assertLess(self.timed(lambda: phys.ns_mass_radius_curve(
+            eos_name="polytrope", n=40)), 30.0)
+
+    def test_a_default_track_is_a_fraction_of_a_second(self):
+        self.assertLess(self.timed(lambda: phys.integrate_track(
+            m_msun=1.0)), 5.0)
+
+
+class TestExerciseArtifactsExist(BeatsPageCase):
+    """Every data column or option an exercise tells the student to use."""
+
+    def test_column_names_cited_by_the_exercises_are_real_columns(self):
+        cited = set()
+        section = nodes_by_id(self.root, HELP_EXPERIMENT_SECTION)[0]
+        for code in descendants(section, lambda node: node.tag == "code"):
+            token = normalized_text(code)
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)+", token):
+                cited.add(token)
+        self.assertLessEqual({"age_Gyr", "still_on_MS"}, cited)
+        parameters = set()
+        for function in (phys.integrate_structure, phys.integrate_track,
+                         phys.wd_structure, phys.ns_mass_radius_curve,
+                         phys.integrate_wd_cooling):
+            parameters |= set(inspect.signature(function).parameters)
+        headers = set()
+        runs = (
+            ["--mode", "tracks", "--mass", "1.0", "--n_ms", "50",
+             "--n_post", "50"],
+            ["--mode", "hr", "--masses", "1.0,2.0", "--isochrones", "1,5",
+             "--n_ms", "50", "--n_post", "50"],
+            ["--mode", "wdcool", "--n_cool", "50"],
+            ["--mode", "nsmr", "--n_mr", "3", "--rho_hi", "5e18"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for arguments in runs:
+                run_main_in_process([*arguments, "--no_plot",
+                                     "--csvdir", tmp])
+            for path in Path(tmp).glob("*.csv"):
+                with path.open(encoding="utf-8") as handle:
+                    rows = [line for line in handle
+                            if not line.startswith("#")]
+                headers |= set(rows[0].strip().split(","))
+        for token in sorted(cited):
+            with self.subTest(token=token):
+                self.assertTrue(token in headers or token in parameters,
+                                f"{token} is neither a CSV column nor a "
+                                "parameter of a public function")
 
 
 if __name__ == "__main__":

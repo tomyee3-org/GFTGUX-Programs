@@ -28,6 +28,10 @@ SEP = "-" * W
 # Validation helpers
 # ======================================================================
 def _finite(name, value):
+    # float(True) is 1.0; a bool is never a meaningful number for these
+    # parameters, and the physics layer refuses it the same way.
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a finite number, not a bool.")
     try:
         value = float(value)
     except (TypeError, ValueError) as exc:
@@ -50,6 +54,26 @@ def _boolean(name, value):
     """
     if not isinstance(value, bool):
         raise ValueError(f"{name} must be True or False; got {value!r}.")
+    return value
+
+
+def _validate_m_observed(value):
+    """
+    Validate the observational reference mass drawn on the neutron-star
+    figure: None, or a finite number that is not negative.  0 and None both
+    mean "draw no reference line".  Same contract as the command line's
+    --m_observed, applied to a direct run() call in every mode, so an
+    invalid value is never silently ignored in a mode that does not draw
+    the line, nor written into a data file's provenance.
+    """
+    if value is None:
+        return None
+    value = _finite("m_observed", value)
+    if value < 0.0:
+        raise ValueError(
+            f"m_observed must not be negative; got {value:g}.  Use 0 or "
+            "None to omit the reference line."
+        )
     return value
 
 
@@ -388,10 +412,12 @@ def _print_wd_summary(s):
     print(SEP)
     print("  Model: zero-temperature Chandrasekhar electron structure with")
     print("  classical Mestel cooling.  The core mu_e sets the structure and")
-    print("  does not enter the cooling law; the ENVELOPE X and Z set the")
-    print("  opacity and so the Mestel coefficient, A_ion sets the ionic heat")
-    print("  capacity, and the coefficient and the heat capacity together")
-    print("  set the cooling clock.")
+    print("  does not enter the cooling law.  The ENVELOPE X and Z set the")
+    print("  Mestel coefficient through the opacity and through the")
+    print("  envelope's own mu and mu_e, which describe the gas at the")
+    print("  degeneracy boundary at the base of the envelope.  A_ion sets")
+    print("  the ionic heat capacity, and the coefficient and the heat")
+    print("  capacity together set the cooling clock.")
     print(SEP)
     _print_warnings(s)
 
@@ -684,7 +710,9 @@ def run(mode="tracks",
         "nsmr"    neutron-star mass-radius relation
 
     postms, homology, newtonian and no_plot must be literal True or False;
-    anything else (including 0, 1 or a string) is refused.
+    anything else (including 0, 1 or a string) is refused.  m_observed must
+    be None or a finite number that is not negative (0 or None draws no
+    reference line); it is checked in every mode.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}.")
@@ -696,6 +724,8 @@ def run(mode="tracks",
     homology = _boolean("homology", homology)
     newtonian = _boolean("newtonian", newtonian)
     no_plot = _boolean("no_plot", no_plot)
+
+    m_observed = _validate_m_observed(m_observed)
 
     dpi, lw = _validate_output(outdir, csvdir, dpi, lw)
     step_frac = _finite("step_frac", step_frac)

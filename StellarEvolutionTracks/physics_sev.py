@@ -37,7 +37,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.6.0"
+MODEL_VERSION = "1.7.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -123,6 +123,23 @@ GYR     = 1.0e9 * YEAR
 
 EPS_NUC = 0.007 * c**2          # J kg^-1 released turning H into He
 
+#: -xi^2 dtheta/dxi at the surface of the n = 3 Lane-Emden polytrope, the
+#: dimensionless mass of the polytrope that a completely degenerate
+#: relativistic electron gas approaches (Chandrasekhar 1939, table 4).
+LANE_EMDEN_N3_MASS = 2.01824
+
+#: Chandrasekhar limit for mu_e = 1, in solar masses:
+#:
+#:     M_Ch = 2.01824 (sqrt(3 pi)/2) (hbar c / G)^(3/2) / (mu_e m_u)^2.
+#:
+#: This is the mass to which the exact degenerate-electron-gas structure
+#: integration of this module converges as the central density grows, so it
+#: is derived here from the module's own constants instead of being typed in.
+CHANDRASEKHAR_MASS_MU1 = (
+    LANE_EMDEN_N3_MASS * math.sqrt(3.0 * math.pi) / 2.0
+    * (h_pl / (2.0 * math.pi) * c / G) ** 1.5 / m_u**2 / M_sun
+)
+
 # Safety limits
 MAX_TRACK_STEPS   = 2_000_000
 MIN_TRACK_STEPS   = 50
@@ -143,7 +160,18 @@ TRUSTED_MASS_HI = 15.0     # above this, winds and radiation pressure matter
 # Small validation helpers
 # ======================================================================
 def _require_finite(name, value):
-    """Return value as float after giving a consistent user-facing error."""
+    """
+    Return value as float after giving a consistent user-facing error.
+
+    A bool is refused: float(True) is 1.0, so without this check True and
+    False would be read as the numbers 1 and 0 by every scalar numeric
+    parameter in the module (a mean molecular weight, a density, a step
+    count), which is never what a caller who passed one meant.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(
+            f"{name} must be a finite number, not a bool; got {value!r}."
+        )
     try:
         value = float(value)
     except (TypeError, ValueError) as exc:
@@ -1038,6 +1066,12 @@ def turnoff_mass(masses, t_ms_gyr, age_gyr):
     for a sparse grid.
     """
     age_gyr = _require_positive("age_gyr", age_gyr)
+    masses, t_ms_gyr = list(masses), list(t_ms_gyr)
+    for label, values in (("masses", masses), ("t_ms_gyr", t_ms_gyr)):
+        if any(isinstance(v, (bool, np.bool_)) for v in values):
+            # float(True) is 1.0: a bool in either list would be read as
+            # a mass or a lifetime of exactly 1.
+            raise ValueError(f"{label} must be numbers, not bools.")
     pairs = [(m, t) for m, t in zip(masses, t_ms_gyr)
              if t is not None and math.isfinite(t) and t > 0.0 and m > 0.0]
     if len(pairs) < 2:
@@ -1200,12 +1234,34 @@ def _real_finite_array(name, value):
             f"{name} must be a real number (or array of real numbers), not "
             f"a bool; got {value!r}."
         )
-    bare = np.asarray(value)
+    try:
+        bare = np.asarray(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{name} must be a real finite number or array of real finite "
+            f"numbers; got {value!r}."
+        ) from exc
     if bare.dtype == np.bool_:
         raise ValueError(
             f"{name} must be a real number (or array of real numbers), not "
             f"a bool array; got {value!r}."
         )
+    if bare.dtype == object or not isinstance(value, np.ndarray):
+        # A list or tuple that MIXES bools with numbers ([True, 1.0]) is
+        # converted to a plain float array by NumPy, which erases the bool
+        # before the dtype check above can see it.  The individual elements
+        # therefore have to be inspected while they still have their own
+        # types.  An ndarray of a numeric dtype cannot hide a bool, so this
+        # element scan is skipped for the common array case.
+        try:
+            elements = np.asarray(value, dtype=object).ravel()
+        except (TypeError, ValueError):
+            elements = ()
+        if any(isinstance(e, (bool, np.bool_)) for e in elements):
+            raise ValueError(
+                f"{name} must be a real number (or array of real numbers), "
+                f"not contain a bool; got {value!r}."
+            )
     if bare.dtype.kind == "c":
         # Converting a complex array with dtype=float would silently drop
         # the imaginary part (with only a ComplexWarning) instead of
@@ -1306,6 +1362,9 @@ class FermiGasEOS:
     """
 
     def __init__(self, particle_mass, mass_per_particle):
+        particle_mass = _require_positive("particle_mass", particle_mass)
+        mass_per_particle = _require_positive("mass_per_particle",
+                                              mass_per_particle)
         self.m = particle_mass
         self.mass_per_particle = mass_per_particle
         self.A = np.pi * particle_mass**4 * c**5 / (3.0 * h_pl**3)
@@ -1409,6 +1468,29 @@ class FermiGasEOS:
 # Nuclear saturation density, about 0.16 baryons per cubic femtometre.
 RHO_NUCLEAR = 2.7e17          # kg m^-3
 
+#: A Newtonian polytrope P = K rho^Gamma has Lane-Emden index n = 1/(Gamma-1)
+#: and a finite radius only for n < 5, that is Gamma > 6/5.  At Gamma = 6/5
+#: the density falls off as a power of radius and never reaches zero, and
+#: below 6/5 it is worse still; the "radius" of such a model is whatever the
+#: integration's surface cutoff makes it.
+POLYTROPE_GAMMA_NO_SURFACE = 6.0 / 5.0
+
+#: Radial stability of a polytrope whose adiabatic index is Gamma: stable
+#: for Gamma > 4/3, marginal at 4/3, unstable below it.  General relativity
+#: raises the threshold, so a polytrope at or below 4/3 is unstable there
+#: too, at every central density.  For P = K rho^Gamma the Newtonian
+#: equilibrium mass varies as rho_c^((3 Gamma - 4)/2), so 4/3 is also where
+#: M(rho_c) stops rising.  A polytrope with no stable star at all is not a
+#: neutron-star model, and the turning-point classification of a sequence
+#: assumes that its low-density end is stable, so Gamma must exceed this.
+POLYTROPE_GAMMA_MIN = 4.0 / 3.0
+
+#: Above POLYTROPE_GAMMA_MIN the surface is real but the density falls to
+#: zero so gradually that the radius converges slowly with the surface
+#: cutoff ``y_floor`` (see ns_mass_radius_curve).  Below this value a run
+#: carries a warning saying so.
+POLYTROPE_GAMMA_SLOW_SURFACE = 1.4
+
 
 class PolytropeEOS:
     """
@@ -1428,13 +1510,37 @@ class PolytropeEOS:
     default p_nuc = 0.04 with Gamma = 2.5 gives a maximum mass of about
     2.2 solar masses at a radius near 11.6 km, comparable with the
     heaviest precisely measured neutron stars, and stays causal.
+
+    Gamma must exceed 4/3 (see POLYTROPE_GAMMA_MIN): a polytrope with a
+    smaller index has no radially stable star at all, and one at or below
+    6/5 also has no finite surface, so any radius reported for it would be
+    an artifact of the integration's density cutoff.  It must not exceed 5.
     """
 
     def __init__(self, p_nuc=0.04, gamma=2.5, K=None):
         self.gamma = _require_finite("gamma", gamma)
-        if not (1.0 < self.gamma <= 5.0):
+        if not (POLYTROPE_GAMMA_MIN < self.gamma <= 5.0):
+            why = ""
+            if 1.0 < self.gamma <= POLYTROPE_GAMMA_NO_SURFACE:
+                why = (
+                    "  A polytrope has a finite radius only when its "
+                    "Lane-Emden index n = 1/(Gamma - 1) is below 5, that "
+                    "is Gamma > 6/5; at or below 6/5 the density never "
+                    "reaches zero at a finite radius, so the radius would "
+                    "be set by the integration cutoff, not by the star.  "
+                    "Such a polytrope is also unstable (below)."
+                )
+            if 1.0 < self.gamma <= POLYTROPE_GAMMA_MIN:
+                why += (
+                    "  A polytrope whose adiabatic index is Gamma is "
+                    "radially stable only for Gamma > 4/3 (marginal at 4/3, "
+                    "unstable below it; general relativity raises the "
+                    "threshold), so every model with a smaller Gamma is "
+                    "unstable and there is no stable neutron star to "
+                    "compute."
+                )
             raise ValueError(
-                f"gamma must lie in (1, 5]; got {self.gamma:g}."
+                f"gamma must lie in (4/3, 5]; got {self.gamma:g}." + why
             )
         if K is not None:
             self.K = _require_positive("K", K)
@@ -1684,7 +1790,10 @@ def check_mu_e(mu_e):
 
 def chandrasekhar_mass(mu_e):
     """
-    The Chandrasekhar limit, M_Ch = 5.836 mu_e^-2 solar masses.
+    The Chandrasekhar limit, M_Ch = CHANDRASEKHAR_MASS_MU1 mu_e^-2 solar
+    masses (5.825 mu_e^-2, that is 1.456 for mu_e = 2), from the n = 3
+    Lane-Emden polytrope: M_Ch = 2.01824 (sqrt(3 pi)/2) (hbar c/G)^(3/2)
+    / (mu_e m_u)^2.
 
     mu_e goes through check_mu_e(), so a zero, negative, non-finite or
     non-physical value is refused with a clear ValueError instead of
@@ -1693,7 +1802,7 @@ def chandrasekhar_mass(mu_e):
     white-dwarf code, 1 <= mu_e <= 3.
     """
     mu_e = check_mu_e(mu_e)
-    return 5.836 / mu_e**2
+    return CHANDRASEKHAR_MASS_MU1 / mu_e**2
 
 
 def wd_structure(m_target_msun, mu_e=2.0, step_frac=0.01,
@@ -1857,18 +1966,36 @@ def mestel_constant(mu_env, mu_e_env, kappa0):
 
         P = sqrt(2 K' / 8.5) T^4.25,    K' = 16 pi a c G M k /(3 kappa0 mu m_u L).
 
-    Matching that envelope to the isothermal degenerate core, where the
-    non-relativistic electron pressure K1 (rho/mu_e)^{5/3} equals the ideal
-    gas pressure, eliminates the transition density and leaves
+    The envelope is matched to the isothermal core at the layer where the
+    electrons become degenerate, that is where the non-relativistic electron
+    pressure K1 (rho/mu_e)^{5/3} equals the ideal-gas pressure
+    rho k T/(mu m_u).  That layer is the base of the envelope, so it is made
+    of ENVELOPE material, and both molecular weights in the matching are the
+    envelope's:
+
+        mu_env   = mean_molecular_weight(X_env, Z_env)
+        mu_e_env = mean_molecular_weight_per_electron(X_env)
+
+    (the mu_e of the deeper degenerate core does not appear).  Eliminating
+    the transition density leaves
 
         L = C M T_c^{7/2},
-        C = (32 pi a c G k)/(25.5 kappa0 mu m_u) * [K1 (mu m_u/(k mu_e))^{5/3}]^3 .
+        C = (32 pi a c G k)/(25.5 kappa0 mu_env m_u)
+            * [K1 (mu_env m_u/(k mu_e_env))^{5/3}]^3 ,
 
-    Because L is proportional to M and the ion heat content is also
-    proportional to M, the core-temperature history T_c(t) predicted by
+    so C is proportional to mu_env^4 mu_e_env^-5 kappa0^-1: the envelope
+    composition enters through all three factors, not only through the
+    opacity.  Because L is proportional to M and the ion heat content is
+    also proportional to M, the core-temperature history T_c(t) predicted by
     this model does not depend on the mass of the white dwarf at all,
-    although the luminosity does.
+    although the luminosity does.  If the degeneracy boundary were instead
+    taken to lie in core material, mu_e_env would be replaced by the core's
+    mu_e and C would change by the fifth power of their ratio (a factor of
+    about 14 between mu_e = 1.18 and 2); this routine does not do that.
     """
+    mu_env = _require_positive("mu_env", mu_env)
+    mu_e_env = _require_positive("mu_e_env", mu_e_env)
+    kappa0 = _require_positive("kappa0", kappa0)
     K1 = 1.0036e7          # SI: P = K1 (rho/mu_e)^{5/3}, P in Pa, rho in kg/m^3
     bracket = K1 * (mu_env * m_u / (k_B * mu_e_env)) ** (5.0 / 3.0)
     return (32.0 * np.pi * a_rad * c * G * k_B
@@ -1926,9 +2053,12 @@ def integrate_wd_cooling(m_msun=0.6, mu_e=2.0, A_ion=14.0,
     compared.
 
     Note which composition controls what: the core mu_e sets the structure
-    (radius and central density), A_ion sets the ionic heat capacity, and
-    the ENVELOPE composition (X_env, Z_env) sets the opacity and hence the
-    Mestel coefficient C.  Students are often surprised by the last one.
+    (radius and central density) and does not enter the cooling law, A_ion
+    sets the ionic heat capacity, and the ENVELOPE composition (X_env,
+    Z_env) sets the Mestel coefficient C through the opacity kappa0 and
+    through the envelope's own molecular weights mu_env and mu_e_env, which
+    describe the gas at the degeneracy boundary at the base of the envelope
+    (see mestel_constant).  Students are often surprised by the last one.
     """
     m_msun = _require_positive("white-dwarf mass", m_msun)
     mu_e = check_mu_e(mu_e)
@@ -2076,14 +2206,21 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     The turning point of M(rho_c) marks the onset of radial instability
     for cold, non-rotating, one-parameter equilibrium sequences of this
     kind.  It is reported only when the sequence actually turns over
-    within the sampled range, and only for the TOV equations: the stability
-    criterion is a result of general relativity, so for a Newtonian
-    sequence ``turning_point`` is always False and ``M_max`` (the name is
-    kept for API stability) is only the largest sampled mass.  A Newtonian
-    sequence can show an interior peak of M(rho_c) in a regime where
-    Newtonian gravity has already failed (GM/Rc^2 > 1/2), and in that
-    regime the position and height of the peak move with the integration
-    step, so it is not a physical maximum.
+    within the sampled range, and only for the TOV equations.  Newtonian
+    stars have radial stability criteria of their own (for a polytrope,
+    Gamma > 4/3), but this routine does not evaluate them: for a Newtonian
+    sequence ``turning_point`` is always False, the stability of the
+    sequence is not classified, and ``M_max`` (the name is kept for API
+    stability) is only the largest sampled mass.  The ideal neutron gas
+    under Newtonian gravity approaches a limiting mass instead of turning
+    over, and a sampled interior peak of M(rho_c) appears only in a regime
+    where Newtonian gravity has already failed (GM/Rc^2 > 1/2), where the
+    position and height of the peak move with the integration step, so it
+    is not a physical maximum.
+
+    A polytropic sequence with Gamma below POLYTROPE_GAMMA_SLOW_SURFACE
+    carries a warning that the radius is slow to converge with the surface
+    cutoff.
     """
     n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
     relativistic = _require_bool("relativistic", relativistic)
@@ -2182,39 +2319,42 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     # as a resolved turning point.
     interior = bool(gi[0] < i_max < gi[-1])
     neighbors_converged = (interior and good[i_max - 1] and good[i_max + 1])
-    # The turning-point stability criterion belongs to general relativity.
-    # A Newtonian sequence never has one, however its sampled masses happen
-    # to be ordered (Audit21 Codex A21-P2-02: an extreme Newtonian
-    # neutron-gas sequence used to be reported as having a "Maximum mass"
-    # whose value and central density moved by orders of magnitude with the
-    # integration step).
+    # Only a TOV sequence is searched for a turning point.  A Newtonian
+    # sequence never reports one, however its sampled masses happen to be
+    # ordered: an extreme Newtonian neutron-gas sequence used to be reported
+    # as having a "Maximum mass" whose value and central density moved by
+    # orders of magnitude with the integration step.  That is a statement
+    # about what this routine reports, not about Newtonian stability, which
+    # exists (Gamma > 4/3 for a polytrope) and is simply not classified here.
     turning_point = bool(relativistic and interior and neighbors_converged)
+
+    gamma_eos = getattr(eos, "gamma", None)
+
     if not turning_point and not relativistic:
         if i_max >= gi[-1]:
             where = ("the mass is still rising at the highest central "
                      "density sampled")
-            advice = ("A Newtonian sequence has no turning-point criterion "
-                      "(that is a result of general relativity), so raising "
-                      "--rho_hi will not find one.")
+            advice = ("Raising --rho_hi will not find a turning point; it "
+                      "will only add more massive models at ever larger "
+                      "GM/Rc^2, where Newtonian gravity applies even less "
+                      "well.")
         elif i_max <= gi[0]:
             where = ("the largest sampled mass is the one at the lowest "
                      "central density sampled")
-            advice = ("A Newtonian sequence has no turning-point criterion "
-                      "(that is a result of general relativity), so lowering "
-                      "--rho_lo will not find one, and this is not a maximum "
-                      "mass.")
+            advice = ("Lowering --rho_lo will not find a turning point, "
+                      "and this is not a maximum mass.")
         else:
             where = ("the largest sampled mass lies inside the sampled "
                      "range of central densities")
-            advice = ("A Newtonian sequence has no turning-point criterion "
-                      "(that is a result of general relativity), so this is "
-                      "not a maximum mass.  At densities where Newtonian "
-                      "gravity has failed, the position and height of such "
-                      "a peak can change with --step_frac and --n_mr.")
+            advice = ("This is not a maximum mass.  At densities where "
+                      "Newtonian gravity has failed, the position and "
+                      "height of such a peak can change with --step_frac "
+                      "and --n_mr.")
         note = (f"{where}, so no turning point was reported.  The value "
-                "shown is the largest sampled mass, not a maximum mass, and "
-                f"no model in this sequence has been shown to be unstable.  "
-                f"{advice}")
+                "shown is the largest sampled mass, not a maximum mass.  "
+                "This program applies the turning-point test only to TOV "
+                "sequences and does not classify the radial stability of a "
+                f"Newtonian one.  {advice}")
         n_inside = int(np.sum(compact[good] > 0.5))
         if n_inside:
             note += (f"  {n_inside} of the {int(good.sum())} sampled models "
@@ -2284,10 +2424,22 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         warnings.append(
             "this is a Newtonian sequence.  GM/Rc^2 is reported only as a "
             "self-consistency diagnostic -- it shows where Newtonian "
-            "gravity ceases to be an acceptable approximation -- and the "
-            "gravitational redshift, the Buchdahl bound and the "
-            "turning-point stability criterion, all of which are results of "
-            "general relativity, are not reported."
+            "gravity ceases to be an acceptable approximation -- the "
+            "gravitational redshift and the Buchdahl bound, which are "
+            "results of general relativity, are not reported, and the "
+            "turning-point stability test is applied only to TOV "
+            "sequences."
+        )
+
+    if gamma_eos is not None and gamma_eos < POLYTROPE_GAMMA_SLOW_SURFACE:
+        warnings.append(
+            f"the polytropic index Gamma = {gamma_eos:.3f} is soft enough "
+            "that the density falls to zero very slowly toward the edge of "
+            "each star.  The radius reported is the radius at which the "
+            "density has fallen to 1e-8 of its central value; it is not fully "
+            "converged: tightening that cutoff to 1e-10 would enlarge it "
+            "by roughly 0.1 per cent just below Gamma = 1.4 and 0.6 per cent just "
+            "above 4/3.  Treat the radius as a slight underestimate."
         )
 
     summary = dict(
