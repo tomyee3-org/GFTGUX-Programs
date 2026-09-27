@@ -73,8 +73,8 @@ c = 2.997_924_58e8     # m s^-1
 #: definition, not a measured or rounded quantity. This program's author has
 #: chosen to base M_sun on this modern nominal parameter rather than on a
 #: commonly cited legacy adopted mass value (1.988_92e30 kg, about 0.026%
-#: different); see GravitationalWaveSources.html's "Physical constants used"
-#: note for the full rationale.
+#: different); see either current tutorial Help's closing note on the
+#: physical-constants policy for the full rationale.
 GM_sun_nominal = 1.327_1244e20   # m^3 s^-2
 
 #: Derived, not independently rounded: computing M_sun as this unrounded

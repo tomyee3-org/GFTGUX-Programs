@@ -532,8 +532,8 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         # now stored as the unrounded quotient GM_sun_nominal / G rather
         # than a manually-rounded literal, so G * M_sun reproduces
         # GM_sun_nominal to full floating-point precision instead of only
-        # approximately -- physics_gw.py's own comments and the Help
-        # file's "Physical constants used" note now describe this
+        # approximately -- physics_gw.py's own comments and both current
+        # tutorial Helps' physical-constants notes now describe this
         # accurately). The Python source files' comments were also
         # stripped of round-by-round audit-history labels this round, per
         # direct user instruction, leaving only permanent, present-tense
@@ -551,6 +551,11 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         # fourth-order convergence test's numerical dt=1e-5 "reference" was
         # also replaced with an algebraically exact closed-form oracle
         # (test-only; does not affect BUILD_ID).
+        #
+        # Kickoff4: bumped 1.7.0 -> 1.8.0 because permission-probe cleanup
+        # diagnostics changed on both PNG and CSV paths. Audit41 subsequently
+        # corrected a stale source comment; that comment changes BUILD_ID,
+        # but changes no behavior and does not warrant another version bump.
         self.assertEqual(physics.MODEL_VERSION, "1.8.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
@@ -3155,6 +3160,22 @@ class TestHelpFile(unittest.TestCase):
         proc = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
                               capture_output=True, text=True, check=True, timeout=15)
         self.assertIn("phase_rad", proc.stdout)
+
+    def test_stale_four_column_csv_description_never_returns(self):
+        bad_column_list = re.compile(r"t_s,f_hz,A,h(?!,phase_rad)")
+        surfaces = (*self.pages,
+                    (MODULE_DIR / "main.py").read_text(encoding="utf-8"))
+        proc = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
+                              capture_output=True, text=True, check=True, timeout=15)
+        for surface in (*surfaces, proc.stdout):
+            self.assertNotIn("t, f, A, h", surface)
+            self.assertIsNone(bad_column_list.search(surface))
+
+    def test_student_tutorials_exclude_internal_review_jargon(self):
+        internal = re.compile(r"\b(?:Codex|Copilot|Gemini|ChatGPT|Xedoc|"
+                              r"Kickoff\d*|Audit\d+|Claude\s+Audit)\b", re.I)
+        for page in self.pages:
+            self.assertIsNone(internal.search(page.split("</style>", 1)[-1]))
 
     def test_joint_ringdown_sampling_requirement_and_dpi_limit(self):
         for page in self.pages:
