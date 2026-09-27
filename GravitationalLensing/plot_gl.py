@@ -318,6 +318,14 @@ def plot_shear(crit_x, crit_y, cau_x, cau_y, images, beta_x, beta_y, theta_e,
                         "n_images": "ring" if ring else str(len(images)),
                         "theta_e_arcsec": f"{te:.6f}",
                         "gamma": f"{float(gamma):.6f}",
+                        "critical_rmin_arcsec":
+                            f"{te / (1.0 + abs(gamma)):.6f}",
+                        "critical_rmax_arcsec":
+                            f"{te / (1.0 - abs(gamma)):.6f}",
+                        "cusp_short_arcsec":
+                            f"{2.0 * te * abs(gamma) / (1.0 + abs(gamma)):.6f}",
+                        "cusp_long_arcsec":
+                            f"{2.0 * te * abs(gamma) / (1.0 - abs(gamma)):.6f}",
                         "beta_x_arcsec": f"{float(phys.rad_to_arcsec(beta_x)):.6f}",
                         "beta_y_arcsec": f"{float(phys.rad_to_arcsec(beta_y)):.6f}",
                     })

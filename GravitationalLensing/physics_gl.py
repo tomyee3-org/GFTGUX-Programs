@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "1.0.1"
+MODEL_VERSION = "1.1.0"
 
 # 1.0.1 patch: three provenance-dict f-strings in plot_gl.py (plot_point,
 # plot_arcs, plot_kappa) split a single {...} expression across a physical
@@ -35,7 +35,7 @@ MODEL_VERSION = "1.0.1"
 # minimum version this Help file documents -- every mode failed at import
 # time, including --version.  No plotted data, physics, or numeric result
 # changed; only how each fov_arcsec provenance string was assembled.
-# See GravitationalLensing-1.0.1-ReleaseNotes.html.
+# The 1.0.1 patch history is preserved in the current Release Notes.
 
 BUILD_ID_COVERS = (
     "physics_gl.py",
@@ -706,7 +706,7 @@ def require_resolved_kappa(theta_e, fov_arcsec, n_pix):
 
 
 def patch_help_version(html_path):
-    """Write MODEL_VERSION and BUILD_ID into the Help #version_build element."""
+    """Maintainer utility: stamp one Help file at an explicitly given path."""
     import re
     path = os.fspath(html_path)
     text = open(path, encoding="utf-8").read()

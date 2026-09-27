@@ -88,6 +88,19 @@ def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
     theta_x, theta_y = phys.make_grid(n_pix=n_pix, fov_arcsec=fov_arcsec)
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
+    beta = math.hypot(beta_x, beta_y)
+    image_prov = {"image_configuration": "Einstein ring" if beta == 0.0
+                  else "two images"}
+    if beta > 0.0:
+        # Signed positions are measured along the source-lens line. They
+        # describe the ideal point-source limit of the rendered Gaussian.
+        plus, minus = phys.point_mass_image_radii(beta, theta_e)
+        image_prov.update({
+            "theta_plus_arcsec": f"{float(phys.rad_to_arcsec(plus)):.6f}",
+            "theta_minus_arcsec": f"{float(phys.rad_to_arcsec(minus)):.6f}",
+            "mu_plus": f"{1.0 / (1.0 - (theta_e / plus)**4):.6f}",
+            "mu_minus": f"{1.0 / (1.0 - (theta_e / abs(minus))**4):.6f}",
+        })
     title = (rf"Point-mass lens (false colour)  |  "
              rf"$\beta=({beta_x_arcsec:.2f},{beta_y_arcsec:.2f})''$")
     return plotting.plot_point(image, theta_x, theta_y, theta_e,
@@ -99,6 +112,7 @@ def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
                                    "n_pix": str(n_pix),
                                    "sigma_src_arcsec":
                                        f"{phys.COMPACT_SOURCE_SIGMA_ARCSEC:.4f}",
+                                   **image_prov,
                                })
 
 

@@ -43,15 +43,18 @@ plot_gl.py docstrings or output):
 from __future__ import annotations
 
 import hashlib
+import html
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -97,16 +100,24 @@ def recompute_build_id(directory):
     return digest.hexdigest()[:12]
 
 
-def find_help_file():
-    here = MODULE_DIR
-    candidates = [
-        here / "GravitationalLensing.html",
-        here.parent / "GravitationalLensing.html",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path
-    return None
+HELP_FILES = ("GravitationalLensing-claude.html",
+              "GravitationalLensing-grok.html")
+DOC_DIR = (MODULE_DIR.parent.parent / "GFTGUX-Documentation"
+           / "GravitationalLensing")
+
+
+def help_files():
+    """Require the paired sibling documentation or a paired flat upload."""
+    sibling = [DOC_DIR / name for name in HELP_FILES]
+    if all(path.is_file() for path in sibling):
+        return sibling
+    flat = [MODULE_DIR / name for name in HELP_FILES]
+    if all(path.is_file() for path in flat):
+        return flat
+    missing = [name for name in HELP_FILES
+               if not (DOC_DIR / name).is_file() and
+               not (MODULE_DIR / name).is_file()]
+    raise FileNotFoundError(f"Both tutorial Help files are required: {missing}")
 
 
 def run_cli(args, cwd=MODULE_DIR, timeout=60):
@@ -351,6 +362,26 @@ class TestSideRays(unittest.TestCase):
 
 
 class TestDriverAndPlots(unittest.TestCase):
+    def test_documented_point_positions_and_shear_cusps_are_in_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fig, point = driver.run_point(beta_x_arcsec=1.0, outdir=tmp,
+                                           show=False, dpi=60)
+            metadata = Path(point[:-4] + ".provenance.txt").read_text()
+            self.assertIn("theta_plus_arcsec = 2.578954", metadata)
+            self.assertIn("theta_minus_arcsec = -1.578954", metadata)
+            self.assertIn("mu_plus = 1.599603", metadata)
+            self.assertIn("mu_minus = -0.599603", metadata)
+            _fig, shear = driver.run_shear(outdir=tmp, show=False, dpi=60)
+            shear_data = Path(shear[:-4] + ".provenance.txt").read_text()
+            theta_e = phys.default_sis_theta_e(300.0)
+            critical_x, critical_y = phys.critical_curve_sis_shear(theta_e, .25)
+            caustic_x, caustic_y = phys.caustic_from_critical(
+                critical_x, critical_y, theta_e, .25)
+            cusp_short = max(abs(phys.rad_to_arcsec(caustic_x)))
+            cusp_long = max(abs(phys.rad_to_arcsec(caustic_y)))
+            self.assertIn(f"cusp_short_arcsec = {cusp_short:.6f}", shear_data)
+            self.assertIn(f"cusp_long_arcsec = {cusp_long:.6f}", shear_data)
+
     def test_every_mode_writes_a_png_and_provenance_under_agg(self):
         with tempfile.TemporaryDirectory() as tmp:
             for mode in driver.MODES:
@@ -378,27 +409,91 @@ class TestDriverAndPlots(unittest.TestCase):
 class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.help_path = find_help_file()
+        cls.paths = help_files()
 
-    def test_help_file_is_present(self):
-        self.assertIsNotNone(self.help_path, "GravitationalLensing.html missing")
+    def test_both_tutorial_styles_are_present(self):
+        self.assertEqual([path.name for path in self.paths], list(HELP_FILES))
 
-    def test_version_build_element_matches_physics_module(self):
-        raw = self.help_path.read_text(encoding="utf-8")
-        match = re.search(
-            r'id="version_build"[^>]*>(.*?)</p>', raw, flags=re.S
-        )
-        self.assertIsNotNone(match)
-        text = re.sub(r"\s+", " ", match.group(1))
-        self.assertIn(f"Version {phys.MODEL_VERSION}", text)
-        self.assertIn(f"Build {phys.BUILD_ID}", text)
-        stale = text.replace(phys.MODEL_VERSION, "0.0.0")
-        self.assertNotIn(f"Version {phys.MODEL_VERSION}", stale)
+    def test_both_version_build_elements_match_core_files(self):
+        for path in self.paths:
+            with self.subTest(help_file=path.name):
+                raw = path.read_text(encoding="utf-8")
+                match = re.search(
+                    r'id="version_build"[^>]*>(.*?)</p>', raw, flags=re.S
+                )
+                self.assertIsNotNone(match)
+                text = html.unescape(re.sub(r"\s+", " ", match.group(1)))
+                self.assertIn(f"Version {phys.MODEL_VERSION}", text)
+                self.assertIn(f"Build {phys.BUILD_ID}", text)
 
-    def test_help_names_every_mode(self):
-        text = self.help_path.read_text(encoding="utf-8")
-        for mode in driver.MODES:
-            self.assertIn(mode, text)
+    def test_every_beat_and_mode_occurs_in_both_styles(self):
+        for path in self.paths:
+            raw = path.read_text(encoding="utf-8")
+            with self.subTest(help_file=path.name):
+                self.assertEqual(
+                    [int(n) for n in re.findall(r'<section id="beat(\d+)"', raw)],
+                    list(range(8)),
+                )
+                for mode in driver.MODES:
+                    self.assertIn(f'--mode {mode}', html.unescape(raw))
+
+    def test_all_beat_commands_parse_with_the_shared_real_cli(self):
+        import main as cli
+        seen_modes = set()
+        for path in self.paths:
+            raw = path.read_text(encoding="utf-8")
+            for beat, section in re.findall(
+                    r'<section id="beat(\d+)"[^>]*>(.*?)</section>',
+                    raw, flags=re.S):
+                # The Grok script puts some commands in inline code, while
+                # Claude relies more heavily on multi-line pre blocks.
+                code = re.findall(r'<(?:pre|code)[^>]*>(.*?)</(?:pre|code)>',
+                                  section, flags=re.S)
+                commands = [html.unescape(line).strip()
+                            for block in code for line in block.splitlines()
+                            if line.strip().startswith('python main.py ')]
+                for command in commands:
+                    with self.subTest(style=path.name, beat=beat, command=command):
+                        arguments = shlex.split(command)[2:]
+                        with mock.patch.object(sys, "argv", ["main.py", *arguments]):
+                            parsed = cli.parse_args()
+                        cli._validate_args(parsed)
+                        seen_modes.add(parsed.mode)
+        self.assertEqual(seen_modes, set(driver.MODES))
+
+    def test_point_guide_places_default_source_inside_einstein_circle(self):
+        theta_e = float(phys.rad_to_arcsec(phys.default_point_mass_theta_e()))
+        self.assertLess(0.50, theta_e)
+        claude = self.paths[0].read_text(encoding="utf-8")
+        self.assertIn('0.50', claude)
+        self.assertIn('inside that circle', claude)
+
+    def test_both_beat2_image_positions_match_the_current_lens(self):
+        theta_e = phys.default_point_mass_theta_e()
+        plus, minus = phys.point_mass_image_radii(
+            phys.arcsec_to_rad(1.0), theta_e)
+        for path in self.paths:
+            with self.subTest(help_file=path.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertIn(f"{float(phys.rad_to_arcsec(plus)):+.3f}", text)
+                self.assertIn(f"{float(phys.rad_to_arcsec(minus)):+.3f}", text)
+
+    def test_one_sample_guide_covers_all_eight_beats_and_this_build(self):
+        guide = DOC_DIR / "SampleOutputs/GravitationalLensing-SampleOutputs_Guide.html"
+        if not guide.is_file():
+            guide = MODULE_DIR / "GravitationalLensing-SampleOutputs_Guide.html"
+        self.assertTrue(guide.is_file())
+        text = guide.read_text(encoding="utf-8")
+        self.assertIn(phys.MODEL_VERSION, text)
+        self.assertIn(phys.BUILD_ID, text)
+        self.assertEqual(re.findall(r'<section id="beat(\d+)"', text),
+                         [str(i) for i in range(8)])
+        self.assertEqual(text.count('data:image/png;base64,'), 8)
+
+    def test_build_time_help_sync_is_absent_from_student_cli(self):
+        result = run_cli(["--help"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--sync-help", result.stdout)
 
 
 class TestAudit1Fixes(unittest.TestCase):
