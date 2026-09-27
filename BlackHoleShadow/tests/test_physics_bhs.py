@@ -78,8 +78,11 @@ plot_bhs.py docstrings or output):
 from __future__ import annotations
 
 import hashlib
+import html as html_module
 import math
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -131,18 +134,24 @@ def recompute_build_id(directory):
     return digest.hexdigest()[:12]
 
 
-def find_help_file():
+HELP_NAMES = ("BlackHoleShadow-claude.html", "BlackHoleShadow-grok.html")
+
+
+def find_help_files():
+    """Find the paired Beats files in the sibling repository or review upload."""
     here = MODULE_DIR
-    candidates = [
-        here / "BlackHoleShadow.html",
-        here.parent / "BlackHoleShadow.html",
-        here.parent / "BlackHoleShadow-Documentation" / "BlackHoleShadow.html",
-        here.parent.parent / "GFTGUX-Documentation" / "BlackHoleShadow" / "BlackHoleShadow.html",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path
-    return None
+    directories = (here.parent.parent / "GFTGUX-Documentation" / "BlackHoleShadow",
+                   here.parent / "BlackHoleShadow-Documentation", here.parent, here)
+    for directory in directories:
+        if any((directory / name).is_file() for name in HELP_NAMES):
+            return tuple(directory / name for name in HELP_NAMES)
+    return ()
+
+
+def find_help_file():
+    """Return the Grok file for the original Grok-specific contract tests."""
+    files = find_help_files()
+    return files[1] if len(files) == 2 and files[1].is_file() else None
 
 
 def run_cli(args, cwd=MODULE_DIR, timeout=90):
@@ -571,8 +580,9 @@ class TestModesAndCLI(unittest.TestCase):
 
 class TestHelpFile(unittest.TestCase):
     def test_sync_help_uses_sibling_repository_layout(self):
-        source = find_help_file()
-        self.assertIsNotNone(source)
+        sources = find_help_files()
+        self.assertEqual(len(sources), 2)
+        self.assertTrue(all(path.is_file() for path in sources))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             program = root / "GFTGUX-Programs" / "BlackHoleShadow"
@@ -581,12 +591,67 @@ class TestHelpFile(unittest.TestCase):
             docs.mkdir(parents=True)
             for name in CORE_MODULE_FILES:
                 (program / name).write_bytes((MODULE_DIR / name).read_bytes())
-            help_file = docs / "BlackHoleShadow.html"
-            help_file.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            for source in sources:
+                (docs / source.name).write_text(
+                    source.read_text(encoding="utf-8").replace(phys.BUILD_ID, "000000000000"),
+                    encoding="utf-8")
             result = run_cli(["--sync-help"], cwd=program)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(phys.BUILD_ID, result.stdout)
-            self.assertIn(phys.BUILD_ID, help_file.read_text(encoding="utf-8"))
+            for name in HELP_NAMES:
+                self.assertIn(phys.BUILD_ID, (docs / name).read_text(encoding="utf-8"))
+            before = [(docs / name).read_bytes() for name in HELP_NAMES]
+            self.assertEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
+            self.assertEqual(before, [(docs / name).read_bytes() for name in HELP_NAMES])
+            second = docs / HELP_NAMES[1]
+            second.write_text(second.read_text(encoding="utf-8").replace(
+                '</p>', '<p>broken stamp</p>', 1), encoding="utf-8")
+            self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
+            self.assertEqual(before[0], (docs / HELP_NAMES[0]).read_bytes())
+            (docs / HELP_NAMES[1]).unlink()
+            self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
+            self.assertEqual(before[0], (docs / HELP_NAMES[0]).read_bytes())
+
+    def test_both_beats_help_files_are_present_and_use_this_build(self):
+        files = find_help_files()
+        self.assertEqual(tuple(path.name for path in files), HELP_NAMES)
+        for path in files:
+            with self.subTest(path=path.name):
+                self.assertTrue(path.is_file())
+                text = path.read_text(encoding="utf-8")
+                stamps = re.findall(r'id="version_build"[^>]*>(.*?)</p>', text, re.S)
+                self.assertEqual(len(stamps), 1)
+                stamp = html_module.unescape(re.sub(r'<[^>]*>', '', stamps[0]))
+                self.assertRegex(stamp, rf'Version\s+{re.escape(phys.MODEL_VERSION)}\s+'
+                                        rf'Build\s+{phys.BUILD_ID}')
+                beats = [int(n) for n in re.findall(r'<section id="beat(\d+)"', text)]
+                self.assertEqual(beats, list(range(9)))
+                self.assertEqual(text.count(r'\('), text.count(r'\)'))
+                self.assertEqual(text.count(r'\['), text.count(r'\]'))
+                self.assertIn(r'\sum_{m=1}^{4}', text)
+                self.assertRegex(text.lower(), r'false[ -]colou?r')
+
+    def test_every_documented_beats_command_parses_and_validates(self):
+        import main as entry
+        from unittest.mock import patch
+        for path in find_help_files():
+            text = path.read_text(encoding="utf-8")
+            beats = re.findall(r'<section id="beat\d+".*?</section>', text, re.S)
+            self.assertEqual(len(beats), 9)
+            seen_modes = set()
+            for beat in beats:
+                for block in re.findall(r'<pre[^>]*>(.*?)</pre>', beat, re.S):
+                    block = html_module.unescape(re.sub(r'<[^>]*>', '', block))
+                    for command in block.strip().splitlines():
+                        if not command.strip().startswith('python main.py'):
+                            continue
+                        tokens = shlex.split(command)
+                        with self.subTest(path=path.name, command=command):
+                            with patch.object(sys, 'argv', ['main.py', *tokens[2:]]):
+                                args = entry.parse_args()
+                            entry._validate_args(args)
+                            seen_modes.add(args.mode)
+            self.assertEqual(seen_modes, set(driver.MODES))
 
     def test_help_version_line_matches_when_present(self):
         path = find_help_file()

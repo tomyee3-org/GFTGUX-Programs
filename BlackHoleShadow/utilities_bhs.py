@@ -1,56 +1,13 @@
-"""utilities_bhs.py -- shared high-precision (mpmath) numerics for BlackHoleShadow.
+"""High-precision Schwarzschild ray helpers for BlackHoleShadow.
 
-Proposed new fifth module, per Tom's direction following Claude's Audit 18
-(BlackHoleShadow-Grok-Response-to-Audit17, v0.18.0) and the follow-up
-discussion about that round's two related findings:
+Near the critical impact parameter, keep intermediate values as mpmath
+numbers; convert back to float64 only at the named output boundaries.
+The caller supplies the captured/escaping classification so that the
+high-precision integrator cannot disagree with the float64 image grid
+about which side of the critical curve a ray occupies.
 
-  1. _phi_quad_segment's fallback threshold discarded accurate SciPy
-     answers in favor of a hand-rolled trapezoid that was demonstrably
-     worse (rejecting a good answer at a boundary that doesn't trust it).
-  2. _mp_periapsis returned float(...) and that already-rounded value was
-     reused to build x_hi one level up in _mp_phi_to_endpoint, discarding
-     most of the 30-digit solve (discarding a good answer at a boundary
-     that doesn't preserve it).
-
-Both are the same class of bug: a correct high-precision result loses its
-precision -- or gets thrown away outright -- while crossing a boundary
-between components.  This module exists to make that class of bug
-mechanically harder to write, via one governing rule:
-
-    GOVERNING RULE: every function in this module that does high-precision
-    work takes mpmath values (mpf) in and returns mpf out.  Nothing in
-    here ever rounds an intermediate result to a Python float and then
-    keeps computing with it.  The ONLY functions that return a plain
-    float are the ones named *_over_M / *_float below, which exist
-    specifically to be the single, designated conversion point back to
-    physics_bhs.py's float64 world -- call one of THOSE from physics_bhs.py,
-    never re-derive an mpf from a float64 value that this module already
-    had at full precision.
-
-A second design rule, worth stating explicitly because getting it wrong
-is exactly how a previous round's _dimensionless_state saga happened:
-this module does NOT independently decide whether a ray is escaping or
-captured.  Classification (b vs. b_crit) stays the sole responsibility of
-physics_bhs.py's own critical_impact_parameter(M) and the dimensional
-b > b_crit / b < b_crit comparison already used everywhere else in that
-file.  Every function below that needs to know which regime it's in takes
-an explicit `captured` flag from the caller, rather than recomputing its
-own high-precision b_crit and risking disagreement with physics_bhs.py's
-float64 classification at the boundary.
-
-Also folds in, as one place instead of five: the eps=beta**2-27 helper,
-the near-critical detector, and the periapsis/phi-integral solvers that
-have been rewritten piecemeal across many rounds (_signed_eps,
-_beta_offset, _dimensionless_state, _beta_sq_minus_27, _two_square,
-_mp_periapsis, _mp_phi_to_endpoint, _phi_factored_trap all overlap with
-what lives here now). physics_bhs.py's Dekker/FMA compensation for
-beta**2-27 is a float64-only trick and has no equivalent need here: at
-MP_DPS=30 the cancellation in beta*beta-27 costs far fewer digits than
-float64 ever had to spare in the first place, so plain mpmath arithmetic
-is already exact enough.
-
-Requires mpmath>=1.2 (pure Python, no compiled extension -- no Python
-version constraint beyond what BlackHoleShadow already requires).
+Ordinary rays use the faster float64 path in physics_bhs.py. These helpers
+require mpmath>=1.2 and use MP_DPS decimal digits for near-critical work.
 """
 
 from __future__ import annotations
@@ -59,9 +16,7 @@ import math
 
 import mpmath as mp
 
-# Keep this in sync with the Help file's stated precision (Audit 18 found
-# them disagreeing: code said 30, Help said "~50" -- whichever number is
-# true, it should only be written down in one place).
+# Working precision for near-critical calculations, also identified in Help.
 MP_DPS = 30
 
 # How close (in |eps|, i.e. |beta**2-27|) a ray must be to critical before

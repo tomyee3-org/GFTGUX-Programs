@@ -29,6 +29,7 @@ Examples
 import argparse
 import math
 import os
+import re
 
 import driver_bhs
 import physics_bhs
@@ -95,7 +96,7 @@ def parse_args():
     g.add_argument("--interactive", action="store_true",
                    help="open the figure on screen (no-op under MPLBACKEND=Agg)")
     p.add_argument("--sync-help", action="store_true",
-                   help="write MODEL_VERSION and BUILD_ID into the Help file")
+                   help="write MODEL_VERSION and BUILD_ID into both Beats Help files")
     args = p.parse_args()
     if not hasattr(args, "n_pix"):
         args.n_pix = None
@@ -150,21 +151,32 @@ def main():
     args = parse_args()
     if args.sync_help:
         here = os.path.dirname(os.path.abspath(__file__))
-        candidates = [
+        doc_dirs = [
             os.path.join(os.path.dirname(os.path.dirname(here)),
-                         "GFTGUX-Documentation", "BlackHoleShadow",
-                         "BlackHoleShadow.html"),
-            os.path.join(os.path.dirname(here),
-                         "BlackHoleShadow-Documentation", "BlackHoleShadow.html"),
-            os.path.join(os.path.dirname(here), "BlackHoleShadow.html"),
-            os.path.join(here, "BlackHoleShadow.html"),
+                         "GFTGUX-Documentation", "BlackHoleShadow"),
+            os.path.join(os.path.dirname(here), "BlackHoleShadow-Documentation"),
+            os.path.dirname(here), here,
         ]
-        html = next((p for p in candidates if os.path.isfile(p)), candidates[0])
+        names = ("BlackHoleShadow-claude.html", "BlackHoleShadow-grok.html")
+        docs = next((directory for directory in doc_dirs
+                     if any(os.path.isfile(os.path.join(directory, name))
+                            for name in names)), None)
+        if docs is None or not all(os.path.isfile(os.path.join(docs, name))
+                                   for name in names):
+            raise SystemExit("BlackHoleShadow: --sync-help needs both Beats Help "
+                             "files in the same documentation directory")
         try:
-            ver, bid = physics_bhs.patch_help_version(html)
+            # Validate both targets before changing either one.
+            for name in names:
+                with open(os.path.join(docs, name), encoding="utf-8") as source:
+                    if not re.search(r'id="version_build"[^>]*>(?:(?!<p\b).)*?</p>',
+                                     source.read(), re.S):
+                        raise ValueError(f"malformed #version_build in {name}")
+            for name in names:
+                ver, bid = physics_bhs.patch_help_version(os.path.join(docs, name))
         except (OSError, ValueError) as exc:
             raise SystemExit(f"BlackHoleShadow: {exc}") from exc
-        print(f"Wrote Version {ver}  Build {bid} -> {html}")
+        print(f"Wrote Version {ver}  Build {bid} -> both Beats Help files in {docs}")
         return
     try:
         _validate_args(args)
