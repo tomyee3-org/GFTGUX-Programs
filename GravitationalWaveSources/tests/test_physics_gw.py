@@ -25,6 +25,7 @@ Instead each quantity is cross-checked against at least one of:
 """
 
 import ast
+import base64
 from collections import Counter
 import contextlib
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -56,7 +58,23 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_gw.py",
 )
-HELP_FILE = "GravitationalWaveSources.html"
+HELP_FILES = (
+    "GravitationalWaveSources-claude.html",
+    "GravitationalWaveSources-grok.html",
+)
+
+
+def find_help_paths(module_dir):
+    """Find paired tutorial Helps in repository or flattened upload layout."""
+    source = Path(module_dir).resolve()
+    candidates = [source]
+    for ancestor in (source, *source.parents):
+        candidates.append(ancestor / "GFTGUX-Documentation" / "GravitationalWaveSources")
+    for folder in candidates:
+        paths = tuple(folder / name for name in HELP_FILES)
+        if any(path.exists() for path in paths):
+            return paths
+    return ()
 
 
 def find_module_dir(start):
@@ -450,8 +468,11 @@ class TestModuleDiscovery(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             flat_dir = Path(temporary)
-            for name in (*CORE_MODULE_FILES, HELP_FILE):
+            for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
+            for path in find_help_paths(MODULE_DIR):
+                if path.is_file():
+                    shutil.copy2(path, flat_dir / path.name)
             flat_test = flat_dir / "test_physics_gw.py"
             shutil.copy2(Path(__file__), flat_test)
 
@@ -530,11 +551,12 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         # fourth-order convergence test's numerical dt=1e-5 "reference" was
         # also replaced with an algebraically exact closed-form oracle
         # (test-only; does not affect BUILD_ID).
-        self.assertEqual(physics.MODEL_VERSION, "1.7.0")
+        self.assertEqual(physics.MODEL_VERSION, "1.8.0")
 
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(physics.BUILD_ID_COVERS), CORE_MODULE_FILES)
-        self.assertNotIn(HELP_FILE, physics.BUILD_ID_COVERS)
+        for help_name in HELP_FILES:
+            self.assertNotIn(help_name, physics.BUILD_ID_COVERS)
         self.assertFalse(any("test" in name for name in physics.BUILD_ID_COVERS))
 
     def test_build_id_matches_independent_calculation(self):
@@ -2364,7 +2386,7 @@ class TestDriverRun(unittest.TestCase):
 
             captured = io.StringIO()
             with mock.patch("os.unlink", side_effect=_flaky_unlink):
-                with contextlib.redirect_stdout(captured):
+                with contextlib.redirect_stderr(captured):
                     mode = driver._default_output_file_mode(d)
 
             self.assertEqual(mode, expected_mode)
@@ -2381,10 +2403,20 @@ class TestDriverRun(unittest.TestCase):
         even though its removal itself would have succeeded. Confirms the
         unlink is still attempted -- and succeeds -- even when close()
         itself raises."""
+        real_close = os.close
+
+        def _close_then_raise(fd):
+            real_close(fd)  # Do not leak a real descriptor in this test.
+            raise OSError("simulated close failure after close")
+
         with tempfile.TemporaryDirectory() as d:
-            with mock.patch("os.close", side_effect=OSError("simulated close failure")):
-                driver._default_output_file_mode(d)
+            captured = io.StringIO()
+            with mock.patch("os.close", side_effect=_close_then_raise):
+                with contextlib.redirect_stderr(captured):
+                    driver._default_output_file_mode(d)
             self.assertEqual(list(Path(d).glob(".gw_modeprobe_*")), [])
+            self.assertIn("could not close", captured.getvalue())
+            self.assertIn("simulated close failure", captured.getvalue())
 
     def test_frozen_timestamp_two_complete_writes_both_survive_intact(self):
         """Audit3 (Codex P2-1, required regression #5): the collision tests
@@ -2739,7 +2771,7 @@ class TestPlotting(unittest.TestCase):
 
             captured = io.StringIO()
             with mock.patch("os.unlink", side_effect=_flaky_unlink):
-                with contextlib.redirect_stdout(captured):
+                with contextlib.redirect_stderr(captured):
                     mode = plotting._default_output_file_mode(d)
 
             self.assertEqual(mode, expected_mode)
@@ -2753,10 +2785,20 @@ class TestPlotting(unittest.TestCase):
         """Audit7 (Codex P3-1), plot_gw-layer counterpart to the driver_gw
         test of the same name -- see that test's docstring for the full
         rationale."""
+        real_close = os.close
+
+        def _close_then_raise(fd):
+            real_close(fd)  # Do not leak a real descriptor in this test.
+            raise OSError("simulated close failure after close")
+
         with tempfile.TemporaryDirectory() as d:
-            with mock.patch("os.close", side_effect=OSError("simulated close failure")):
-                plotting._default_output_file_mode(d)
+            captured = io.StringIO()
+            with mock.patch("os.close", side_effect=_close_then_raise):
+                with contextlib.redirect_stderr(captured):
+                    plotting._default_output_file_mode(d)
             self.assertEqual(list(Path(d).glob(".gw_modeprobe_*")), [])
+            self.assertIn("could not close", captured.getvalue())
+            self.assertIn("simulated close failure", captured.getvalue())
 
     def test_savefig_failure_leaves_no_png_behind(self):
         """Audit3 (Codex P2-1 / Copilot A3-3, required regression): patch
@@ -3009,259 +3051,178 @@ class TestCLI(unittest.TestCase):
 # Help file
 # ===========================================================================
 class TestHelpFile(unittest.TestCase):
+    """Both current tutorials form one tested documentation contract."""
+
     @classmethod
     def setUpClass(cls):
-        cls.path = MODULE_DIR / HELP_FILE
-        cls.html = cls.path.read_text(encoding="utf-8")
-        parser = HtmlTreeParser()
-        parser.feed(cls.html)
-        parser.close()
-        cls.root = parser.root
+        cls.paths = find_help_paths(MODULE_DIR)
+        if not cls.paths:
+            raise unittest.SkipTest("both tutorial Helps absent from program-only checkout")
+        if not all(path.is_file() for path in cls.paths):
+            raise AssertionError("both Claude and Grok tutorial Helps are required")
+        cls.pages = tuple(path.read_text(encoding="utf-8") for path in cls.paths)
+        cls.doc_dir = cls.paths[0].parent
+        cls.guide = (cls.doc_dir / "SampleOutputs" /
+                     "GravitationalWaveSources-SampleOutputs_Guide.html").read_text(encoding="utf-8")
 
-    def test_help_file_exists(self):
-        self.assertTrue(self.path.is_file())
+    def test_both_current_help_files_have_distinct_styles(self):
+        self.assertNotEqual(*self.pages)
+        self.assertGreater(len(self.pages[0]), len(self.pages[1]))
+        self.assertIn("Graded experiments", self.pages[0])
+        self.assertIn("one question per run", self.pages[1])
 
-    def test_version_and_build_match_program(self):
-        version_nodes = nodes_by_id(self.root, "version_build")
-        self.assertEqual(len(version_nodes), 1)
-        self.assertEqual(version_nodes[0].tag, "p")
-        self.assertEqual(
-            normalized_text(version_nodes[0]),
-            f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}",
-        )
+    def test_one_tutorial_is_an_error_but_program_only_is_skipped(self):
+        source_path = self.paths[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            temporary_path = Path(temporary)
+            try:
+                with mock.patch.dict(sys.modules[__name__].__dict__, {"MODULE_DIR": temporary_path}):
+                    with self.assertRaises(unittest.SkipTest):
+                        TestHelpFile.setUpClass()
+                    shutil.copy2(source_path, temporary_path / source_path.name)
+                    with self.assertRaisesRegex(AssertionError, "both Claude and Grok"):
+                        TestHelpFile.setUpClass()
+            finally:
+                TestHelpFile.setUpClass()
 
-    def test_build_id_provenance_wording_does_not_overstate_exact_bytes(self):
-        """Audit2 (Codex P3-2 / Copilot A2-1): BUILD_ID is computed from
-        UTF-8 source *text* after universal-newline (CRLF/CR -> LF)
-        normalization, not from the literal on-disk bytes -- a CRLF and an
-        LF copy of the same source intentionally hash identically. The
-        Help text previously (incorrectly) said "exact bytes"; it must not
-        say that, and must describe the normalization instead."""
-        self.assertNotIn("exact bytes", self.html)
-        self.assertIn("normaliz", self.html.lower())
-        provenance_idx = self.html.find("Build identifier provenance")
-        self.assertNotEqual(provenance_idx, -1)
-        # The normalization wording should appear near the provenance note
-        # itself, not merely somewhere else on the page.
-        nearby = self.html[provenance_idx:provenance_idx + 1200]
-        self.assertIn("normaliz", nearby.lower())
-        self.assertIn("CRLF", nearby)
+    def test_archived_reference_guide_is_not_the_current_help(self):
+        archived = self.doc_dir / "GravitationalWaveSources-original.html"
+        self.assertTrue(archived.is_file())
+        self.assertNotIn(archived.read_text(encoding="utf-8"), self.pages)
 
-    def test_untrusted_directory_boundary_is_stated_at_both_output_notes(self):
-        """Audit6 (Codex P2-2): the code docstrings for _verify_temp_identity
-        scope the atomicity/security guarantee to an "ordinary,
-        non-adversarial" output directory -- a shared or attacker-writable
-        --csvdir/--outdir can still let a symlink or substituted file get
-        published, because the identity check happens before publication,
-        not atomically with it. The Help file must state this same boundary,
-        and it must do so at both places a student would actually be reading
-        when they decide where to point --csvdir/--outdir: the Algorithm
-        section's description of the atomic-publish step, and the "Input and
-        runtime safeguards" note. A generic disclaimer somewhere else on the
-        page is not sufficient -- Audit5's version of this text was checked
-        only for the word "atomically" appearing anywhere, which is why the
-        missing scope survived that round undetected."""
-        needle = "untrusted co-tenant"
-        first = self.html.find(needle)
-        self.assertNotEqual(first, -1, "no untrusted-co-tenant wording found")
-        second = self.html.find(needle, first + 1)
-        self.assertNotEqual(
-            second, -1,
-            "untrusted-co-tenant wording must appear at both the Algorithm "
-            "section's output-file description and the 'Input and runtime "
-            "safeguards' note, not just once",
-        )
+    def test_version_and_build_on_both_helps_and_guide(self):
+        for label, page in (*zip(HELP_FILES, self.pages), ("guide", self.guide)):
+            with self.subTest(page=label):
+                self.assertIn(f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}", page)
 
-        algorithm_idx = self.html.find('id="algorithm"')
-        safeguards_idx = self.html.find("Input and runtime safeguards")
-        self.assertNotEqual(algorithm_idx, -1)
-        self.assertNotEqual(safeguards_idx, -1)
-        self.assertLess(algorithm_idx, first)
-        self.assertLess(first, safeguards_idx)
-        self.assertLess(safeguards_idx, second)
+    def test_three_same_exact_beat_commands_in_both_helps_and_guide(self):
+        lists = []
+        for page in (*self.pages, self.guide):
+            commands = re.findall(r"<pre><code>(python main\.py[^<]+)</code></pre>", page)
+            self.assertEqual(len(commands), 3)
+            lists.append(commands)
+        self.assertEqual(lists[0], lists[1])
+        self.assertEqual(lists[1], lists[2])
 
-    def test_default_case_numbers_are_current(self):
-        for required in ("158 seconds",):
-            with self.subTest(required=required):
-                self.assertIn(required, self.html)
+    def test_three_beat_commands_accepted_by_program(self):
+        commands = re.findall(r"<pre><code>(python main\.py[^<]+)</code></pre>", self.pages[0])
+        for command in commands:
+            with self.subTest(command=command):
+                args = shlex.split(html.unescape(command))[2:]
+                with tempfile.TemporaryDirectory() as folder:
+                    args[args.index("--outdir") + 1] = folder
+                    result = subprocess.run([sys.executable, "main.py", *args], cwd=MODULE_DIR,
+                                            env={**os.environ, "MPLBACKEND": "Agg"},
+                                            capture_output=True, text=True, timeout=40)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(len(list(Path(folder).glob("*.png"))), 1)
 
-    def test_parameter_table_matches_argparse_defaults(self):
-        parameter_sections = nodes_by_id(self.root, "parameters")
-        self.assertEqual(len(parameter_sections), 1)
-        tables = descendants(
-            parameter_sections[0], lambda node: has_class(node, "param-table")
-        )
-        self.assertEqual(len(tables), 1)
-        rows = {}
-        for row in descendants(tables[0], lambda node: node.tag == "tr"):
-            cells = [normalized_text(cell) for cell in descendants(row, lambda n: n.tag == "td")]
-            if cells:
-                rows[cells[0]] = cells[1:]
+    def test_no_documented_reference_only_commands(self):
+        proc = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
+                              capture_output=True, text=True, check=True, timeout=15)
+        documented = {"--m1", "--m2", "--d", "--dt", "--f_start", "--ringdown",
+                      "--n_tau", "--rd_pts", "--t_before", "--t_after", "--lw",
+                      "--dpi", "--outdir", "--csvdir"}
+        self.assertTrue(all(option in proc.stdout for option in documented))
+        for page in self.pages:
+            self.assertLessEqual(set(re.findall(r"--[a-z][a-z0-9_]*", page.split("</style>", 1)[-1])),
+                                 documented | {"--help", "--version"})
 
-        argparse_defaults = main_argparse_defaults(MODULE_DIR)
-        expected = {
-            "--m1": 1.4, "--m2": 1.4, "--d": 400.0, "--dt": 2e-4,
-            "--f_start": 20.0, "--ringdown": False, "--n_tau": 6,
-            "--rd_pts": 4000, "--t_before": None, "--t_after": None,
-            "--lw": 0.4, "--dpi": 150, "--outdir": None, "--csvdir": None,
-        }
-        self.assertEqual(argparse_defaults, expected)
+    def test_beats_0_and_1_match_current_scientific_values(self):
+        for page in (*self.pages, self.guide):
+            for expected in ("1.2188", "157.868", "1570.4", "5.583e-23",
+                             "28.0956", "0.813", "67.6", "1.165e-21"):
+                with self.subTest(value=expected):
+                    self.assertIn(expected, page)
 
-        self.assertEqual(float(rows["--m1"][0]), argparse_defaults["--m1"])
-        self.assertEqual(float(rows["--m2"][0]), argparse_defaults["--m2"])
-        self.assertEqual(float(rows["--d"][0]), argparse_defaults["--d"])
-        self.assertEqual(float(rows["--dt"][0]), argparse_defaults["--dt"])
-        self.assertEqual(float(rows["--f_start"][0]), argparse_defaults["--f_start"])
-        self.assertEqual(int(rows["--n_tau"][0]), argparse_defaults["--n_tau"])
-        self.assertEqual(int(rows["--rd_pts"][0]), argparse_defaults["--rd_pts"])
-        self.assertEqual(float(rows["--lw"][0]), argparse_defaults["--lw"])
-        self.assertEqual(int(rows["--dpi"][0]), argparse_defaults["--dpi"])
+    def test_ringdown_values_and_caveats_match(self):
+        for page in (*self.pages, self.guide):
+            for expected in ("61.750", "195.5", "3.417", "merger", "ISCO"):
+                self.assertIn(expected, page)
+        for page in self.pages:
+            self.assertIn("illustrative", page)
+            self.assertIn("Schwarzschild", page)
 
-    def test_help_states_python_version_requirement(self):
-        """P3-3 regression: the Help previously never told students which
-        Python version is required, even though the test suite already
-        confirmed 3.10 syntax compatibility."""
-        self.assertIn("Python 3.10", self.html)
+    def test_build_provenance_does_not_claim_byte_identity(self):
+        for page in self.pages:
+            self.assertIn("CRLF", page)
+            self.assertIn("normaliz", page.lower())
+            self.assertNotIn("exact bytes", page)
 
-    def test_help_documents_ringdown_samples_per_cycle_requirement(self):
-        """P1-1 regression: the parameter table and safeguards note
-        previously described --rd_pts as valid over "2 through 500,000"
-        alone, with no mention that --n_tau and --rd_pts are jointly
-        constrained by the QNM sampling requirement."""
-        self.assertIn("samples per QNM", self.html)
+    def test_csv_schema_matches_live_help_and_both_tutorials(self):
+        for page in (*self.pages, self.guide):
+            self.assertIn("t_s,f_hz,A,h,phase_rad", page)
+        proc = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
+                              capture_output=True, text=True, check=True, timeout=15)
+        self.assertIn("phase_rad", proc.stdout)
 
-    def test_help_documents_dpi_upper_bound(self):
-        """P2-4 regression: the Help previously described --dpi as simply
-        "a positive integer" with no documented upper bound."""
-        self.assertIn("600", self.html)
-        params_text = normalized_text(nodes_by_id(self.root, "parameters")[0])
-        self.assertIn("1 through 600", params_text)
+    def test_joint_ringdown_sampling_requirement_and_dpi_limit(self):
+        for page in self.pages:
+            self.assertIn("eight samples per QNM cycle", page)
+            self.assertIn("600", page)
 
-    def test_help_documents_csvdir(self):
-        """P2-1/P2-3/Gemini regression: --csvdir must be documented as a
-        parameter and referenced from the chirp-mass-extraction and
-        convergence exercises."""
-        self.assertIn("--csvdir", self.html)
+    def test_cli_python_requirement(self):
+        for page in self.pages:
+            self.assertIn("Python 3.10", page)
+            self.assertIn("python main.py --help", page)
 
-    def test_csv_schema_wording_is_synchronized_across_cli_help_and_html(self):
-        """Audit3 (Codex P2-3 / Copilot A3-1): the module docstring, the
-        live "python main.py --help" text, and this Help file all
-        previously described the CSV export as a bare four-column
-        "t, f, A, h" table, while the real writer emits a commented
-        metadata preamble plus a five-column t_s,f_hz,A,h,phase_rad table.
-        This must never regress on any of the three student-facing
-        surfaces at once."""
-        proc = subprocess.run(
-            [sys.executable, "main.py", "--help"],
-            cwd=MODULE_DIR, capture_output=True, text=True, timeout=15, check=False,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        help_text = proc.stdout
-        # Every "t_s,f_hz,A,h" column-list mention must be the full,
-        # current five-column form -- never the stale bare four-column one.
-        bare_four_column = re.compile(r"t_s,f_hz,A,h(?!,phase_rad)")
-        for label, text in (
-            ("live --help", help_text),
-            ("main.py source", (MODULE_DIR / "main.py").read_text(encoding="utf-8")),
-            ("Help HTML", self.html),
-        ):
-            with self.subTest(surface=label):
-                self.assertIn("phase_rad", text)
-                self.assertNotIn("t, f, A, h", text)
-                self.assertNotIn("CSV of t, f, A, h", text)
-                self.assertIsNone(
-                    bare_four_column.search(text),
-                    f"{label} still describes the stale 4-column CSV schema",
-                )
+    def test_caveat_amplitude_is_not_detector_response(self):
+        for page in self.pages:
+            self.assertIn("face-on", page)
+            self.assertIn("detector", page)
+            self.assertIn("distance", page)
 
-    def test_exp7_pre_snippet_executes_and_prints_documented_result(self):
-        """Extract the exact copyable Python snippet from the EXP-7 <pre>
-        block and actually run it (against the real installed physics_gw),
-        confirming it prints the documented 1.2188 -- rather than merely
-        trusting that the HTML text and the real behavior still agree."""
-        match = re.search(r"<pre>(import physics_gw as gw.*?)</pre>", self.html, re.S)
-        self.assertIsNotNone(match, "EXP-7 <pre> snippet not found in Help file")
-        snippet = html.unescape(match.group(1))
-        self.assertIn("chirp_mass_from_fdot", snippet)
-        proc = subprocess.run(
-            [sys.executable, "-c", snippet],
-            cwd=MODULE_DIR, capture_output=True, text=True, timeout=15, check=False,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(proc.stdout.strip(), "1.2188")
+    def test_model_sweep_and_cutoff_are_both_explained(self):
+        for page in self.pages:
+            self.assertIn("df/dt", page)
+            self.assertIn("f_ISCO", page)
+            self.assertIn("chirp mass", page)
 
-    def test_help_documents_mathjax_connectivity_plainly(self):
-        self.assertIn("cdn.jsdelivr.net/npm/mathjax@3", self.html)
-        self.assertIn("an internet connection is needed", self.html)
-        self.assertNotIn("navigator.onLine", self.html)
+    def test_cutoff_convergence_warning_is_in_both_tutorials(self):
+        for page in self.pages:
+            self.assertRegex(page, r"linear(?:ly)? interpolat")
+            self.assertIn("interior", page)
 
-    def test_envelope_ringdown_scope_is_clarified(self):
-        output_text = normalized_text(nodes_by_id(self.root, "output")[0])
-        self.assertIn("stops exactly at the ISCO cutoff", output_text)
+    def test_csv_and_png_temporary_files_and_diagnostics(self):
+        for page in self.pages:
+            self.assertIn(".gw_modeprobe_*", page)
+            self.assertIn(".gw_tmp_*", page)
+            self.assertIn("standard error", page)
+            self.assertIn("untrusted co-tenant", page)
 
-    def test_algorithm_section_explains_time_to_isco_convergence_limit(self):
-        algorithm_text = normalized_text(nodes_by_id(self.root, "algorithm")[0])
-        self.assertIn("fourth order", algorithm_text)
-        self.assertIn("time to isco", algorithm_text.lower())
+    def test_help_navigation_targets_exist_without_duplicates(self):
+        for page in self.pages:
+            identifiers = re.findall(r'\bid="([^"]+)"', page)
+            self.assertEqual(len(identifiers), len(set(identifiers)))
+            for anchor in re.findall(r'href="#([^"]+)"', page):
+                self.assertIn(anchor, identifiers)
 
-    def test_exercise_cards_have_expected_rank_and_title(self):
-        experiment_section = nodes_by_id(self.root, "experiments")
-        self.assertEqual(len(experiment_section), 1)
-        cards = descendants(
-            experiment_section[0], lambda node: has_class(node, "exp-card")
-        )
-        actual = []
-        for card in cards:
-            num = descendants(card, lambda n: has_class(n, "ec-num"))
-            title = descendants(card, lambda n: n.tag == "h4")
-            self.assertEqual(len(num), 1)
-            self.assertEqual(len(title), 1)
-            actual.append((normalized_text(num[0]), normalized_text(title[0])))
+    def test_sample_guide_contains_three_embedded_indexed_pngs(self):
+        images = re.findall(r'src="data:image/png;base64,([^"]+)"', self.guide)
+        self.assertEqual(len(images), 3)
+        for encoded in images:
+            binary = base64.b64decode(encoded, validate=True)
+            self.assertTrue(binary.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(binary[25], 3, "expect indexed-color PNG")
+        self.assertEqual(self.guide.count("What it shows"), 3)
+        self.assertEqual(self.guide.count("Headline values"), 3)
 
-        expected = [
-            ("EXP-1 · introductory", "Identify the Chirp"),
-            ("EXP-2 · introductory", "Verify Inverse-Distance Scaling"),
-            ("EXP-3 · introductory/intermediate", "Starting Frequency and Time in Band"),
-            ("EXP-4 · intermediate", "Chirp Mass Controls the Sweep"),
-            ("EXP-5 · intermediate", "Mass Ratio at Fixed Total Mass"),
-            ("EXP-6 · intermediate", "Test the Inspiral-Time Power Law"),
-            ("EXP-7 · intermediate", "Extract Chirp Mass from the Frequency Sweep"),
-            ("EXP-8 · intermediate/advanced", "Numerical Convergence"),
-            ("EXP-9 · advanced", "Illustrative Black-Hole Ringdown"),
-            ("EXP-10 · advanced", "QNM Scaling with Remnant Mass"),
-            ("EXP-11 · synthesis", "Map the Model's Domain of Validity"),
-        ]
-        self.assertEqual(actual, expected)
+    def test_release_notes_current_and_archived_record(self):
+        notes = (self.doc_dir / "GravitationalWaveSources-ReleaseNotes.html").read_text(encoding="utf-8")
+        for title in ("Release Status", "Open Bugs", "Major Improvements",
+                      "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+                      "Version Identification"):
+            self.assertIn(title, notes)
+        self.assertIn(physics.BUILD_ID, notes)
+        self.assertIn("Earlier 1.7.0 release-note record", notes)
+        self.assertIn("54e086464f39", notes)
 
-    def test_all_internal_navigation_targets_exist_and_ids_are_unique(self):
-        ids = re.findall(r'\bid="([^"]+)"', self.html)
-        counts = Counter(ids)
-        self.assertFalse({name: count for name, count in counts.items() if count > 1})
-        targets = [
-            target
-            for target in re.findall(r'href="#([^"]+)"', self.html)
-            if not target.startswith("$")
-        ]
-        self.assertTrue(targets)
-        for target in targets:
-            with self.subTest(target=target):
-                self.assertIn(target, counts)
+    def test_both_help_pages_have_proper_styling(self):
+        for page in (*self.pages, self.guide):
+            self.assertIn("<style>", page)
+            self.assertIn("</style>", page)
+            self.assertIn("<meta name=\"viewport\"", page)
 
-    def test_no_tab_characters(self):
-        self.assertNotIn("\t", self.html)
-
-    def test_no_review_or_audit_history_leaked_into_student_help(self):
-        for phrase in ("Claude", "Copilot", "Gemini", "ChatGPT", "Codex",
-                       "Critique", "Audit1", "Kickoff"):
-            with self.subTest(phrase=phrase):
-                self.assertNotIn(phrase, self.html)
-
-    def test_module_overview_cards_describe_actual_responsibilities(self):
-        module_section = nodes_by_id(self.root, "modules")[0]
-        cards = descendants(module_section, lambda n: has_class(n, "module-card"))
-        names = [normalized_text(descendants(c, lambda n: has_class(n, "mc-name"))[0])
-                  for c in cards]
-        self.assertEqual(set(names), set(CORE_MODULE_FILES))
 
 
 if __name__ == "__main__":

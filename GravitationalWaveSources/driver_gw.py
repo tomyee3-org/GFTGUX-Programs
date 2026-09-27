@@ -8,6 +8,7 @@ import csv
 import math
 import os
 import stat
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -219,8 +220,10 @@ def _default_output_file_mode(directory):
         # other's attempt.
         try:
             os.close(fd)
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"[gw] Warning: could not close temporary "
+                  f"permission-probe descriptor for {path!r}: {exc}",
+                  file=sys.stderr)
         try:
             os.unlink(path)
         except OSError as exc:
@@ -234,7 +237,8 @@ def _default_output_file_mode(directory):
             # (see the Help file's temporary-file-debris note, which now
             # names this file pattern alongside .gw_tmp_*).
             print(f"[gw] Warning: could not remove temporary "
-                  f"permission-probe file {path!r}: {exc}")
+                  f"permission-probe file {path!r}: {exc}",
+                  file=sys.stderr)
     return mode
 
 

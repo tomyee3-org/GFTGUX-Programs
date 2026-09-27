@@ -15,7 +15,7 @@ import math
 import sys
 import numpy as np
 
-MODEL_VERSION = "1.7.0"
+MODEL_VERSION = "1.8.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only

@@ -6,6 +6,7 @@ Three-panel Matplotlib visualization for GravitationalWaveSources.
 
 import os
 import stat
+import sys
 import tempfile
 import uuid
 import numpy as np
@@ -105,13 +106,16 @@ def _default_output_file_mode(directory):
         # attempt, and a failed unlink is reported, not swallowed silently.
         try:
             os.close(fd)
-        except OSError:
-            pass
+        except OSError as exc:
+            print(f"[gw] Warning: could not close temporary "
+                  f"permission-probe descriptor for {path!r}: {exc}",
+                  file=sys.stderr)
         try:
             os.unlink(path)
         except OSError as exc:
             print(f"[gw] Warning: could not remove temporary "
-                  f"permission-probe file {path!r}: {exc}")
+                  f"permission-probe file {path!r}: {exc}",
+                  file=sys.stderr)
     return mode
 
 
