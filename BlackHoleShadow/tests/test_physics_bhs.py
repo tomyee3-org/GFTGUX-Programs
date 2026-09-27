@@ -141,12 +141,18 @@ class TestBuildIdentity(unittest.TestCase):
         files = find_help_files()
         self.assertEqual(len(files), 2)
         with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            for name in CORE_MODULE_FILES:
+                (tree / name).write_bytes((MODULE_DIR / name).read_bytes())
             for path in files:
-                copy = Path(tmp) / path.name
+                copy = tree / path.name
                 copy.write_bytes(path.read_bytes())
+            self.assertEqual(phys.compute_build_id_from_directory(tree), phys.BUILD_ID)
+            for path in files:
+                copy = tree / path.name
                 copy.write_text(copy.read_text(encoding="utf-8") + "\n<!-- probe -->\n",
                                 encoding="utf-8")
-                self.assertEqual(recompute_build_id(MODULE_DIR), phys.BUILD_ID)
+            self.assertEqual(phys.compute_build_id_from_directory(tree), phys.BUILD_ID)
 
 
 class TestScales(unittest.TestCase):
@@ -633,6 +639,26 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn('--sync-help', result.stdout)
 
+    def test_exp10_explains_interactive_cursor_and_zoom_in_both_guides(self):
+        files = find_help_files()
+        self.assertEqual(len(files), 2)
+        for path in files:
+            with self.subTest(help=path.name):
+                text = path.read_text(encoding='utf-8')
+                card = re.search(r'<div class="exp-card"><div class="ec-num">EXP-10[^<]*</div>.*?</div>',
+                                 text, re.S)
+                self.assertIsNotNone(card)
+                instructions = html_module.unescape(card.group(0)).lower()
+                for detail in ('--mode transfer', '(x, y)', 'lower right',
+                               'zoom', 'magnifier', 'png', '5.20', '5.25'):
+                    self.assertIn(detail, instructions)
+                self.assertIn('interactive', instructions)
+                self.assertIn('--outdir', instructions)
+                self.assertIn('source-profile panel', instructions)
+                self.assertIn('emitted intensity', instructions)
+                self.assertIn('--mode image', instructions)
+                self.assertIn('pointwise image intensity', instructions)
+
     def test_experiment_mode_fragments_and_reviewed_claims(self):
         import main as entry
         from unittest.mock import patch
@@ -661,6 +687,14 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn('potentially several times', claude)
         self.assertNotIn('not computed at all', claude)
         self.assertNotIn('which PhotonOrbit experiment', grok)
+        for outdated in ('to a finite camera does not', 'more than halfway',
+                         'once on its way to the horizon',
+                         'not merely omitted', 'convergence is EXP-9',
+                         "which Beat 7's experiments", 'Markers show the camera radius'):
+            self.assertNotIn(outdated, claude)
+        beat1 = claude.split('<section id="beat1">', 1)[1].split('</section>', 1)[0]
+        self.assertNotIn('the program says so on the console', claude.replace(beat1, ''))
+        self.assertNotIn('width at least 0.01', grok)
 
     def test_claude_quoted_fast_diagnostics_match_the_shipped_code(self):
         claude = find_help_files()[0].read_text(encoding='utf-8')
