@@ -40,7 +40,7 @@ except Exception as exc:
         "Install the packages listed in requirements.txt."
     ) from exc
 
-MODEL_VERSION = "1.0.2"
+MODEL_VERSION = "1.1.0"
 _MP_DPS = utilities_bhs.MP_DPS
 # Highest crossing index computed for the toy image (m = 1..MAX_IMAGE_M).
 # Photon-ring panels start at m=3.
@@ -78,7 +78,7 @@ def image_sum_clause(max_m=None):
 # program; the copy exists so a BlackHoleShadow zip runs standalone.
 PHOTONORBIT_SYNC_VERSION = "1.4.0"
 
-# Tom's explicit intent: BUILD_ID hashes the live program modules.
+# BUILD_ID hashes the live program modules.
 # Help and tests are versioned separately and are not part of BUILD_ID.
 BUILD_ID_COVERS = (
     "physics_bhs.py",
@@ -664,10 +664,7 @@ def require_resolved_shadow(M, fov_over_M, n_pix):
             f"only {intervals:.2f} grid intervals.  Capture maps need at "
             f"least {SHADOW_MIN_INTERVALS:g} intervals so the rim is "
             "visible.  Use a smaller --fov or a larger --n_pix "
-            f"(n_pix cannot exceed {N_PIX_AUTO_MAX}).  "
-            "If --r_hot forced the field to grow, lower --r_hot "
-            f"(image-mode maximum is {max_image_r_hot_over_M(n_pix):.3g} M "
-            "at this n_pix)."
+            f"(n_pix cannot exceed {N_PIX_AUTO_MAX})."
         )
     return intervals
 
@@ -1539,7 +1536,10 @@ def odd_n_pix(n_pix):
 
 
 def patch_help_version(html_path):
-    """Write MODEL_VERSION and BUILD_ID into the Help #version_build element."""
+    """Write the source version and build into one Beats Help file.
+
+    Model-order prose is edited deliberately with each change to MAX_IMAGE_M.
+    """
     import re
     path = os.fspath(html_path)
     with open(path, encoding="utf-8") as handle:
@@ -1552,21 +1552,6 @@ def patch_help_version(html_path):
     new, n = re.subn(pattern, replacement, text, count=1, flags=re.S)
     if n != 1:
         raise ValueError("could not find #version_build in Help file")
-    new = re.sub(
-        r"(\\sum_\{m=1\}\^\{)\d+(\})",
-        rf"\g<1>{MAX_IMAGE_M}\2",
-        new,
-    )
-    new = re.sub(
-        r"Narrow \\\([^\\)]*\\\) peaks",
-        "Narrow \\\\(" + photon_order_label() + "\\\\) peaks",
-        new,
-    )
-    new = re.sub(
-        r"(\\\(m\\ge )\d+(\\\) is omitted)",
-        rf"\g<1>{MAX_IMAGE_M + 1}\2",
-        new,
-    )
     if new != text:
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(new)

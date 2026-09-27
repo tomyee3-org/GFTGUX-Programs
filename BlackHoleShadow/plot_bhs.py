@@ -357,12 +357,6 @@ def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
     fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
 
     ax = axes[0]
-    ax.add_patch(Circle((0.0, 0.0), numbers["r_s_over_M"], fill=True,
-                        facecolor="k", edgecolor="k",
-                        label=r"$r_s=2M$"))
-    ax.add_patch(Circle((0.0, 0.0), numbers["r_photon_over_M"], fill=False,
-                        color=C_PH, lw=1.4, ls="--",
-                        label=r"$r_{\rm ph}=3M$"))
     ax.add_patch(Circle((0.0, 0.0), numbers["b_crit_over_M"], fill=False,
                         color=C_BC, lw=2.0,
                         label=r"$b_{\rm crit}=3\sqrt{3}M$"))
@@ -372,7 +366,7 @@ def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
     ax.set_ylim(-lim, lim)
     ax.set_xlabel(r"$b_x/M$  (image plane)")
     ax.set_ylabel(r"$b_y/M$")
-    ax.set_title("Schwarzschild hole: critical curve")
+    ax.set_title("Schwarzschild hole: image-plane critical curve")
     ax.legend(loc="upper right", fontsize=8)
 
     ax = axes[1]

@@ -114,15 +114,10 @@ def periapsis_over_M_mpf(beta: mp.mpf, dps: int = MP_DPS) -> mp.mpf:
 
 
 def periapsis_over_M(b, M, dps: int = MP_DPS) -> float:
-    """Public float64 entry point: periapsis/M for an escaping ray.
+    """Public float64 entry point for the escaping periapsis divided by M.
 
-    This is the ONLY function in this module allowed to hand back a
-    plain float for the periapsis -- call this from physics_bhs.py's
-    periapsis(), never reconstruct rho from a float you already rounded.
-    If you need the periapsis AND the phi-integral to the periapsis in
-    the same call, use phi_to_endpoint_over_M below instead of calling
-    this first and feeding its float result back in: that round-trip
-    through float64 is exactly Audit 18's second finding.
+    Call the combined endpoint/azimuth helper when both quantities are
+    needed; do not round the turning point and feed it back into mpmath.
     """
     with mp.workdps(dps + 10):
         beta = to_mpf(b) / to_mpf(M)
@@ -170,36 +165,12 @@ def phi_segment_mpf(
     dps: int = MP_DPS,
     turning: bool | None = None,
 ) -> mp.mpf:
-    """integral_{x_lo}^{x_hi} dx/sqrt(R_hat(x)), all mpf, splitting at x=1/3
-    whenever that point lies strictly inside the domain.
+    """Integrate the inbound azimuth segment while retaining mpmath precision.
 
-    This is the general-purpose building block: it is the direct,
-    trustworthy replacement for BOTH _phi_factored_trap (physics_bhs.py's
-    fixed-grid fallback) and, when called from the near-critical gate,
-    _mp_phi_to_endpoint's integral.  Use it as _phi_quad_segment's
-    fallback -- instead of falling back to a method that is *worse* than
-    the SciPy answer being discarded, fall back to a method that is
-    *unconditionally at least as good*, which is the actual fix for
-    Audit 18's first finding (the fallback threshold itself can stay
-    exactly as trigger-happy as it likes once the fallback is trustworthy).
-
-    x=1/3 is where the photon-sphere feature narrows as eps -> 0; missing
-    this split is the mechanism behind every captured-ray near-critical
-    bug this exchange has found (Audits 15 and 17).  It is included here
-    unconditionally, not just "when near-critical", because it costs
-    nothing when eps is not small (the two mp.quad calls are just as fast
-    as one over a smooth integrand) and removes an entire class of "did
-    someone remember to split this time" mistakes.
-
-    turning=True asserts x_hi is a genuine turning point (R_hat(x_hi)=0);
-    turning=False asserts it is not (an ordinary endpoint, e.g. a
-    bisection trial point or the near-horizon endpoint for a captured
-    ray). Leave as None to auto-detect via |R_hat(x_hi)| against a
-    dps-scaled tolerance -- safe, but pass the flag explicitly when the
-    caller already knows, since auto-detection near a genuine but not
-    yet fully mpmath-converged turning point is exactly the kind of
-    judgment call this module exists to make once, correctly, rather
-    than leaving to a heuristic in every caller.
+    Split at x=1/3 whenever the photon-sphere feature lies inside the
+    integration interval. Turning points use a squared-distance change
+    of variable; ordinary endpoints use direct quadrature. A supplied
+    turning flag avoids inferring the endpoint type from a rounded root.
     """
     with mp.workdps(dps + 10):
         x_lo = mp.mpf(x_lo)
@@ -258,25 +229,11 @@ def phi_to_endpoint_over_M(
     horizon_margin: float = 1.0000001,
     dps: int = MP_DPS,
 ) -> float:
-    """Public float64 entry point: inbound phi from infinity to the outer
-    turning point (escaping) or the near-horizon endpoint (captured).
+    """Return the inbound azimuth to the turning or near-horizon endpoint.
 
-    This is the direct replacement for _mp_phi_to_endpoint, and it is
-    where Audit 18's second finding is actually fixed: the escaping
-    branch calls periapsis_over_M_mpf and keeps rho as an mpf all the way
-    through building x_hi -- it never calls periapsis_over_M (the
-    float-returning wrapper) internally, so nothing here rounds to
-    float64 before the phi integral has consumed the full-precision
-    turning point.
-
-    `captured` must come from physics_bhs.py's own dimensional b vs.
-    b_crit comparison (see the module docstring's second design rule).
-    `horizon_over_M` / `horizon_margin` default to Schwarzschild's r_s=2M
-    with the existing 1.0000001 near-horizon convention, matching
-    physics_bhs.py's _max_inbound_u exactly -- pass physics_bhs.py's own
-    event_horizon(M)/M if that convention ever changes, so this module
-    never hard-codes a physical assumption physics_bhs.py doesn't also
-    make.
+    Keep the periapsis and integration endpoint in mpmath precision until
+    the final float64 return. The caller provides the captured status
+    based on its dimensional critical-impact-parameter comparison.
     """
     with mp.workdps(dps + 10):
         beta = to_mpf(b) / to_mpf(M)

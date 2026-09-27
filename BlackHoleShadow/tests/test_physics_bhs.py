@@ -4,75 +4,8 @@ Discovery supports both the repository layout
 (``tests/test_physics_bhs.py``) and a flattened upload layout.  The full
 suite is run once from ``tests/``.
 
-Development history (audit trail -- developers only; never surfaced to
-students in the Help file or in main.py/driver_bhs.py/physics_bhs.py/
-plot_bhs.py docstrings or output):
-
-  2026-09-11  Grok.  Kickoff.  Version 0.1.0.
-    Artifact: BlackHoleShadow-Grok-Kickoff-2026091118.txt
-
-  2026-09-11  Grok.  Response to Audit1.  Version 0.2.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit1-2026091122.txt
-
-  2026-09-11  Grok.  Response to Audit2.  Version 0.3.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit2-2026091123.txt
-
-  2026-09-12  Grok.  Response to Audit3.  Version 0.4.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit3-2026091203.txt
-
-  2026-09-12  Grok.  Response to Audit4.  Version 0.5.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit4-2026091204.txt
-
-  2026-09-12  Grok.  Response to Audit5.  Version 0.6.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit5-2026091207.txt
-
-  2026-09-12  Grok.  Response to Audit6.  Version 0.7.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit6-2026091213.txt
-
-  2026-09-12  Grok.  Response to Audit7.  Version 0.8.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit7-2026091218.txt
-
-  2026-09-12  Grok.  Response to Audit8.  Version 0.9.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit8-2026091221.txt
-
-  2026-09-13  Grok.  Response to Audit9.  Version 0.10.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit9-2026091303.txt
-
-  2026-09-13  Grok.  Response to Audit10.  Version 0.11.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit10-2026091304.txt
-
-  2026-09-13  Grok.  Response to Audit11.  Version 0.12.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit11-2026091305.txt
-
-  2026-09-13  Grok.  Response to Audit12.  Version 0.13.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit12-2026091306.txt
-
-  2026-09-13  Grok.  Response to Audit13.  Version 0.14.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit13-2026091306.txt
-
-  2026-09-13  Grok.  Response to Audit14.  Version 0.15.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit14-2026091316.txt
-
-  2026-09-13  Grok.  Response to Audit15.  Version 0.16.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit15-2026091317.txt
-
-  2026-09-13  Grok.  Response to Audit16.  Version 0.17.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit16-2026091318.txt
-
-  2026-09-13  Grok.  Response to Audit17.  Version 0.18.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit17-2026091320.txt
-
-  2026-09-13  Grok.  Response to Audit18.  Version 0.19.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit18-2026091323.txt
-
-  2026-09-14  Grok.  Response to Audit19.  Version 0.20.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit19-2026091401.txt
-
-  2026-09-14  Grok.  Response to Audit20.  Version 0.21.0.
-    Artifact: BlackHoleShadow-Grok-Response-to-Audit20-2026091402.txt
-
-  2026-09-14  Grok.  Version 1.0.0 first numbered release.
-    ReleaseNotes and SampleOutputs_Guide added after Audit 20.
+The suite checks the numerical model, command-line interface and both
+student Help files.
 """
 
 from __future__ import annotations
@@ -205,16 +138,15 @@ class TestBuildIdentity(unittest.TestCase):
                 phys.compute_build_id_from_directory(tmp_path)
 
     def test_mutating_help_does_not_change_build_id(self):
-        help_path = find_help_file()
-        if help_path is None:
-            self.skipTest("Help file not shipped next to this build")
-        before = phys.BUILD_ID
-        original = help_path.read_text(encoding="utf-8")
-        try:
-            help_path.write_text(original + "\n<!-- probe -->\n", encoding="utf-8")
-            self.assertEqual(recompute_build_id(MODULE_DIR), before)
-        finally:
-            help_path.write_text(original, encoding="utf-8")
+        files = find_help_files()
+        self.assertEqual(len(files), 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            for path in files:
+                copy = Path(tmp) / path.name
+                copy.write_bytes(path.read_bytes())
+                copy.write_text(copy.read_text(encoding="utf-8") + "\n<!-- probe -->\n",
+                                encoding="utf-8")
+                self.assertEqual(recompute_build_id(MODULE_DIR), phys.BUILD_ID)
 
 
 class TestScales(unittest.TestCase):
@@ -504,6 +436,14 @@ class TestDiskImage(unittest.TestCase):
 
 
 class TestCompareRings(unittest.TestCase):
+    def test_image_plane_compare_draws_only_the_impact_parameter_curve(self):
+        fig, _ = plotting.plot_compare(phys.compare_rings(12.0), show=False)
+        circles = [patch for patch in fig.axes[0].patches
+                   if hasattr(patch, 'get_radius')]
+        self.assertEqual(len(circles), 1)
+        self.assertAlmostEqual(circles[0].get_radius(),
+                               phys.critical_impact_parameter(1.0))
+
     def test_default_galaxy_einstein_radius_is_a_few_arcsec(self):
         numbers = phys.compare_rings(12.0)
         self.assertGreater(numbers["theta_e_arcsec"], 1.0)
@@ -604,8 +544,11 @@ class TestHelpFile(unittest.TestCase):
             self.assertEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
             self.assertEqual(before, [(docs / name).read_bytes() for name in HELP_NAMES])
             second = docs / HELP_NAMES[1]
-            second.write_text(second.read_text(encoding="utf-8").replace(
-                '</p>', '<p>broken stamp</p>', 1), encoding="utf-8")
+            second_text = second.read_text(encoding="utf-8")
+            marker = re.search(r'(id="version_build"[^>]*>.*?)</p>', second_text, re.S)
+            self.assertIsNotNone(marker)
+            second.write_text(second_text[:marker.end()-4] + '<p>broken stamp</p>'
+                              + second_text[marker.end():], encoding="utf-8")
             self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
             self.assertEqual(before[0], (docs / HELP_NAMES[0]).read_bytes())
             (docs / HELP_NAMES[1]).unlink()
@@ -634,29 +577,112 @@ class TestHelpFile(unittest.TestCase):
     def test_every_documented_beats_command_parses_and_validates(self):
         import main as entry
         from unittest.mock import patch
+        self.assertEqual(len(find_help_files()), 2)
         for path in find_help_files():
             text = path.read_text(encoding="utf-8")
             beats = re.findall(r'<section id="beat\d+".*?</section>', text, re.S)
             self.assertEqual(len(beats), 9)
-            seen_modes = set()
-            for beat in beats:
+            for number, beat in enumerate(beats):
+                commands = []
                 for block in re.findall(r'<pre[^>]*>(.*?)</pre>', beat, re.S):
                     block = html_module.unescape(re.sub(r'<[^>]*>', '', block))
-                    for command in block.strip().splitlines():
-                        if not command.strip().startswith('python main.py'):
-                            continue
-                        tokens = shlex.split(command)
-                        with self.subTest(path=path.name, command=command):
-                            with patch.object(sys, 'argv', ['main.py', *tokens[2:]]):
-                                args = entry.parse_args()
-                            entry._validate_args(args)
-                            seen_modes.add(args.mode)
-            self.assertEqual(seen_modes, set(driver.MODES))
+                    commands += [shlex.split(line) for line in block.strip().splitlines()
+                                 if line.strip().startswith('python main.py')]
+                modes = []
+                for tokens in commands:
+                    with self.subTest(path=path.name, beat=number, command=tokens):
+                        with patch.object(sys, 'argv', ['main.py', *tokens[2:]]):
+                            args = entry.parse_args()
+                        entry._validate_args(args)
+                        modes.append(args.mode)
+                self.assertIn(driver.MODES[number], modes, (path.name, number))
+            experiment_match = re.search(
+                r'<div class="exp-card"><div class="ec-num">EXP-8.*?</p></div>',
+                text, re.S)
+            experiment = experiment_match.group() if experiment_match else None
+            self.assertIsNotNone(experiment)
+            cameras = re.findall(r'--r_cam (\d+)', experiment)
+            self.assertEqual(cameras, ['10', '60'], path.name)
+            for camera in cameras:
+                with self.subTest(path=path.name, camera=camera):
+                    result = run_cli(['--mode', 'rays', '--r_cam', camera])
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('6  -> escaped', result.stdout)
+                    self.assertNotIn('-> lambda_max', result.stdout)
+
+    def test_help_order_contract_is_manual_and_shared(self):
+        self.assertEqual(len(find_help_files()), 2)
+        for path in find_help_files():
+            text = path.read_text(encoding='utf-8')
+            with self.subTest(path=path.name):
+                self.assertIn(rf"\sum_{{m=1}}^{{{phys.MAX_IMAGE_M}}}", text)
+                self.assertIn(str(phys.MAX_IMAGE_M), text)
+                self.assertIn(phys.photon_order_label(), text)
+        old = phys.MAX_IMAGE_M
+        try:
+            phys.MAX_IMAGE_M = 5
+            for path in find_help_files():
+                with self.subTest(mutant=path.name):
+                    self.assertNotIn(rf"\sum_{{m=1}}^{{{phys.MAX_IMAGE_M}}}",
+                                     path.read_text(encoding='utf-8'))
+        finally:
+            phys.MAX_IMAGE_M = old
+
+    def test_hidden_maintenance_flag_is_not_advertised(self):
+        result = run_cli(['--help'])
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn('--sync-help', result.stdout)
+
+    def test_experiment_mode_fragments_and_reviewed_claims(self):
+        import main as entry
+        from unittest.mock import patch
+        files = find_help_files()
+        self.assertEqual(len(files), 2)
+        for path in files:
+            text = path.read_text(encoding='utf-8')
+            experiment_section = text.split('<section id="experiments">', 1)[1]
+            experiment_section = experiment_section.split('</section>', 1)[0]
+            fragments = re.findall(r'<code>(--mode [^<]+)</code>', experiment_section)
+            self.assertGreaterEqual(len(fragments), 6, path.name)
+            for fragment in fragments:
+                tokens = shlex.split(html_module.unescape(fragment))
+                with self.subTest(path=path.name, fragment=fragment):
+                    with patch.object(sys, 'argv', ['main.py', *tokens]):
+                        args = entry.parse_args()
+                    entry._validate_args(args)
+            self.assertIn('5.25', experiment_section)
+            self.assertIn('5.20', experiment_section)
+            self.assertNotIn('four transfer functions', experiment_section)
+            self.assertNotIn('--r_cam 80', experiment_section)
+        claude = files[0].read_text(encoding='utf-8')
+        grok = files[1].read_text(encoding='utf-8')
+        self.assertIn('grow without bound', claude)
+        self.assertIn('more than one full turn', claude)
+        self.assertIn('potentially several times', claude)
+        self.assertNotIn('not computed at all', claude)
+        self.assertNotIn('which PhotonOrbit experiment', grok)
+
+    def test_claude_quoted_fast_diagnostics_match_the_shipped_code(self):
+        claude = find_help_files()[0].read_text(encoding='utf-8')
+        for mode, args, expected in (
+            ('capture', [], ('8469 / 25921', '5.19615')),
+            ('capture', ['--fov','24','--n_pix','201'], ('5901 / 40401',)),
+            ('weak', [], ('0.1037 / 0.096225', '3.5572 / 0.75471')),
+            ('compare', [], ('2.018 arcsec', '204432')),
+            ('compare', ['--logM','12.5'], ('3.588 arcsec', '114960')),
+        ):
+            result=run_cli(['--mode',mode,*args])
+            self.assertEqual(result.returncode,0,result.stderr)
+            for value in expected:
+                with self.subTest(mode=mode,args=args,value=value):
+                    self.assertIn(value,result.stdout)
+        for value in ('8469', '5901', '0.1037', '0.096225', '3.5572',
+                      '0.75471', '2.018', '3.588'):
+            self.assertIn(value,claude)
 
     def test_help_version_line_matches_when_present(self):
         path = find_help_file()
-        if path is None:
-            self.skipTest("Help file not shipped next to this build")
+        self.assertIsNotNone(path, "both Beats Help files are required")
         text = path.read_text(encoding="utf-8")
         self.assertIn('id="version_build"', text)
         self.assertIn(phys.MODEL_VERSION, text)
@@ -683,8 +709,7 @@ class TestHelpFile(unittest.TestCase):
 
     def test_patch_help_version_is_idempotent(self):
         src = find_help_file()
-        if src is None:
-            self.skipTest("Help file not shipped next to this build")
+        self.assertIsNotNone(src, "both Beats Help files are required")
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "BlackHoleShadow.html"
             dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
@@ -695,30 +720,17 @@ class TestHelpFile(unittest.TestCase):
             self.assertEqual(text.count(phys.BUILD_ID), 1)
             self.assertEqual(text.count(r"\("), text.count(r"\)"))
 
-    def test_help_sync_follows_max_image_m(self):
-        src = find_help_file()
-        if src is None:
-            self.skipTest("Help file not shipped next to this build")
+    def test_help_sync_changes_only_stamps(self):
+        self.assertEqual(len(find_help_files()), 2)
         old = phys.MAX_IMAGE_M
         try:
             with tempfile.TemporaryDirectory() as tmp:
-                dest = Path(tmp) / "BlackHoleShadow.html"
-                dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
                 phys.MAX_IMAGE_M = 5
-                phys.patch_help_version(dest)
-                text = dest.read_text(encoding="utf-8")
-                self.assertIn(r"\sum_{m=1}^{5}", text)
-                self.assertIn(r"photon-ring (\(m\ge 3\))", text)
-                self.assertIn(r"\(m\ge 6\) is omitted", text)
-                self.assertIn(r"\(m=3..5\)", text)
-                phys.MAX_IMAGE_M = 6
-                phys.patch_help_version(dest)
-                text = dest.read_text(encoding="utf-8")
-                self.assertIn(r"\sum_{m=1}^{6}", text)
-                self.assertIn(r"photon-ring (\(m\ge 3\))", text)
-                self.assertIn(r"\(m\ge 7\) is omitted", text)
-                self.assertIn(r"\(m=3..6\)", text)
-                self.assertEqual(text.count(r"\("), text.count(r"\)"))
+                for src in find_help_files():
+                    dest = Path(tmp) / src.name
+                    dest.write_bytes(src.read_bytes())
+                    phys.patch_help_version(dest)
+                    self.assertEqual(dest.read_bytes(), src.read_bytes())
         finally:
             phys.MAX_IMAGE_M = old
 

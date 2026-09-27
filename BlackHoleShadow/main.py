@@ -96,7 +96,7 @@ def parse_args():
     g.add_argument("--interactive", action="store_true",
                    help="open the figure on screen (no-op under MPLBACKEND=Agg)")
     p.add_argument("--sync-help", action="store_true",
-                   help="write MODEL_VERSION and BUILD_ID into both Beats Help files")
+                   help=argparse.SUPPRESS)
     args = p.parse_args()
     if not hasattr(args, "n_pix"):
         args.n_pix = None
