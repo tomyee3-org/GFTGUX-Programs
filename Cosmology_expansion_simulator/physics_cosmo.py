@@ -30,7 +30,7 @@ returned in the same student-facing units.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.5.0"
+MODEL_VERSION = "1.6.0"
 
 
 #: The exact source files this build identifier covers (Copilot Audit 8

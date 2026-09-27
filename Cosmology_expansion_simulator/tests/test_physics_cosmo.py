@@ -124,10 +124,16 @@ Run with:   python -m pytest tests/test_physics_cosmo.py -v
 
 import math
 import os
+import base64
+import html
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -1948,6 +1954,122 @@ class BuildIdentifier(unittest.TestCase):
             with open(path_crlf, "r", encoding="utf-8", newline=None) as f:
                 read_crlf = f.read()
             self.assertEqual(read_lf, read_crlf)
+
+
+class PairedTutorialHelp(unittest.TestCase):
+    """Validate both current tutorial styles as a single shared build.
+
+    A Programs-only checkout has no documents and skips this class. In a
+    deliverable or sibling Documentation checkout, one missing current Help
+    is an error: a single surviving style does not constitute a paired
+    tutorial release. The historical Reference Guide is not a substitute.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.module_dir = Path(__file__).resolve().parent.parent
+        title = "CosmologyExpansionSimulator"
+        roots = [cls.module_dir]
+        for ancestor in (cls.module_dir, *cls.module_dir.parents):
+            roots.append(ancestor / "GFTGUX-Documentation" / title)
+            roots.append(ancestor / title)
+        roots = list(dict.fromkeys(roots))
+        folder = next((p for p in roots if
+                       (p / f"{title}-claude.html").exists() or
+                       (p / f"{title}-grok.html").exists()), None)
+        if folder is None:
+            raise unittest.SkipTest("Neither current tutorial Help is present")
+        cls.docs = folder
+        cls.help_paths = [folder / f"{title}-{style}.html"
+                          for style in ("claude", "grok")]
+        cls.guide = folder / "SampleOutputs" / f"{title}-SampleOutputs_Guide.html"
+
+    @staticmethod
+    def _commands(text):
+        return [html.unescape(x).strip() for x in
+                re.findall(r"<pre><code>(.*?)</code></pre>", text, re.S)]
+
+    def test_both_current_styles_present_and_original_separate(self):
+        for path in self.help_paths:
+            self.assertTrue(path.is_file(), f"Current tutorial missing: {path}")
+        self.assertTrue((self.docs / "CosmologyExpansionSimulator-original.html").is_file())
+        self.assertFalse((self.docs / "CosmologyExpansionSimulator.html").exists())
+
+    def test_version_and_build_shared_by_two_helps_and_guide(self):
+        for path in (*self.help_paths, self.guide):
+            self.assertTrue(path.is_file(), f"Expected document missing: {path}")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn(phys.MODEL_VERSION, text, path.name)
+            self.assertIn(phys.BUILD_ID, text, path.name)
+
+    def test_four_beat_commands_match_guide(self):
+        guide = self.guide.read_text(encoding="utf-8")
+        expected = self._commands(guide)
+        self.assertEqual(len(expected), 4)
+        self.assertEqual(len(set(expected)), 4)
+        for path in self.help_paths:
+            text = path.read_text(encoding="utf-8")
+            for beat, cmd in enumerate(expected):
+                section = re.search(rf'<section id="b{beat}">(.*?)</section>',
+                                    text, re.S)
+                self.assertIsNotNone(section, f"Beat {beat} missing in {path.name}")
+                self.assertEqual(self._commands(section.group(1)), [cmd])
+
+    def test_every_documented_command_is_accepted_by_cli(self):
+        import main as entry
+        for path in (*self.help_paths, self.guide):
+            for cmd in self._commands(path.read_text(encoding="utf-8")):
+                argv = shlex.split(cmd)
+                self.assertEqual(argv[:2], ["python", "main.py"])
+                with self.subTest(path=path.name, command=cmd):
+                    with mock.patch.object(sys, "argv", argv[1:]):
+                        args = entry.parse_args()
+                    self.assertIn(args.mode, drv.MODES)
+
+    def test_guide_contains_four_independent_indexed_pngs(self):
+        guide = self.guide.read_text(encoding="utf-8")
+        images = re.findall(r'src="data:image/png;base64,([A-Za-z0-9+/=]+)"', guide)
+        self.assertEqual(len(images), 4)
+        self.assertEqual(len(set(images)), 4)
+        for src in images:
+            data = base64.b64decode(src, validate=True)
+            self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(data[25], 3, "Guide must embed indexed 256-color PNGs")
+
+    def test_release_notes_keep_history_and_stamp(self):
+        notes = (self.docs / "CosmologyExpansionSimulator-ReleaseNotes.html").read_text(encoding="utf-8")
+        self.assertIn("Earlier 1.5.0 release-note record", notes)
+        self.assertIn("Audit 9", notes)
+        self.assertIn(phys.MODEL_VERSION, notes)
+        self.assertIn(phys.BUILD_ID, notes)
+
+
+class CollapsePlotReadability(unittest.TestCase):
+    """The expanding/contracting H plot must keep its zero sign legible."""
+
+    def test_hubble_symlog_has_sparse_signed_ticks(self):
+        import matplotlib.pyplot as plt
+        import plot_cosmo as viz
+
+        result = phys.integrate_evolution(omega_m=1.5, omega_de=0,
+                                          continue_collapse=True)
+        captured = []
+        with mock.patch.object(viz, "_save_and_show",
+                               side_effect=lambda fig, *args: captured.append(fig)):
+            viz.plot_evolve(result)
+        fig = captured[0]
+        try:
+            ticks = list(fig.axes[1].get_yticks())
+            self.assertLessEqual(len(ticks), 5, "Hubble labels crowd zero")
+            self.assertIn(0, ticks)
+            self.assertTrue(any(x < 0 for x in ticks))
+            self.assertTrue(any(x > 0 for x in ticks))
+            fig.canvas.draw()
+            labeled = [label.get_text() for label in fig.axes[1].get_yticklabels()]
+            self.assertGreaterEqual(sum(bool(label) for label in labeled), 5,
+                                    "Signed Hubble ticks must have visible labels")
+        finally:
+            plt.close(fig)
 
 
 if __name__ == "__main__":

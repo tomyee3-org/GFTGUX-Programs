@@ -84,6 +84,20 @@ def plot_evolve(result, outdir=None, dpi=150, lw=1.6, figsize=(13, 10)):
         linthresh = float(np.min(finite_abs)) if finite_abs.size else 1.0e-3
         ax2.set_yscale("symlog", linthresh=max(linthresh, 1.0e-12))
         ax2.axhline(0.0, color="k", lw=0.5, ls="-")
+        # Automatic symlog decades pack a dozen +/- labels into the tiny
+        # central region for a collapsing run. Choose signed anchors from
+        # the actual H range; fixed 10^16 ticks would expand the axis and
+        # hide smaller-scale models. Keep zero and one intermediate pair.
+        highest_decade = float(np.floor(np.log10(np.max(finite_abs))))
+        lowest_decade = float(np.floor(np.log10(max(linthresh, 1e-12))))
+        outer = 10.0 ** highest_decade
+        if highest_decade - lowest_decade >= 3:
+            # Symlog's default formatter labels integer powers of ten;
+            # half-decade positions remain unlabeled even if ticked.
+            middle = 10.0 ** float(np.floor((highest_decade + lowest_decade) / 2.0))
+            ax2.set_yticks([-outer, -middle, 0.0, middle, outer])
+        else:
+            ax2.set_yticks([-outer, 0.0, outer])
         if s["turnaround"] is not None:
             ax2.axvline(s["turnaround"]["t_turn_gyr"], color="crimson",
                         lw=0.9, ls="-.",
