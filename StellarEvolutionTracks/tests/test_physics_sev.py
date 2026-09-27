@@ -713,13 +713,8 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_sev.py",
 )
-HELP_FILE = "StellarEvolutionTracks.html"
-# Optional second presentation of the same Help content (the "Beats"
-# layout used by GravitationalLensing and BlackHoleShadow).  It is a
-# variant, not a replacement: the layout is recognised from the page's
-# content, never from its file name, so promoting either variant to the
-# canonical HELP_FILE name needs no change to this suite.
-BEATS_HELP_FILE = "StellarEvolutionTracks-Beats.html"
+HELP_FILE = "StellarEvolutionTracks-claude.html"
+BEATS_HELP_FILE = "StellarEvolutionTracks-grok.html"
 
 # Where each layout keeps material that the classic layout holds in a
 # dedicated section.  Every other section the tests read (description,
@@ -752,6 +747,16 @@ def find_module_dir(start):
 
 
 MODULE_DIR = find_module_dir(Path(__file__))
+DOC_DIR = (MODULE_DIR.parent.parent / "GFTGUX-Documentation"
+           / "StellarEvolutionTracks")
+
+
+def help_path(name):
+    """Use the sibling documentation tree, or a complete flattened upload."""
+    sibling = DOC_DIR / name
+    return sibling if sibling.is_file() else MODULE_DIR / name
+
+
 if str(MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MODULE_DIR))
 
@@ -998,8 +1003,10 @@ class TestModuleDiscovery(unittest.TestCase):
             return
         with tempfile.TemporaryDirectory() as temporary:
             flat_dir = Path(temporary)
-            for name in (*CORE_MODULE_FILES, HELP_FILE):
+            for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
+            for name in (HELP_FILE, BEATS_HELP_FILE):
+                shutil.copy2(help_path(name), flat_dir / name)
             smoke = flat_dir / "_flat_smoke.py"
             smoke.write_text(
                 "import sys\n"
@@ -1630,6 +1637,18 @@ class TestHrGridAndIsochrones(unittest.TestCase):
     def test_turnoff_mass_none_outside_age_range(self):
         self.assertIsNone(phys.turnoff_mass([1.0, 2.0], [10.0, 3.0], 100.0))
         self.assertIsNone(phys.turnoff_mass([1.0], [10.0], 5.0))  # < 2 pairs
+
+    def test_turnoff_mass_rejects_misaligned_or_unphysical_grids(self):
+        cases = (([1, 2, 3], [10, 5]),
+                 ([-1, 1, 2], [20, 10, 5]),
+                 (["1", "2"], [10, 5]),
+                 ([1, 2, 3], [10, 10, 5]))
+        for masses, lifetimes in cases:
+            with self.subTest(masses=masses, lifetimes=lifetimes):
+                with self.assertRaises(ValueError):
+                    phys.turnoff_mass(masses, lifetimes, 7)
+        self.assertIsNotNone(phys.turnoff_mass(
+            [.5, 1, 2, 5], [float("nan"), 10, 5, 1], 7))
 
     def test_isochrone_points_carry_correct_phase_and_on_ms_flag(self):
         # Age must lie within the *total* age span of at least two tracks;
@@ -2720,6 +2739,38 @@ class TestNeutronStarSequence(unittest.TestCase):
         s = result["summary"]
         self.assertEqual(s["stable_branch"], s["turning_point"])
 
+    def test_unresolved_branch_checks_all_sampled_models_for_causality(self):
+        result = phys.ns_mass_radius_curve(
+            eos_name="polytrope", gamma=2.5, p_nuc=.04, n=20,
+            rho_lo=2e18, rho_hi=1e19, relativistic=True)
+        summary = result["summary"]
+        self.assertEqual(result["i_max"], 0)
+        self.assertFalse(summary["turning_point"])
+        self.assertEqual(summary["causality_scope"], "sampled sequence")
+        self.assertAlmostEqual(summary["cs_over_c_at_Mmax"], .9274, delta=.001)
+        self.assertAlmostEqual(summary["cs_over_c_max_branch"], 1.18592,
+                               delta=.001)
+        self.assertFalse(summary["causal"])
+        self.assertTrue(any("acausal" in note.lower()
+                            for note in summary["warnings"]))
+
+    def test_soft_polytrope_sequence_radius_converges_and_discloses_drift(self):
+        eos = phys.PolytropeEOS(gamma=1.40, p_nuc=1.0)
+        rho = 6.768e17
+        result = phys.ns_mass_radius_curve(
+            eos_name="polytrope", gamma=1.40, p_nuc=1.0,
+            n=3, rho_lo=rho, rho_hi=rho * 1.001)
+        direct = lambda floor: phys.integrate_structure(
+            eos, eos.x_from_density(rho), relativistic=True,
+            r_scale=1.5e4, y_floor=floor)[1] / 1000
+        old, updated = direct(1e-8), direct(1e-14)
+        self.assertGreater(updated / old - 1, .08)
+        self.assertAlmostEqual(result["R"][0], updated,
+                               delta=1e-9 * updated)
+        self.assertEqual(result["summary"]["surface_floor"], 1e-14)
+        self.assertTrue(math.isfinite(
+            result["summary"]["surface_radius_drift_pct"]))
+
 
 # ======================================================================
 class TestDriverValidation(unittest.TestCase):
@@ -3421,7 +3472,7 @@ class TestHelpFile(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.path = MODULE_DIR / cls.help_name
+        cls.path = help_path(cls.help_name)
         cls.html = cls.path.read_text(encoding="utf-8")
         parser = HtmlTreeParser()
         parser.feed(cls.html)
@@ -3745,13 +3796,6 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(quoted[0], f"{printed:.{digits}f}")
 
 
-if (MODULE_DIR / BEATS_HELP_FILE).is_file():
-    class TestHelpFileBeatsVariant(TestHelpFile):
-        """Every TestHelpFile test, run on the Beats-layout Help file."""
-
-        help_name = BEATS_HELP_FILE
-
-
 # ======================================================================
 class TestHelpFileReferences(unittest.TestCase):
     """What the program says about the Help file must be true of every
@@ -3760,63 +3804,97 @@ class TestHelpFileReferences(unittest.TestCase):
     @staticmethod
     def variants():
         return [name for name in (HELP_FILE, BEATS_HELP_FILE)
-                if (MODULE_DIR / name).is_file()]
+                if help_path(name).is_file()]
 
     @staticmethod
     def parse(name):
         parser = HtmlTreeParser()
-        parser.feed((MODULE_DIR / name).read_text(encoding="utf-8"))
+        parser.feed(help_path(name).read_text(encoding="utf-8"))
         parser.close()
         return parser.root
 
     def test_canonical_help_file_is_present_and_every_variant_recognised(self):
-        self.assertIn(HELP_FILE, self.variants())
+        self.assertEqual(self.variants(), [HELP_FILE, BEATS_HELP_FILE])
         for name in self.variants():
             with self.subTest(help_file=name):
                 self.assertIn(help_layout(self.parse(name)),
                               ("classic", "beats"))
 
     def test_shared_content_is_identical_across_variants(self):
-        # The layouts are two presentations of one body of content.  If
-        # one Help file is edited and the change is not carried to the
-        # other, the shared content diverges and this test names what
-        # differs.  With only one variant present there is nothing to
-        # compare.
+        # The two guides deliberately have different density and order.
+        # Test the shared scientific identity and four-mode contract.
         names = self.variants()
-        if len(names) < 2:
-            return
+        self.assertEqual(len(names), 2)
         roots = [self.parse(name) for name in names]
-        hint = f"variants {names} disagree; carry the edit to the other file"
         banners = [normalized_text(nodes_by_id(root, "version_build")[0])
                    for root in roots]
-        self.assertEqual(banners[0], banners[1], hint)
-        for section_id in SHARED_SECTION_IDS:
-            with self.subTest(section=section_id):
-                texts = [normalized_text(nodes_by_id(root, section_id)[0])
-                         for root in roots]
-                self.assertEqual(texts[0], texts[1], hint)
-        blocks = [Counter(normalized_text(node) for node in descendants(
-            root, lambda item: has_class(item, "eq-block"))) for root in roots]
-        self.assertTrue(blocks[0])
-        self.assertEqual(blocks[0], blocks[1], hint)
+        for banner in banners:
+            self.assertIn(f"Version {phys.MODEL_VERSION}", banner)
+            self.assertIn(f"Build {phys.BUILD_ID}", banner)
+        for root in roots:
+            self.assertEqual([name for name in BEAT_SECTION_IDS
+                              if len(nodes_by_id(root, name)) == 1],
+                             list(BEAT_SECTION_IDS))
+            for mode in driver.MODES:
+                self.assertIn(f"--mode {mode}", normalized_text(root))
 
     def test_program_names_the_canonical_help_file(self):
         # physics_sev's module docstring points readers at this file name.
         # Because layouts are recognised from content, this stays true if
         # either layout is promoted to the canonical name.
-        self.assertIn(HELP_FILE, phys.__doc__)
+        for name in (HELP_FILE, BEATS_HELP_FILE):
+            self.assertIn(name, phys.__doc__)
 
     def test_cli_docstring_handoff_reference_resolves_in_every_variant(self):
         import main as cli_main
-        self.assertIn('"Model Handoffs"', cli_main.__doc__)
+        self.assertIn('model-handoff discussion', cli_main.__doc__)
         for name in self.variants():
             with self.subTest(help_file=name):
                 root = self.parse(name)
                 experiments = nodes_by_id(root, "experiments")[0]
                 titles = [normalized_text(node) for node in descendants(
                     experiments, lambda item: item.tag == "h4")]
-                self.assertTrue(any("Model Handoffs" in t for t in titles),
+                self.assertTrue(any("handoff" in t.lower() for t in titles),
                                 titles)
+
+
+# ======================================================================
+class TestGrokHelpFile(unittest.TestCase):
+    """Independent contracts for the shorter tutorial's actual contents."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.path = help_path(BEATS_HELP_FILE)
+        cls.html = cls.path.read_text(encoding="utf-8")
+        parser = HtmlTreeParser()
+        parser.feed(cls.html)
+        parser.close()
+        cls.root = parser.root
+
+    def test_all_eleven_beats_and_shared_stamp(self):
+        self.assertEqual(help_layout(self.root), "beats")
+        for section in BEAT_SECTION_IDS:
+            self.assertEqual(len(nodes_by_id(self.root, section)), 1, section)
+        stamp = normalized_text(nodes_by_id(self.root, "version_build")[0])
+        self.assertIn(f"Version {phys.MODEL_VERSION}", stamp)
+        self.assertIn(f"Build {phys.BUILD_ID}", stamp)
+
+    def test_every_full_beats_command_is_accepted_by_the_real_parser(self):
+        commands = [entry for entry in documented_commands(self.root)
+                    if entry[2] and entry[0] in BEAT_SECTION_IDS]
+        self.assertGreaterEqual(len(commands), 20)
+        for section, arguments, _ in commands:
+            with self.subTest(beat=section, args=arguments):
+                ns, code, err = parse_with_real_cli(arguments)
+                self.assertIsNone(code, err)
+                self.assertIn(ns.mode, driver.MODES)
+
+    def test_neutron_star_caveats_are_student_visible(self):
+        beat9 = normalized_text(nodes_by_id(self.root, "beat9")[0])
+        self.assertIn("surface cutoff", beat9)
+        self.assertIn("sampled sequence", beat9)
+        self.assertIn("1.34", beat9)
+        self.assertIn("causal", beat9)
 
 
 # ======================================================================
@@ -3981,7 +4059,7 @@ HELP_PROGRAM_CHECKS = [
     ("9", "--mode nsmr", [
         ("maximum mass and radius", "2.1754", "2.1754 solar masses at 11.692 km"),
         ("radius", "11.692", None),
-        ("peak c_s/c, quoted 0.84", "0.8364 peak on the branch", "the peak is 0.84")]),
+        ("peak c_s/c, quoted 0.84", "0.8364 peak on the stable branch", "the peak is 0.84")]),
     ("9", "--mode nsmr --p_nuc 0.02", [
         ("maximum mass and radius", "1.7276", "1.7276 solar masses at 9.239 km"),
         ("radius", "9.239", None)]),
@@ -4032,7 +4110,7 @@ class TestHelpQuotedNumbers(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         parser = HtmlTreeParser()
-        parser.feed((MODULE_DIR / HELP_FILE).read_text(encoding="utf-8"))
+        parser.feed(help_path(HELP_FILE).read_text(encoding="utf-8"))
         parser.close()
         cls.root = parser.root
         layout = help_layout(cls.root)
@@ -4914,11 +4992,9 @@ class TestPolytropeDomain(unittest.TestCase):
         self.assertGreater(change, 0.002)
         self.assertLess(change, 0.01)
 
-    def test_the_default_surface_cutoff_is_the_one_the_note_and_help_quote(self):
-        # The slow-surface note and the Help both describe the reported
-        # radius as the one at which the density has fallen to 1e-8 of its
-        # central value.  The sequence routine must really use that value
-        # (checked by result, not by reading the signature).
+    def test_sequence_surface_cutoff_is_the_one_the_help_quotes(self):
+        # The direct integrator keeps its 1e-8 default; the sequence
+        # explicitly uses a tighter 1e-14 polytrope cutoff.
         self.assertEqual(
             inspect.signature(phys.integrate_structure)
             .parameters["y_floor"].default, 1.0e-8)
@@ -4929,25 +5005,25 @@ class TestPolytropeDomain(unittest.TestCase):
             rho_hi=1.0e19, relativistic=False)
         direct = phys.integrate_structure(
             eos, rho_c, relativistic=False, r_scale=1.5e4,
-            y_floor=1.0e-8)[1] / 1.0e3
+            y_floor=1.0e-14)[1] / 1.0e3
         self.assertAlmostEqual(sequence["R"][0], direct, delta=1.0e-9 * direct)
         looser = phys.integrate_structure(
             eos, rho_c, relativistic=False, r_scale=1.5e4,
             y_floor=1.0e-6)[1] / 1.0e3
         self.assertGreater(abs(looser - direct) / direct, 0.01)
 
-    def test_slow_surface_warning_appears_below_1_4_and_only_there(self):
-        def warnings_for(gamma):
-            summary = phys.ns_mass_radius_curve(
-                eos_name="polytrope", gamma=gamma, n=3, rho_lo=1e17,
-                rho_hi=1e18, relativistic=False)["summary"]
-            return [w for w in summary["warnings"]
-                    if "cutoff" in w and "converged" in w]
-
-        self.assertEqual(len(warnings_for(1.35)), 1)
-        self.assertIn("roughly 0.1 per cent", warnings_for(1.35)[0])
-        self.assertEqual(warnings_for(1.5), [])
-        self.assertEqual(warnings_for(2.5), [])
+    def test_surface_warning_uses_measured_drift_not_a_gamma_threshold(self):
+        for gamma, p_nuc, rho in ((1.4, 1.0, 6.768e17),
+                                  (1.5, 1.0, 2.84e18),
+                                  (2.5, .04, 1e18)):
+            result = phys.ns_mass_radius_curve(
+                eos_name="polytrope", gamma=gamma, p_nuc=p_nuc,
+                n=3, rho_lo=rho, rho_hi=rho * 1.001, relativistic=True)
+            summary = result["summary"]
+            warnings = [w for w in summary["warnings"]
+                        if "cutoff-dependent" in w]
+            self.assertEqual(bool(warnings),
+                             abs(summary["surface_radius_drift_pct"]) >= .05)
         self.assertEqual(phys.POLYTROPE_GAMMA_SLOW_SURFACE, 1.4)
         self.assertEqual(phys.POLYTROPE_GAMMA_MIN, 4.0 / 3.0)
         self.assertEqual(phys.POLYTROPE_GAMMA_NO_SURFACE, 6.0 / 5.0)
@@ -5441,7 +5517,7 @@ class BeatsPageCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         parser = HtmlTreeParser()
-        parser.feed((MODULE_DIR / HELP_FILE).read_text(encoding="utf-8"))
+        parser.feed(help_path(HELP_FILE).read_text(encoding="utf-8"))
         parser.close()
         cls.root = parser.root
         layout = help_layout(cls.root)
@@ -5745,18 +5821,11 @@ class TestHelpClaimsAgreeAcrossLayers(BeatsPageCase):
         self.assertIn(f"{stiff:.1f} km at all four", beat9)
 
     def test_slow_surface_percentages_quoted_are_the_code_s(self):
-        def growth(gamma):
-            eos = phys.PolytropeEOS(gamma=gamma)
-            r = [phys.integrate_structure(
-                eos, 1.0e18, relativistic=False, r_scale=1.5e4,
-                y_floor=floor)[1] for floor in (1e-8, 1e-10)]
-            return 100.0 * (r[1] / r[0] - 1.0)
-
-        self.assertAlmostEqual(growth(1.4), 0.1, delta=0.05)
-        self.assertAlmostEqual(growth(4.0 / 3.0 + 1.0e-4), 0.6, delta=0.1)
-        self.assertIn("roughly 0.1 per cent just below",
-                      self.section_text("beat9"))
-        self.assertIn("0.6 per cent just above", self.section_text("beat9"))
+        beat9 = self.section_text("beat9")
+        self.assertIn("10^{-14}", beat9)
+        self.assertIn("10^{-16}", beat9)
+        self.assertIn("0.05 per cent", beat9)
+        self.assertNotIn("roughly 0.1 per cent just below", beat9)
 
     def test_the_help_states_the_order_and_step_effect_measured_above(self):
         beat6 = self.section_text("beat6")

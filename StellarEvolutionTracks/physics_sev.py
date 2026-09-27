@@ -26,7 +26,8 @@ SI units are used internally.  User-facing quantities are in solar masses,
 solar radii, solar luminosities, kelvin, kilometres and years.
 
 Every model in this module is a deliberately simple teaching model.  The
-help file (StellarEvolutionTracks.html) states explicitly which results are
+paired tutorial Help files (StellarEvolutionTracks-claude.html and
+StellarEvolutionTracks-grok.html) state explicitly which results are
 integrated from stated differential equations and which are prescriptions
 or empirical fits.  Nothing here is a substitute for a stellar-evolution
 code: the tracks stop at helium ignition, and the compact-object modes are
@@ -37,7 +38,7 @@ rather than a continuous integration.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.7.0"
+MODEL_VERSION = "1.8.0"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -1067,15 +1068,29 @@ def turnoff_mass(masses, t_ms_gyr, age_gyr):
     """
     age_gyr = _require_positive("age_gyr", age_gyr)
     masses, t_ms_gyr = list(masses), list(t_ms_gyr)
-    for label, values in (("masses", masses), ("t_ms_gyr", t_ms_gyr)):
-        if any(isinstance(v, (bool, np.bool_)) for v in values):
-            # float(True) is 1.0: a bool in either list would be read as
-            # a mass or a lifetime of exactly 1.
-            raise ValueError(f"{label} must be numbers, not bools.")
-    pairs = [(m, t) for m, t in zip(masses, t_ms_gyr)
-             if t is not None and math.isfinite(t) and t > 0.0 and m > 0.0]
+    if len(masses) != len(t_ms_gyr):
+        raise ValueError("masses and t_ms_gyr must have the same length.")
+    if any(isinstance(value, (str, bytes)) for value in masses + t_ms_gyr):
+        raise ValueError("masses and t_ms_gyr must contain numeric values, "
+                         "not strings.")
+    masses = [_require_positive("mass", value) for value in masses]
+    # An unfinished internal track marks its lifetime NaN; like None it is
+    # intentionally absent from the turn-off fit.  Positive infinity and
+    # negative/zero values are malformed inputs and are refused.
+    lifetimes = [None if value is None or (
+                     isinstance(value, (float, np.floating)) and math.isnan(value))
+                 else _require_positive("t_ms_gyr", value)
+                 for value in t_ms_gyr]
+    if len(set(masses)) != len(masses):
+        raise ValueError("masses must be distinct.")
+    pairs = [(m, t) for m, t in zip(masses, lifetimes) if t is not None]
     if len(pairs) < 2:
         return None
+    by_mass = sorted(pairs)
+    if any(left[1] <= right[1]
+           for left, right in zip(by_mass, by_mass[1:])):
+        raise ValueError("main-sequence lifetimes must decrease strictly "
+                         "with increasing mass.")
     pairs.sort(key=lambda q: q[1])                 # increasing lifetime
     lt = [math.log10(t) for _, t in pairs]
     lm = [math.log10(m) for m, _ in pairs]
@@ -1487,9 +1502,15 @@ POLYTROPE_GAMMA_MIN = 4.0 / 3.0
 
 #: Above POLYTROPE_GAMMA_MIN the surface is real but the density falls to
 #: zero so gradually that the radius converges slowly with the surface
-#: cutoff ``y_floor`` (see ns_mass_radius_curve).  Below this value a run
-#: carries a warning saying so.
+#: cutoff ``y_floor`` (see ns_mass_radius_curve).  This threshold is kept
+#: as an advisory boundary; the sequence now measures its own cutoff drift.
 POLYTROPE_GAMMA_SLOW_SURFACE = 1.4
+# A sequence uses a tighter polytrope surface than the generic structure
+# integrator.  Near Gamma=4/3, the old 1e-8 cutoff could shorten a radius
+# by several per cent while barely moving the mass.  The further two-decade
+# comparison quantifies the remaining dependence at the sampled mass peak.
+POLYTROPE_SEQUENCE_SURFACE_FLOOR = 1.0e-14
+POLYTROPE_SURFACE_CHECK_FLOOR = 1.0e-16
 
 
 class PolytropeEOS:
@@ -2218,9 +2239,10 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     position and height of the peak move with the integration step, so it
     is not a physical maximum.
 
-    A polytropic sequence with Gamma below POLYTROPE_GAMMA_SLOW_SURFACE
-    carries a warning that the radius is slow to converge with the surface
-    cutoff.
+    A polytropic sequence uses a 1e-14 central-density surface fraction
+    rather than the generic integrator's 1e-8.  The radius at the sampled
+    mass peak is rechecked at 1e-16, with any remaining cutoff dependence
+    of at least 0.05 per cent disclosed in the summary warning.
     """
     n = _require_int("n_mr", n, lo=3, hi=MAX_GRID_POINTS)
     relativistic = _require_bool("relativistic", relativistic)
@@ -2230,6 +2252,8 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         raise ValueError("rho_hi must exceed rho_lo.")
 
     eos = make_eos(eos_name, p_nuc=p_nuc, gamma=gamma, K=K)
+    surface_floor = (POLYTROPE_SEQUENCE_SURFACE_FLOOR
+                     if isinstance(eos, PolytropeEOS) else 1.0e-8)
     rho = np.geomspace(rho_lo, rho_hi, n)
 
     M = np.full(n, np.nan)
@@ -2245,7 +2269,8 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         r_scale = 1.5e4
         try:
             m_kg, r_m, _ = integrate_structure(eos, y_c, relativistic=relativistic,
-                                               r_scale=r_scale, step_frac=step_frac)
+                                               r_scale=r_scale, step_frac=step_frac,
+                                               y_floor=surface_floor)
         except RuntimeError as exc:
             fail_reasons[i] = str(exc)
             continue
@@ -2400,22 +2425,30 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
     # converged index below it: an isolated non-converged density inside
     # that range must not be silently bridged over as if the branch were
     # unbroken on both sides of the gap.
-    stable_idx = [i_max]
-    _i = i_max - 1
-    while _i >= 0 and good[_i]:
-        stable_idx.append(_i)
-        _i -= 1
-    stable_idx = np.array(sorted(stable_idx))
+    # Only an interior, resolved turning point identifies a stable branch.
+    # Otherwise inspect *all* converged sampled models, including points
+    # beyond the largest sampled mass.  A one-point provisional branch at
+    # the lower grid edge must never certify an acausal sequence as causal.
+    if turning_point:
+        stable_idx = [i_max]
+        _i = i_max - 1
+        while _i >= 0 and good[_i]:
+            stable_idx.append(_i)
+            _i -= 1
+        checked_idx = np.array(sorted(stable_idx))
+    else:
+        checked_idx = np.where(good)[0]
+    causality_scope = "stable branch" if turning_point else "sampled sequence"
     cs_branch = np.array([float(eos.sound_speed_ratio(eos.x_from_density(rho[i])))
-                          for i in stable_idx])
+                          for i in checked_idx])
     cs_max_branch = float(np.max(cs_branch))
-    i_cs = int(stable_idx[int(np.argmax(cs_branch))])
+    i_cs = int(checked_idx[int(np.argmax(cs_branch))])
     cs_at_max = float(eos.sound_speed_ratio(eos.x_from_density(rho[i_max])))
     causal = bool(cs_max_branch <= 1.0)
     if not causal:
         warnings.append(
-            f"the sound speed reaches c_s/c = {cs_max_branch:.3f} on the "
-            f"branch (at rho_c = {rho[i_cs]:.3e} kg/m^3).  This equation of "
+            f"the sound speed reaches c_s/c = {cs_max_branch:.3f} in the "
+            f"{causality_scope} (at rho_c = {rho[i_cs]:.3e} kg/m^3).  This equation of "
             "state is acausal there and the models above that density are "
             "not physically admissible."
         )
@@ -2431,16 +2464,25 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
             "sequences."
         )
 
-    if gamma_eos is not None and gamma_eos < POLYTROPE_GAMMA_SLOW_SURFACE:
-        warnings.append(
-            f"the polytropic index Gamma = {gamma_eos:.3f} is soft enough "
-            "that the density falls to zero very slowly toward the edge of "
-            "each star.  The radius reported is the radius at which the "
-            "density has fallen to 1e-8 of its central value; it is not fully "
-            "converged: tightening that cutoff to 1e-10 would enlarge it "
-            "by roughly 0.1 per cent just below Gamma = 1.4 and 0.6 per cent just "
-            "above 4/3.  Treat the radius as a slight underestimate."
-        )
+    surface_drift_pct = 0.0
+    if isinstance(eos, PolytropeEOS):
+        try:
+            _, tighter_r, _ = integrate_structure(
+                eos, eos.x_from_density(rho[i_max]), relativistic=relativistic,
+                r_scale=1.5e4, step_frac=step_frac,
+                y_floor=POLYTROPE_SURFACE_CHECK_FLOOR)
+            surface_drift_pct = 100.0 * (tighter_r / (R[i_max] * 1.0e3) - 1.0)
+        except RuntimeError as exc:
+            warnings.append(f"surface-convergence check failed: {exc}")
+            surface_drift_pct = float("nan")
+        if not math.isfinite(surface_drift_pct) or abs(surface_drift_pct) >= 0.05:
+            warnings.append(
+                f"the radius at the largest sampled mass uses a density cutoff "
+                f"of {surface_floor:.0e} of its central value; tightening it "
+                f"to {POLYTROPE_SURFACE_CHECK_FLOOR:.0e} changes that radius "
+                f"by {surface_drift_pct:.3f} per cent.  Treat the radius as "
+                "cutoff-dependent; the mass is much less sensitive."
+            )
 
     summary = dict(
         eos=eos_name,
@@ -2456,6 +2498,7 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         compact_at_Mmax=float(compact[i_max]),
         cs_over_c_at_Mmax=cs_at_max,
         cs_over_c_max_branch=cs_max_branch,
+        causality_scope=causality_scope,
         rho_at_cs_max=float(rho[i_cs]),
         causal=causal,
         z_at_Mmax=float(z_surf[i_max]),
@@ -2470,6 +2513,8 @@ def ns_mass_radius_curve(eos_name="neutron", n=40,
         M_min=float(np.nanmin(M[good])),
         R_min=float(np.nanmin(R[good])),
         R_max=float(np.nanmax(R[good])),
+        surface_floor=surface_floor,
+        surface_radius_drift_pct=surface_drift_pct,
         warnings=warnings,
         # One entry per central density that did NOT yield an accepted
         # model, giving the actual reason instead of forcing a caller to

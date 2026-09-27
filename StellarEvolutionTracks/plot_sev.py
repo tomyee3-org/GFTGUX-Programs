@@ -557,7 +557,10 @@ def plot_ns_mass_radius(result, outdir=None, dpi=150, lw=1.7,
     ax1.set_ylabel(r"$M/M_\odot$")
     ax1.set_title("Mass–radius relation")
     ax1.grid(True, lw=0.3, alpha=0.5)
-    ax1.legend(fontsize=7.0, loc="upper right", framealpha=0.92)
+    # Keep the maximum-mass marker visible even for the stiff polytrope:
+    # its position can coincide with a legend placed inside these axes.
+    ax1.legend(fontsize=7.0, loc="upper center", bbox_to_anchor=(0.5, -0.20),
+               ncol=2, framealpha=0.92)
 
     # --- Panel 2: mass vs central density -----------------------------
     if classify:

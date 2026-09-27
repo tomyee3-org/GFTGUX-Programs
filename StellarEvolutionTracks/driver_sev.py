@@ -455,8 +455,12 @@ def _print_ns_summary(s):
         print("                        results of general relativity and are")
         print("                        therefore not reported here.")
     print(f"  Sound speed c_s/c   : {s['cs_over_c_at_Mmax']:.4f} there,"
-          f"  {s['cs_over_c_max_branch']:.4f} peak on the branch"
+          f"  {s['cs_over_c_max_branch']:.4f} peak on the {s['causality_scope']}"
           + ("" if s["causal"] else "   *** ACAUSAL ***"))
+    if s["eos"] == "polytrope":
+        print(f"  Surface cutoff     : {s['surface_floor']:.0e} of central density"
+              f"; radius drift at M_peak = {s['surface_radius_drift_pct']:.3f}%"
+              " on two-decade tightening")
     print(f"  Radius range        : {s['R_min']:.2f} .. {s['R_max']:.2f}  km")
     if s["turning_point"] and s["relativistic"]:
         print("  The turning point of M(rho_c) marks the onset of radial")
@@ -670,7 +674,8 @@ def _run_nsmr(kw, outdir, csvdir, dpi, lw):
                     "surface_redshift_z", "branch"], rows,
                    comments=notes + _provenance("nsmr", kw)
                    + [headline,
-                      f"peak c_s/c on the branch = {s['cs_over_c_max_branch']:.4f}"]
+                      f"peak c_s/c on the {s['causality_scope']} = "
+                      f"{s['cs_over_c_max_branch']:.4f}"]
                    + [f"warning: {w}" for w in s["warnings"]]
                    + [f"failure detail: {d}" for d in s["warnings_detail"]])
     if not kw["no_plot"]:

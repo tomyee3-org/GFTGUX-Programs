@@ -19,7 +19,7 @@ masses) whose post-main-sequence integration itself reaches this
 schematic model's core-mass cap before helium ignition: for that case the
 track's own computed endpoint, not the generic mass-only classification,
 determines the reported remnant (see remnant_basis in the track summary,
-and the Help file's "Model Handoffs" discussion).
+and the model-handoff discussion in both tutorial Help files).
 
 Examples
 --------
