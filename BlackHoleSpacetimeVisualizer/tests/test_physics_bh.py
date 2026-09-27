@@ -28,16 +28,24 @@ Design notes
 """
 
 import csv
+import base64
+import contextlib
+import html
 import importlib.util
 import inspect
+import io
 import math
 import os
+from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 import warnings
+from unittest import mock
 
 import numpy as np
 
@@ -2335,6 +2343,147 @@ class TestCLI(unittest.TestCase):
                 doc = inspect.getdoc(obj)
                 if doc:
                     _assert_clean(doc, f"docstring of physics_bh.{name}")
+
+
+class TestBothTutorialHelpFiles(unittest.TestCase):
+    """The two Beats pages and the guide form one mandatory release unit."""
+
+    DOCS = (Path(PROJECT_DIR).parents[1] / "GFTGUX-Documentation"
+            / "BlackHoleSpacetimeVisualizer")
+    HELP_NAMES = ("BlackHoleSpacetimeVisualizer-claude.html",
+                  "BlackHoleSpacetimeVisualizer-grok.html")
+    MODES = ("embed", "tidal", "infall", "horizons")
+
+    @classmethod
+    def _require_pair(cls, directory):
+        absent = [name for name in cls.HELP_NAMES
+                  if not (directory / name).is_file()]
+        if absent:
+            raise AssertionError("Both tutorial Help files are required: "
+                                 + ", ".join(absent) + " missing")
+        return tuple(directory / name for name in cls.HELP_NAMES)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pages = cls._require_pair(cls.DOCS)
+
+    @staticmethod
+    def _beat_commands(page):
+        # One displayed command per Beat; inline exercise commands are checked
+        # separately by the parser below when they start with python main.py.
+        return [html.unescape(x).strip() for x in
+                re.findall(r'<pre><code>(.*?)</code></pre>', page, re.S)]
+
+    def test_missing_either_page_is_a_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            tmp = Path(temp)
+            for present, missing in ((self.HELP_NAMES[0], self.HELP_NAMES[1]),
+                                     (self.HELP_NAMES[1], self.HELP_NAMES[0])):
+                (tmp / present).write_text("test placeholder", encoding="utf-8")
+                (tmp / missing).unlink(missing_ok=True)
+                with self.assertRaisesRegex(AssertionError,
+                                            "Both tutorial Help files are required"):
+                    self._require_pair(tmp)
+
+    def test_both_pages_share_live_version_and_build(self):
+        for path in self.pages:
+            with self.subTest(page=path.name):
+                body = path.read_text(encoding="utf-8")
+                self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}", body)
+                self.assertNotIn("data:image/", body)  # standalone text tutorials
+
+    def test_four_beat_commands_per_page_in_mode_order(self):
+        for path in self.pages:
+            with self.subTest(page=path.name):
+                body = path.read_text(encoding="utf-8")
+                self.assertEqual(re.findall(r'<section id="b([0-3])">', body),
+                                 ["0", "1", "2", "3"])
+                commands = self._beat_commands(body)
+                self.assertEqual(len(commands), 4)
+                self.assertEqual([shlex.split(s)[3] for s in commands],
+                                 list(self.MODES))
+
+    def test_all_complete_documented_commands_parse(self):
+        import main
+        for path in self.pages:
+            body = path.read_text(encoding="utf-8")
+            command_texts = self._beat_commands(body)
+            command_texts += [html.unescape(s) for s in re.findall(
+                r'<code>(python main\.py.*?)</code>', body, re.S)
+                if '\n' not in s]
+            self.assertGreaterEqual(len(command_texts), 5)
+            for command in set(command_texts):
+                with self.subTest(page=path.name, command=command):
+                    parts = shlex.split(command)
+                    self.assertEqual(parts[:2], ["python", "main.py"])
+                    with mock.patch.object(sys, "argv", ["main.py", *parts[2:]]):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            try:
+                                main.parse_args()
+                            except SystemExit as exc:
+                                if exc.code != 0:  # --help and --version exit successfully
+                                    self.fail(f"documented command was rejected: {command}: {exc}")
+
+    def test_each_beat_runs_and_produces_the_stated_signature(self):
+        # One source of truth for the actual teaching runs; this also
+        # distinguishes the real CLI from a page that merely parses.
+        commands = self._beat_commands(self.pages[0].read_text(encoding="utf-8"))
+        signature = ("-5.7328e-10", "1.8914e+07", "2.2048475", "1.00000145")
+        for mode, command, expected in zip(self.MODES, commands, signature):
+            with tempfile.TemporaryDirectory() as folder:
+                parts = shlex.split(command)
+                index = parts.index("--outdir")
+                del parts[index:index + 2]
+                result = run_cli(parts[2:] + ["--no_plot", "--csvdir", folder])
+                with self.subTest(mode=mode):
+                    self.assertEqual(result.returncode, 0, msg=result.stderr)
+                    self.assertIn(expected, result.stdout)
+                    self.assertTrue(any(name.endswith(".csv") for name in os.listdir(folder)))
+
+    def test_guide_contains_matching_commands_and_four_real_indexed_pngs(self):
+        guide = self.DOCS / "SampleOutputs" / "BlackHoleSpacetimeVisualizer-SampleOutputs_Guide.html"
+        body = guide.read_text(encoding="utf-8")
+        self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}", body)
+        expected = self._beat_commands(self.pages[0].read_text(encoding="utf-8"))
+        self.assertEqual(self._beat_commands(body), expected)
+        images = re.findall(r'src="data:image/png;base64,([A-Za-z0-9+/=]+)"', body)
+        self.assertEqual(len(images), 4)
+        for image in images:
+            png = base64.b64decode(image, validate=True)
+            self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(png[25], 3, "sample PNG must be 256-color indexed")
+        for token in ("29.53 km", "1.8914e7 g", "2.2048475 ms", "1.00000145"):
+            self.assertIn(token, body)
+
+    def test_printed_exercise_references_exist_in_both_current_guides(self):
+        # Old program summaries refer to exercise IDs; the new tutorials
+        # must continue to supply those exercises with their old meanings.
+        code = (Path(PROJECT_DIR) / "driver_bh.py").read_text(encoding="utf-8")
+        code += (Path(PROJECT_DIR) / "main.py").read_text(encoding="utf-8")
+        ids = set(re.findall(r"EXP-\d+", code))
+        self.assertEqual(ids, {"EXP-5", "EXP-8", "EXP-10", "EXP-11", "EXP-13", "EXP-18"})
+        for page in self.pages:
+            body = page.read_text(encoding="utf-8")
+            with self.subTest(page=page.name):
+                for ref in ids:
+                    self.assertIn(ref + ":" if page.name.endswith("-grok.html")
+                                  else ref + ",", body)
+
+    def test_closed_form_infall_checkpoint_uses_nominal_gm(self):
+        rs = phys.schwarzschild_radius(10)
+        r0, stop = 6 * rs, 1.0005 * rs
+        eta = math.acos(2 * stop / r0 - 1)
+        tau_ms = 1000 * math.sqrt(r0**3 / (8 * phys.GM_SUN_NOMINAL * 10)) * (
+            eta + math.sin(eta))
+        self.assertAlmostEqual(tau_ms, 2.2048475035, places=8)
+        self.assertIn("2.2048475035 ms", self.pages[0].read_text(encoding="utf-8"))
+
+    def test_release_notes_and_legacy_reference_are_present(self):
+        notes = (self.DOCS / "BlackHoleSpacetimeVisualizer-ReleaseNotes.html").read_text(encoding="utf-8")
+        self.assertIn(f"{phys.MODEL_VERSION}", notes)
+        self.assertIn(f"{phys.BUILD_ID}", notes)
+        self.assertIn("Previous Release Notes — 1.4.0", notes)
+        self.assertTrue((self.DOCS / "BlackHoleSpacetimeVisualizer-original.html").is_file())
 
 
 if __name__ == "__main__":
