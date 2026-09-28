@@ -853,9 +853,19 @@ the resulting technical behavior only, timelessly.
     individual methods exercising whichever fix was in progress, never
     a full-class enumeration beyond what each fix actually touched.
     291 tests (from 287). BUILD_ID: fda9adf9e39a.
+
+Kickoff4: archived the Reference Guide, built two independent tutorial
+styles around four shared exact commands, and required both to be present
+for documentation checks. Corrected comment-only source links that pointed
+to the retired HTML filename; neither physics nor runtime behavior changed,
+so MODEL_VERSION remains 1.0.1, while BUILD_ID reflects the source edits.
+Added an independently seeded perturbation to the chaos sample command,
+because an initial-condition seed alone leaves its perturbation random.
+299 tests (from 291). BUILD_ID: 5dc0f45efa6c.
 """
 
 import ast
+import base64
 from collections import Counter
 import contextlib
 import decimal
@@ -886,7 +896,21 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_nbg.py",
 )
-HELP_FILE = "NbodyGalaxySimulator.html"
+HELP_FILES = ("NbodyGalaxySimulator-claude.html", "NbodyGalaxySimulator-grok.html")
+HELP_FILE = HELP_FILES[0]
+
+
+def find_help_paths(module_dir):
+    """Find both current Helps in a repository or flattened upload."""
+    source = Path(module_dir).resolve()
+    candidates = [source]
+    for ancestor in (source, *source.parents):
+        candidates.append(ancestor / "GFTGUX-Documentation" / "NbodyGalaxySimulator")
+    for folder in candidates:
+        paths = tuple(folder / name for name in HELP_FILES)
+        if any(path.exists() for path in paths):
+            return paths
+    return ()
 
 # Shared development/audit-history leak sweep, applied identically to the
 # HTML help file (TestHelpFile) and the four executable .py modules
@@ -1200,8 +1224,11 @@ class TestModuleDiscovery(unittest.TestCase):
             return
         with tempfile.TemporaryDirectory() as temporary:
             flat_dir = Path(temporary)
-            for name in (*CORE_MODULE_FILES, HELP_FILE):
+            for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
+            for path in find_help_paths(MODULE_DIR):
+                if path.is_file():
+                    shutil.copy2(path, flat_dir / path.name)
             smoke = flat_dir / "_flat_smoke.py"
             smoke.write_text(
                 "import sys\n"
@@ -1227,7 +1254,8 @@ class TestModuleDiscovery(unittest.TestCase):
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(phys.BUILD_ID_COVERS), CORE_MODULE_FILES)
-        self.assertNotIn(HELP_FILE, phys.BUILD_ID_COVERS)
+        for help_name in HELP_FILES:
+            self.assertNotIn(help_name, phys.BUILD_ID_COVERS)
         self.assertFalse(any("test" in name for name in phys.BUILD_ID_COVERS))
 
     def test_build_id_matches_independent_calculation(self):
@@ -1348,9 +1376,14 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         )
 
     def test_help_file_reports_same_build_as_program(self):
-        html = (MODULE_DIR / HELP_FILE).read_text(encoding="utf-8")
-        self.assertIn(f"Version {phys.MODEL_VERSION}", html)
-        self.assertIn(f"Build {phys.BUILD_ID}", html)
+        paths = find_help_paths(MODULE_DIR)
+        if not paths:
+            self.skipTest("no tutorial Helps in program-only checkout")
+        self.assertTrue(all(path.is_file() for path in paths), "both tutorials required")
+        for path in paths:
+            html = path.read_text(encoding="utf-8")
+            self.assertIn(f"Version {phys.MODEL_VERSION}", html)
+            self.assertIn(f"Build {phys.BUILD_ID}", html)
 
 
 # ======================================================================
@@ -6672,15 +6705,23 @@ class TestPlotting(unittest.TestCase):
 class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.path = MODULE_DIR / HELP_FILE
+        cls.paths = find_help_paths(MODULE_DIR)
+        if not cls.paths:
+            raise unittest.SkipTest("tutorial Helps absent from program-only checkout")
+        if not all(path.is_file() for path in cls.paths):
+            raise AssertionError("Claude and Grok tutorial Helps must both be present")
+        cls.path = cls.paths[0]
         cls.html = cls.path.read_text(encoding="utf-8")
+        cls.grok_html = cls.paths[1].read_text(encoding="utf-8")
+        cls.guide = (cls.path.parent / "SampleOutputs" /
+                     "NbodyGalaxySimulatorSampleOutputs_Guide.html").read_text(encoding="utf-8")
         parser = HtmlTreeParser()
         parser.feed(cls.html)
         parser.close()
         cls.root = parser.root
 
     def test_help_file_exists(self):
-        self.assertTrue(self.path.is_file())
+        self.assertTrue(all(path.is_file() for path in self.paths))
 
     def test_version_and_build_match_program(self):
         version_nodes = nodes_by_id(self.root, "version_build")
@@ -6728,7 +6769,98 @@ class TestHelpFile(unittest.TestCase):
         .py files (see TestMetadataAndCompatibility's version of this
         check).
         """
-        _assert_no_leaked_history(self, self.html, HELP_FILE)
+        for path, page in zip(self.paths, (self.html, self.grok_html)):
+            _assert_no_leaked_history(self, page, path.name)
+
+    def test_both_tutorial_styles_and_archived_reference_are_distinct(self):
+        self.assertNotEqual(self.html, self.grok_html)
+        self.assertGreater(len(self.html), len(self.grok_html))
+        archived = self.path.parent / "NbodyGalaxySimulator-original.html"
+        self.assertTrue(archived.is_file())
+        self.assertNotEqual(self.html, archived.read_text(encoding="utf-8"))
+        self.assertIn("Worked check", self.html)
+        self.assertIn("one gravitational question", self.grok_html)
+
+    def test_single_tutorial_is_rejected_but_program_only_is_skipped(self):
+        original_module_dir = MODULE_DIR
+        source_path = self.paths[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            try:
+                with mock.patch.dict(sys.modules[__name__].__dict__, {"MODULE_DIR": scratch}):
+                    with self.assertRaises(unittest.SkipTest):
+                        TestHelpFile.setUpClass()
+                    shutil.copy2(source_path, scratch / HELP_FILE)
+                    with self.assertRaisesRegex(AssertionError, "both be present"):
+                        TestHelpFile.setUpClass()
+            finally:
+                with mock.patch.dict(sys.modules[__name__].__dict__, {"MODULE_DIR": original_module_dir}):
+                    TestHelpFile.setUpClass()
+
+    def test_all_four_beats_share_exact_commands_with_sample_guide(self):
+        commands=[]
+        for page in (self.html, self.grok_html, self.guide):
+            extracted = re.findall(
+                r"<pre><code>(python main\.py[^<]*--outdir \./figures)</code></pre>",
+                page)
+            self.assertEqual(len(extracted), 4)
+            commands.append(extracted)
+        self.assertEqual(commands[0], commands[1])
+        self.assertEqual(commands[1], commands[2])
+        self.assertEqual([c.split("--mode ")[1].split()[0] for c in commands[0]],
+                         ["cluster", "cluster", "galaxy", "chaos"])
+        self.assertIn("--seed 1 --perturbation_seed 1", commands[0][3])
+
+    def test_both_helps_explain_core_caveats_at_the_relevant_beats(self):
+        for page in (self.html, self.grok_html):
+            for phrase in ("instantaneous", "cumulative", "softening",
+                           "quasi-equilibrium", "finite-time", "--perturbation_seed"):
+                with self.subTest(phrase=phrase):
+                    self.assertIn(phrase, page)
+            self.assertIn("Domain of Validity", page)
+            self.assertIn("Governing Equations", page)
+            self.assertIn("Algorithm", page)
+
+    def test_grok_flags_and_model_boundaries_match_live_cli(self):
+        result = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
+                                capture_output=True, text=True, check=True, timeout=15)
+        all_flags = set(re.findall(r"--[a-z][a-z_0-9]*", result.stdout))
+        grok_content = self.grok_html.split("</style>", 1)[1]
+        flags = set(re.findall(r"--[a-z][a-z_0-9]*", grok_content))
+        self.assertLessEqual(flags, all_flags)
+        self.assertIn("O(N²)", self.grok_html)
+        self.assertIn("--no_plot", self.grok_html)
+        self.assertIn("--csvdir", self.grok_html)
+
+    def test_guide_contains_four_embedded_current_build_palette_figures(self):
+        self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}", self.guide)
+        figures = re.findall(r'src="data:image/png;base64,([^"]+)"', self.guide)
+        self.assertEqual(len(figures), 4)
+        for data in figures:
+            raw = base64.b64decode(data, validate=True)
+            self.assertTrue(raw.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(raw[25], 3)
+        self.assertEqual(self.guide.count("What it shows"), 4)
+        self.assertEqual(self.guide.count("Headline values"), 4)
+
+    def test_help_pages_have_valid_beat_navigation_and_self_contained_style(self):
+        for page in (self.html, self.grok_html):
+            self.assertIn("<style>", page)
+            ids = re.findall(r'\bid="([^"]+)"', page)
+            self.assertEqual(len(ids), len(set(ids)))
+            for i in range(4):
+                self.assertIn(f"beat{i}", ids)
+            for target in re.findall(r'href="#([^"{}]+)"', page):
+                self.assertIn(target, ids)
+
+    def test_release_notes_current_record_and_archived_history(self):
+        notes = (self.path.parent / "NbodyGalaxySimulator-ReleaseNotes.html").read_text(encoding="utf-8")
+        for heading in ("Release Status", "Open Bugs", "Major Improvements in This Release",
+                        "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+                        "Version Identification"):
+            self.assertIn(f"<h2>{heading}</h2>", notes)
+        self.assertIn(phys.BUILD_ID, notes)
+        self.assertIn("1.0.1", notes)
 
     def test_all_internal_navigation_targets_exist_and_ids_are_unique(self):
         ids = re.findall(r'\bid="([^"]+)"', self.html)

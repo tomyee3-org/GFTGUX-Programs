@@ -37,14 +37,14 @@ Examples
 --------
   # A 200-star Plummer cluster at default parameters; whether two-body
   # relaxation is visibly acting within this run's length is not
-  # guaranteed at default softening -- see the Help file's EXP-1 and
-  # the tuned, multi-seed EXP-11 below for how to assess that properly
+  # guaranteed at default softening -- see the tutorial Help's first
+  # two beats and its tuned multi-seed follow-up for how to assess that
   python main.py --mode cluster
 
   # A smaller cluster with softening lowered so real unbound bodies can
   # appear (needs a smaller timestep to stay accurate -- see the Help
   # file); whether any given seed ends with a nonzero instantaneously-
-  # unbound count varies -- see the Help file's EXP-11 for how to assess
+  # unbound count varies -- see the tutorial Help's follow-up for assessing
   # this properly across several seeds
   python main.py --mode cluster --n_bodies 60 --softening_pc 0.0338 \
     --steps_per_crossing 150 --n_relax 40 --seed 0

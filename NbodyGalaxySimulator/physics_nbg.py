@@ -3412,7 +3412,7 @@ def estimate_lyapunov_exponent(t, divergence, min_points=5, min_r_squared=0.90,
        check catches it only rarely. Overall, roughly 64% of realizations
        of this specific logistic family are accepted by the whole gate
        end to end. This is a real, non-negligible gap, not a rare edge
-       case -- see NbodyGalaxySimulator.html's Known Model Artefacts
+       case -- see either current tutorial Help's Domain of Validity
        section for the same caveat stated for students.
 
     Returns a dict with 'lyapunov_exponent' (1/s), 'lyapunov_time' (s,
