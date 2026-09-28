@@ -222,6 +222,9 @@ def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5,
     r_photon = info["r_photon"]
 
     fig, ax = plt.subplots(figsize=(7, 7))
+    # Reserve room inside the displayed canvas for the diagnostic lines;
+    # saved files use a tight bounding box, but the screen does not.
+    fig.subplots_adjust(bottom=0.26)
     ax.set_aspect("equal", "box")
     ax.plot(x_values, y_values, lw=lw, label="Photon trajectory")
 
@@ -241,7 +244,10 @@ def plot_photon_orbit(x_values, y_values, b, info, outdir=None, dpi=150, lw=1.5,
         f"closest r: {info['closest_approach']:.5g}\n"
         f"Δφ: {info['delta_phi']:.5g} rad"
     )
-    ax.text(0.02, 0.02, summary, transform=ax.transAxes, va="bottom")
+    # Put diagnostics under the data rectangle: a captured trajectory
+    # crosses the lower-left corner, where an in-axes label hides its path.
+    ax.annotate(summary, xy=(0.02, -0.21), xycoords="axes fraction",
+                va="top", ha="left", annotation_clip=False)
     ax.legend(loc="upper right")
     ax.grid(True)
 

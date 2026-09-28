@@ -610,11 +610,20 @@ plot_photon.py docstrings or output):
         canonical suite was run and reported exactly once this round
         (MPLBACKEND=Agg python test_physics_photon.py -v from tests/),
         not repeated across every invocation style.
+
+  2026-09-28  Codex Kickoff4. Added paired Claude/Grok tutorial discovery,
+    four shared Beat/Guide checks, the affine-cutoff and rendering-scope
+    documentation contracts, and an on-screen annotation visibility check
+    for wide and tall trajectories. The full suite grew from 123 to 130
+    tests. The four current sample figures were regenerated from Version
+    1.5.0, Build a8778e60ea78. The older single-format Reference Guide is
+    preserved byte for byte as PhotonOrbit-original.html.
 """
 
 import ast
 import contextlib
 from datetime import datetime
+import base64
 import hashlib
 from html.parser import HTMLParser
 import importlib
@@ -639,7 +648,21 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_photon.py",
 )
-HELP_FILE = "PhotonOrbit.html"
+HELP_FILES = ("PhotonOrbit-claude.html", "PhotonOrbit-grok.html")
+HELP_FILE = HELP_FILES[0]  # Retain the original scientific/exercise contracts.
+
+
+def find_help_paths(module_dir):
+    """Locate the paired tutorials in either sibling repositories or a flat tree."""
+    module_dir = Path(module_dir)
+    if module_dir.parent.name == "GFTGUX-Programs":
+        doc_dir = module_dir.parent.parent / "GFTGUX-Documentation" / "PhotonOrbit"
+        if doc_dir.is_dir():
+            return tuple(doc_dir / name for name in HELP_FILES)
+    flat = tuple(module_dir / name for name in HELP_FILES)
+    if any(path.exists() for path in flat):
+        return flat
+    return ()  # A program-only checkout legitimately has no student docs.
 
 
 def find_module_dir(start):
@@ -861,8 +884,13 @@ class TestModuleDiscovery(unittest.TestCase):
         this_file = Path(__file__).resolve()
         with tempfile.TemporaryDirectory() as temporary:
             flat_dir = Path(temporary)
-            for name in (*CORE_MODULE_FILES, HELP_FILE):
+            for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
+            paths = find_help_paths(MODULE_DIR)
+            if paths:
+                for path in paths:
+                    if path.is_file():
+                        shutil.copy2(path, flat_dir / path.name)
             shutil.copy2(this_file, flat_dir / this_file.name)
 
             environment = os.environ.copy()
@@ -884,7 +912,8 @@ class TestModuleDiscovery(unittest.TestCase):
 class TestMetadataAndCompatibility(unittest.TestCase):
     def test_build_coverage_is_exactly_the_executable_core(self):
         self.assertEqual(tuple(phys.BUILD_ID_COVERS), CORE_MODULE_FILES)
-        self.assertNotIn(HELP_FILE, phys.BUILD_ID_COVERS)
+        for name in HELP_FILES:
+            self.assertNotIn(name, phys.BUILD_ID_COVERS)
         self.assertFalse(any("test" in name for name in phys.BUILD_ID_COVERS))
 
     def test_build_id_matches_independent_calculation(self):
@@ -1747,6 +1776,30 @@ class TestPlotGuardrails(unittest.TestCase):
     VALID_INFO = dict(r_s=2.0, r_photon=3.0, status="captured",
                        closest_approach=2.0, delta_phi=1.0)
 
+    def test_diagnostics_are_outside_the_trajectory_axes(self):
+        figures=[]
+        with mock.patch.object(plotting, "_finish", side_effect=lambda fig,*args,**kwargs:figures.append(fig)):
+            # Wide capture and tall escape must both leave room ON SCREEN,
+            # not merely in the tight-bounding-box PNG export.
+            plotting.plot_photon_orbit([20.0, 2.0], [0.0, -2.0], 5.0,self.VALID_INFO)
+            info=dict(self.VALID_INFO,status='escaped')
+            plotting.plot_photon_orbit([20.0, -10.0], [0.0, -40.0], 6.0,info)
+        self.assertEqual(len(figures),2)
+        try:
+            for fig in figures:
+                fig.canvas.draw()
+                ax=fig.axes[0]
+                annotations=[artist for artist in ax.texts if 'status:' in artist.get_text()]
+                self.assertEqual(len(annotations),1)
+                annotation=annotations[0]
+                self.assertLess(annotation.get_position()[1],0.0)
+                self.assertFalse(annotation.get_annotation_clip())
+                text_box=annotation.get_window_extent(renderer=fig.canvas.get_renderer())
+                self.assertGreater(text_box.y0,0.0)  # every diagnostic line visible
+        finally:
+            for fig in figures:
+                plotting.plt.close(fig)
+
     def test_docstring_does_not_overclaim_exact_reproduction(self):
         """Audit4 Codex A4-P2-1: plot_photon_orbit()'s own public parameter
         docstring retained "the run can be exactly reproduced later" after
@@ -2323,9 +2376,102 @@ class TestCLI(unittest.TestCase):
 class TestHelpFile(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.path = MODULE_DIR / HELP_FILE
+        cls.paths = find_help_paths(MODULE_DIR)
+        if not cls.paths:
+            raise unittest.SkipTest("paired tutorial Helps absent from program-only checkout")
+        if not all(path.is_file() for path in cls.paths):
+            raise AssertionError("Claude and Grok tutorial Helps must both be present")
+        cls.path = cls.paths[0]
         cls.html = cls.path.read_text(encoding="utf-8")
+        cls.grok_html = cls.paths[1].read_text(encoding="utf-8")
+        cls.guide = (cls.path.parent / "SampleOutputs" /
+                     "PhotonOrbit-SampleOutputs_Guide.html").read_text(encoding="utf-8")
         cls.root = parse_html(cls.path)
+
+    def test_paired_helps_are_distinct_and_share_build_with_guide(self):
+        self.assertNotEqual(self.html, self.grok_html)
+        self.assertGreater(len(self.html), len(self.grok_html))
+        for page in (self.html, self.grok_html, self.guide):
+            self.assertIn(phys.MODEL_VERSION, page)
+            self.assertIn(phys.BUILD_ID, page)
+        archived = self.path.parent / "PhotonOrbit-original.html"
+        self.assertTrue(archived.is_file())
+        self.assertNotEqual(self.html, archived.read_text(encoding="utf-8"))
+
+    def test_single_tutorial_is_an_error_but_no_docs_is_a_skip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            scratch = Path(temp)
+            self.assertEqual(find_help_paths(scratch), ())
+            shutil.copy2(self.paths[0], scratch / HELP_FILE)
+            one = find_help_paths(scratch)
+            self.assertEqual(len(one), 2)
+            self.assertFalse(one[1].exists())
+            original_module_dir = MODULE_DIR
+            saved = {name: TestHelpFile.__dict__[name] for name in
+                     ("paths", "path", "html", "grok_html", "guide", "root")}
+            try:
+                with mock.patch.dict(globals(), {"MODULE_DIR": scratch}):
+                    with self.assertRaisesRegex(AssertionError, "both be present"):
+                        TestHelpFile.setUpClass()
+                for file in scratch.iterdir():
+                    file.unlink()
+                with mock.patch.dict(globals(), {"MODULE_DIR": scratch}):
+                    with self.assertRaises(unittest.SkipTest):
+                        TestHelpFile.setUpClass()
+            finally:
+                for name, value in saved.items():
+                    setattr(TestHelpFile, name, value)
+            self.assertEqual(MODULE_DIR, original_module_dir)
+
+    def test_four_beats_use_identical_commands_and_current_guide_figures(self):
+        pages=(self.html,self.grok_html)
+        commands=[]
+        for page in pages:
+            found=re.findall(r'<pre><code>(python main\.py[^<]+)</code></pre>',page)
+            self.assertEqual(len(found),4)
+            commands.append(found)
+        guide_commands=re.findall(r'<pre>(python main\.py[^<]+)</pre>',self.guide)
+        self.assertEqual(commands[0],commands[1])
+        self.assertEqual(commands[0],guide_commands)
+        self.assertEqual([re.search(r'--b ([^ ]+)',c).group(1) for c in commands[0]],
+                         ['5.0','6.0','5.205','5.196152422706632'])
+        figures=re.findall(r'src="data:image/png;base64,([^"]+)"',self.guide)
+        self.assertEqual(len(figures),4)
+        for encoded in figures:
+            raw=base64.b64decode(encoded,validate=True)
+            self.assertTrue(raw.startswith(b'\x89PNG\r\n\x1a\n'))
+            self.assertEqual(raw[25],3)  # indexed PNG color type
+
+    def test_both_tutorials_explain_critical_model_boundaries(self):
+        for page in (self.html,self.grok_html):
+            for phrase in ('finite','--d_lambda','--lambda_max','photon sphere',
+                           'closest','unstable','deflection angle',
+                           'Domain of Validity'):
+                with self.subTest(phrase=phrase):
+                    self.assertIn(phrase,page)
+            self.assertIn('SampleOutputs/PhotonOrbit-SampleOutputs_Guide.html',page)
+
+    def test_grok_navigation_and_cli_flags_resolve(self):
+        grok_flags=set(re.findall(r'--[A-Za-z_]+',self.grok_html.split('</style>',1)[1]))
+        help_output=run_cli(['--help']).stdout
+        live_flags=set(re.findall(r'--[A-Za-z_]+',help_output))
+        self.assertLessEqual(grok_flags,live_flags)
+        ids=set(re.findall(r'\bid="([^"]+)"',self.grok_html))
+        for target in re.findall(r'href="#([^"]+)"',self.grok_html):
+            self.assertIn(target,ids)
+
+    def test_rendering_scope_and_affine_cutoff_wording_are_explicit(self):
+        description=next(s for s in descendants(self.root,lambda n:n.tag=='section')
+                         if s.attrs.get('id')=='description')
+        text=normalized_text(description)
+        self.assertIn('affine-parameter cutoff',text)
+        self.assertNotIn('lambda_max) —',text)
+        output=next(s for s in descendants(self.root,lambda n:n.tag=='section')
+                    if s.attrs.get('id')=='output')
+        scope=normalized_text(output).lower()
+        self.assertIn('not guarantee',scope)
+        self.assertIn('matplotlib',scope)
+        self.assertIn('not the conventional asymptotic',text)
 
     def test_version_and_build_match_program(self):
         nodes = descendants(self.root, lambda n: n.attrs.get("id") == "version_build")
