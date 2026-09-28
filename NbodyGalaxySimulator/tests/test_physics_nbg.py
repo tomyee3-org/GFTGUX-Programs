@@ -6771,6 +6771,8 @@ class TestHelpFile(unittest.TestCase):
         """
         for path, page in zip(self.paths, (self.html, self.grok_html)):
             _assert_no_leaked_history(self, page, path.name)
+        _assert_no_leaked_history(
+            self, self.guide, "NbodyGalaxySimulatorSampleOutputs_Guide.html")
 
     def test_both_tutorial_styles_and_archived_reference_are_distinct(self):
         self.assertNotEqual(self.html, self.grok_html)
@@ -6782,8 +6784,12 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("one gravitational question", self.grok_html)
 
     def test_single_tutorial_is_rejected_but_program_only_is_skipped(self):
-        original_module_dir = MODULE_DIR
         source_path = self.paths[0]
+        # This method probes setUpClass in a temporary checkout. Restore
+        # every class attribute even if the probe fails partway through.
+        absent = object()
+        attributes = ("paths", "path", "html", "grok_html", "guide", "root")
+        saved = {name: TestHelpFile.__dict__.get(name, absent) for name in attributes}
         with tempfile.TemporaryDirectory() as temporary:
             scratch = Path(temporary)
             try:
@@ -6794,8 +6800,12 @@ class TestHelpFile(unittest.TestCase):
                     with self.assertRaisesRegex(AssertionError, "both be present"):
                         TestHelpFile.setUpClass()
             finally:
-                with mock.patch.dict(sys.modules[__name__].__dict__, {"MODULE_DIR": original_module_dir}):
-                    TestHelpFile.setUpClass()
+                for name, value in saved.items():
+                    if value is absent:
+                        if name in TestHelpFile.__dict__:
+                            delattr(TestHelpFile, name)
+                    else:
+                        setattr(TestHelpFile, name, value)
 
     def test_all_four_beats_share_exact_commands_with_sample_guide(self):
         commands=[]
@@ -6861,6 +6871,11 @@ class TestHelpFile(unittest.TestCase):
             self.assertIn(f"<h2>{heading}</h2>", notes)
         self.assertIn(phys.BUILD_ID, notes)
         self.assertIn("1.0.1", notes)
+        exercises = [int(n) for n in re.findall(r'class="ec-num">EXP-(\d+)', self.html)]
+        self.assertEqual(exercises, list(range(1, 19)))
+        self.assertIn("18 EXP-numbered exercises", notes)
+        self.assertIn("see Known model artefacts and caveats", self.html)
+        self.assertNotIn("see Known Model Artefacts", self.html)
 
     def test_all_internal_navigation_targets_exist_and_ids_are_unique(self):
         ids = re.findall(r'\bid="([^"]+)"', self.html)
