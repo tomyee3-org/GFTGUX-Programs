@@ -442,18 +442,49 @@ class TestDiskImage(unittest.TestCase):
 
 
 class TestCompareRings(unittest.TestCase):
-    def test_image_plane_compare_draws_only_the_impact_parameter_curve(self):
-        fig, _ = plotting.plot_compare(phys.compare_rings(12.0), show=False)
-        circles = [patch for patch in fig.axes[0].patches
-                   if hasattr(patch, 'get_radius')]
-        self.assertEqual(len(circles), 1)
-        self.assertAlmostEqual(circles[0].get_radius(),
-                               phys.critical_impact_parameter(1.0))
+    def test_compare_plot_has_both_radii_on_log_axis(self):
+        for logm in (6.0, 12.0, 15.0):
+            numbers = phys.compare_rings(logm)
+            fig, _ = plotting.plot_compare(numbers, show=False)
+            self.assertEqual(len(fig.axes), 1)
+            ax = fig.axes[0]
+            self.assertEqual(ax.get_xscale(), 'log')
+            self.assertEqual(len(ax.collections), 2)
+            self.assertAlmostEqual(float(ax.collections[0].get_offsets()[0, 0]),
+                                   numbers['b_crit_over_M'])
+            self.assertAlmostEqual(float(ax.collections[1].get_offsets()[0, 0]),
+                                   numbers['r_e_over_M'])
+            self.assertGreater(ax.get_xlim()[1], numbers['r_e_over_M'])
+            self.assertIn('own', ax.get_xlabel())
+            plotting.plt.close(fig)
 
     def test_default_galaxy_einstein_radius_is_a_few_arcsec(self):
         numbers = phys.compare_rings(12.0)
         self.assertGreater(numbers["theta_e_arcsec"], 1.0)
         self.assertLess(numbers["theta_e_arcsec"], 4.0)
+
+    def test_compare_caption_uses_supplied_lens_distances(self):
+        numbers = phys.compare_rings(12.0, d_l=2.0 * phys.GPC,
+                                     d_s=4.0 * phys.GPC)
+        fig, _ = plotting.plot_compare(numbers, show=False)
+        caption = ' '.join(label.get_text() for label in fig.texts)
+        self.assertIn(r'$D_l=2$ Gpc', caption)
+        self.assertIn(r'$D_s=4$ Gpc', caption)
+        plotting.plt.close(fig)
+
+    def test_compare_plot_handles_small_custom_einstein_radius(self):
+        d_l = phys.GPC
+        numbers = phys.compare_rings(12.0, d_l=d_l,
+                                     d_s=d_l * (1.0 + 1.0e-14))
+        self.assertLess(numbers['r_e_over_M'], numbers['b_crit_over_M'])
+        fig, _ = plotting.plot_compare(numbers, show=False)
+        ax = fig.axes[0]
+        self.assertGreater(numbers['r_e_over_M'], ax.get_xlim()[0])
+        self.assertLess(numbers['b_crit_over_M'], ax.get_xlim()[1])
+        caption = ' '.join(label.get_text() for label in fig.texts)
+        self.assertIn('1.00000000000001', caption)
+        self.assertNotIn(r'$\theta_E=0', caption)
+        plotting.plt.close(fig)
 
     def test_einstein_radius_in_units_of_M_is_not_the_photon_sphere(self):
         numbers = phys.compare_rings(12.0)
@@ -579,6 +610,18 @@ class TestHelpFile(unittest.TestCase):
                 self.assertEqual(text.count(r'\['), text.count(r'\]'))
                 self.assertIn(r'\sum_{m=1}^{4}', text)
                 self.assertRegex(text.lower(), r'false[ -]colou?r')
+
+    def test_both_compare_beats_explain_the_logarithmic_two_radius_plot(self):
+        for path in find_help_files():
+            with self.subTest(path=path.name):
+                text = path.read_text(encoding='utf-8')
+                beat = re.search(r'<section id="beat8">(.*?)</section>', text, re.S)
+                self.assertIsNotNone(beat)
+                description = beat.group(1).lower()
+                self.assertIn('logarithmic', description)
+                self.assertIn('own', description)
+                self.assertIn('two', description)
+                self.assertNotIn('left panel is a schwarzschild', description)
 
     def test_every_documented_beats_command_parses_and_validates(self):
         import main as entry

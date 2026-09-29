@@ -354,49 +354,53 @@ def plot_weak(bs, exact, weak, M=1.0, outdir=None, dpi=140, show=True):
 
 
 def plot_compare(numbers, M=1.0, outdir=None, dpi=140, show=True):
-    fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
-
-    ax = axes[0]
-    ax.add_patch(Circle((0.0, 0.0), numbers["b_crit_over_M"], fill=False,
-                        color=C_BC, lw=2.0,
-                        label=r"$b_{\rm crit}=3\sqrt{3}M$"))
-    ax.set_aspect("equal")
-    lim = 1.3 * numbers["b_crit_over_M"]
-    ax.set_xlim(-lim, lim)
-    ax.set_ylim(-lim, lim)
-    ax.set_xlabel(r"$b_x/M$  (image plane)")
-    ax.set_ylabel(r"$b_y/M$")
-    ax.set_title("Schwarzschild hole: image-plane critical curve")
-    ax.legend(loc="upper right", fontsize=8)
-
-    ax = axes[1]
-    ax.set_axis_off()
-    te = numbers["theta_e_arcsec"]
+    """Compare two dimensionless radii without implying a shared image plane."""
+    b_over_m = numbers["b_crit_over_M"]
     re_over_m = numbers["r_e_over_M"]
-    text = (
-        "Beat 8 · Do not call these the same ring\n\n"
-        f"A transparent $10^{{{numbers['log10_m_galaxy']:.0f}}} M_\\odot$ "
-        "galaxy lens at the\n"
-        "GravitationalLensing cartoon distances "
-        r"($D_l=1\,\mathrm{Gpc}$, $D_s=2\,\mathrm{Gpc}$)"
-        "\n"
-        f"has $\\theta_E = {te:.3f}''$.\n\n"
-        "The physical Einstein radius at the lens, in units of\n"
-        "that galaxy's own $GM/c^2$, is\n"
-        f"    $R_E / M \\approx {re_over_m:.3e}$.\n\n"
-        "The photon-sphere radius of a Schwarzschild hole is $3M$.\n"
-        "The image-plane critical curve is "
-        r"$b_{\mathrm{crit}} \approx 5.196\,M$."
-        "\n\n"
-        "One is a weak-field critical curve of a transparent mass.\n"
-        "The other is the capture boundary of the vacuum\n"
-        "Schwarzschild metric.  A thin-lens "
-        r"$\alpha = \theta_E^2\,\theta/|\theta|^2$"
-        "\ncannot produce the second one."
-    )
-    ax.text(0.02, 0.98, text, va="top", ha="left", fontsize=11,
-            family="serif", transform=ax.transAxes)
-    fig.tight_layout(rect=[0, 0.03, 1, 1])
+    te = numbers["theta_e_arcsec"]
+    fig, ax = plt.subplots(figsize=(11.2, 5.2))
+    fig.subplots_adjust(left=0.30, right=0.96, top=0.78, bottom=0.23)
+    ax.set_xscale("log")
+    lower, upper = sorted((b_over_m, re_over_m))
+    ax.set_xlim(10.0 ** math.floor(math.log10(lower / 2.0)),
+                10.0 ** math.ceil(math.log10(2.0 * upper)))
+    ax.set_ylim(-0.55, 1.6)
+    ax.set_yticks([1.0, 0.0], [
+        "Schwarzschild black hole\nshadow critical curve",
+        "Transparent galaxy lens\nEinstein critical curve",
+    ])
+    ax.tick_params(axis="y", length=0, labelsize=10, pad=12)
+    ax.grid(axis="x", which="major", color="0.85", lw=0.8)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+
+    ax.scatter([b_over_m], [1.0], s=160, color=C_BC, zorder=5)
+    ax.scatter([re_over_m], [0.0], s=160, color="#b5512e", zorder=5)
+    b_on_left = b_over_m <= re_over_m
+    ax.text(b_over_m * (1.2 if b_on_left else 1.0 / 1.2), 1.0,
+            rf"$b_{{\rm crit}}={b_over_m:.4f}\,M_{{\rm BH}}$",
+            va="center", ha="left" if b_on_left else "right",
+            color="#006b78", fontsize=12)
+    ax.text(re_over_m * (1.0 / 1.2 if b_on_left else 1.2), 0.0,
+            rf"$R_E={re_over_m:,.6g}\,M_{{\rm gal}}$",
+            va="center", ha="right" if b_on_left else "left",
+            color="#8b391b", fontsize=12)
+    ax.annotate("", xy=(re_over_m, 0.48), xytext=(b_over_m, 0.48),
+                arrowprops=dict(arrowstyle="<->", color="#42526b", lw=1.5))
+    ax.text(math.exp((math.log(b_over_m) + math.log(re_over_m)) / 2.0), 0.58,
+            rf"about ${upper / lower:,.0f}$ times in gravitational units",
+            va="bottom", ha="center", color="#42526b", fontsize=10,
+            bbox=dict(facecolor="white", edgecolor="none", pad=2))
+    ax.set_xlabel(r"Critical-curve radius / its own object's $GM/c^2$  (log scale)",
+                  fontsize=11, labelpad=10)
+    ax.set_title("Beat 8 · Two rings, two very different scales", fontsize=15, pad=14)
+    fig.text(0.53, 0.075,
+             rf"Galaxy: $10^{{{numbers['log10_m_galaxy']:g}}}M_\odot$, "
+             rf"$\theta_E={te:.4g}''$ at "
+             rf"$D_l={numbers['d_l_m'] / phys.GPC:.15g}$ Gpc, "
+             rf"$D_s={numbers['d_s_m'] / phys.GPC:.15g}$ Gpc. "
+             "Each M belongs to its own row.",
+             ha="center", fontsize=9, color="0.3")
     saved = _finish(fig, outdir, "compare", dpi, provenance={
         "mode": "compare",
         "program_M": repr(M),
