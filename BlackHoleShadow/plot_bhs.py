@@ -79,10 +79,10 @@ def _extent_over_M(bx, by, M):
     return [e / M for e in ext]
 
 
-def _draw_bcrit(ax, M, lw=2.0):
+def _draw_bcrit(ax, M, lw=2.0, ls="-"):
     b_crit_over_M = phys.critical_impact_parameter(M) / M
     ax.add_patch(Circle((0.0, 0.0), b_crit_over_M, fill=False, color=C_BC,
-                        lw=lw, ls="-", zorder=4,
+                        lw=lw, ls=ls, zorder=4,
                         label=r"$b_{\rm crit}=3\sqrt{3}\,M$  (critical curve)"))
 
 
@@ -501,7 +501,7 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
     for ax, img, title in zip(axes, (img1, img2, img3), titles):
         ax.imshow(img, origin="lower", cmap="inferno",
                   extent=extent, vmin=0.0, vmax=vmax)
-        _draw_bcrit(ax, M, lw=1.1)
+        _draw_bcrit(ax, M, lw=1.1, ls=(0, (1, 5)))
         ax.set_aspect("equal")
         ax.set_xlabel(r"$b_x/M$")
         ax.set_title(title, fontsize=10)

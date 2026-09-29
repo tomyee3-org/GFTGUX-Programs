@@ -659,6 +659,23 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIn('--mode image', instructions)
                 self.assertIn('pointwise image intensity', instructions)
 
+    def test_exp7_uses_radial_evidence_for_poorly_sampled_orders(self):
+        files = find_help_files()
+        self.assertEqual(len(files), 2)
+        for path in files:
+            with self.subTest(help=path.name):
+                text = path.read_text(encoding='utf-8')
+                card = re.search(
+                    r'<div class="exp-card"><div class="ec-num">EXP-7[^<]*</div>.*?</div>',
+                    text, re.S,
+                )
+                self.assertIsNotNone(card)
+                exercise = html_module.unescape(card.group(0)).lower()
+                for detail in ('--mode image', 'm=1', 'm=2', 'm=3,4',
+                               'console', 'raster', 'radial'):
+                    self.assertIn(detail, exercise)
+                self.assertNotIn('which crossing lights each ring', exercise)
+
     def test_experiment_mode_fragments_and_reviewed_claims(self):
         import main as entry
         from unittest.mock import patch
@@ -877,6 +894,11 @@ class TestScaleInvariance(unittest.TestCase):
         self.assertIn("m>=6", fig._suptitle.get_text() or "")
         self.assertIn("False-color intensity", fig._suptitle.get_text())
         self.assertIn("not observed wavelengths", fig._suptitle.get_text())
+        for ax in fig.axes[:3]:
+            self.assertEqual(len(ax.patches), 1)
+            circle = ax.patches[0]
+            self.assertEqual(circle.get_linestyle(), (0, (1, 5)))
+            self.assertTrue(circle.get_antialiased())
 
     def test_photon_order_label_starts_at_m3(self):
         self.assertEqual(phys.photon_order_label(3), "m=3")
