@@ -1975,13 +1975,13 @@ class PairedTutorialHelp(unittest.TestCase):
             roots.append(ancestor / title)
         roots = list(dict.fromkeys(roots))
         folder = next((p for p in roots if
-                       (p / f"{title}-claude.html").exists() or
-                       (p / f"{title}-grok.html").exists()), None)
+                       (p / f"{title}-extended.html").exists() or
+                       (p / f"{title}-short.html").exists()), None)
         if folder is None:
             raise unittest.SkipTest("Neither current tutorial Help is present")
         cls.docs = folder
         cls.help_paths = [folder / f"{title}-{style}.html"
-                          for style in ("claude", "grok")]
+                          for style in ("extended", "short")]
         cls.guide = folder / "SampleOutputs" / f"{title}-SampleOutputs_Guide.html"
 
     @staticmethod

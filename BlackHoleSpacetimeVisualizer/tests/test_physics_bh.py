@@ -2350,8 +2350,8 @@ class TestBothTutorialHelpFiles(unittest.TestCase):
 
     DOCS = (Path(PROJECT_DIR).parents[1] / "GFTGUX-Documentation"
             / "BlackHoleSpacetimeVisualizer")
-    HELP_NAMES = ("BlackHoleSpacetimeVisualizer-claude.html",
-                  "BlackHoleSpacetimeVisualizer-grok.html")
+    HELP_NAMES = ("BlackHoleSpacetimeVisualizer-extended.html",
+                  "BlackHoleSpacetimeVisualizer-short.html")
     MODES = ("embed", "tidal", "infall", "horizons")
 
     @classmethod
@@ -2466,7 +2466,7 @@ class TestBothTutorialHelpFiles(unittest.TestCase):
             body = page.read_text(encoding="utf-8")
             with self.subTest(page=page.name):
                 for ref in ids:
-                    self.assertIn(ref + ":" if page.name.endswith("-grok.html")
+                    self.assertIn(ref + ":" if page.name.endswith("-short.html")
                                   else ref + ",", body)
 
     def test_closed_form_infall_checkpoint_uses_nominal_gm(self):

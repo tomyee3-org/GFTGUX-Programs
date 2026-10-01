@@ -896,7 +896,7 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_nbg.py",
 )
-HELP_FILES = ("NbodyGalaxySimulator-claude.html", "NbodyGalaxySimulator-grok.html")
+HELP_FILES = ("NbodyGalaxySimulator-extended.html", "NbodyGalaxySimulator-short.html")
 HELP_FILE = HELP_FILES[0]
 
 

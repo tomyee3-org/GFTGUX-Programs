@@ -713,8 +713,8 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_sev.py",
 )
-HELP_FILE = "StellarEvolutionTracks-claude.html"
-BEATS_HELP_FILE = "StellarEvolutionTracks-grok.html"
+HELP_FILE = "StellarEvolutionTracks-extended.html"
+BEATS_HELP_FILE = "StellarEvolutionTracks-short.html"
 
 # Where each layout keeps material that the classic layout holds in a
 # dedicated section.  Every other section the tests read (description,

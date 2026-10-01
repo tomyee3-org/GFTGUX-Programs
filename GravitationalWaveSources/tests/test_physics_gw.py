@@ -59,8 +59,8 @@ CORE_MODULE_FILES = (
     "plot_gw.py",
 )
 HELP_FILES = (
-    "GravitationalWaveSources-claude.html",
-    "GravitationalWaveSources-grok.html",
+    "GravitationalWaveSources-extended.html",
+    "GravitationalWaveSources-short.html",
 )
 
 

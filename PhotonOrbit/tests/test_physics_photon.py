@@ -648,7 +648,7 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_photon.py",
 )
-HELP_FILES = ("PhotonOrbit-claude.html", "PhotonOrbit-grok.html")
+HELP_FILES = ("PhotonOrbit-extended.html", "PhotonOrbit-short.html")
 HELP_FILE = HELP_FILES[0]  # Retain the original scientific/exercise contracts.
 
 

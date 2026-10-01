@@ -67,7 +67,7 @@ def recompute_build_id(directory):
     return digest.hexdigest()[:12]
 
 
-HELP_NAMES = ("BlackHoleShadow-claude.html", "BlackHoleShadow-grok.html")
+HELP_NAMES = ("BlackHoleShadow-extended.html", "BlackHoleShadow-short.html")
 
 
 def find_help_files():

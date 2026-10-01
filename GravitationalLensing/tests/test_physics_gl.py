@@ -100,8 +100,8 @@ def recompute_build_id(directory):
     return digest.hexdigest()[:12]
 
 
-HELP_FILES = ("GravitationalLensing-claude.html",
-              "GravitationalLensing-grok.html")
+HELP_FILES = ("GravitationalLensing-extended.html",
+              "GravitationalLensing-short.html")
 DOC_DIR = (MODULE_DIR.parent.parent / "GFTGUX-Documentation"
            / "GravitationalLensing")
 
