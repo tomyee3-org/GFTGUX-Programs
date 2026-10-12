@@ -485,9 +485,42 @@ def plot_transfer(bs, table, counts, M=1.0, r_hot_over_M=6.0,
     return fig, saved
 
 
+def subring_display_image(bx, by, img2, img3, sample, parts, spread=0.0):
+    """Give each high-order peak a radial display footprint; never mutate inputs.
+
+    ``spread`` is the footprint's half-width in centre-to-centre pixel spacings.
+    A footprint uses its order's tabulated peak intensity. Paint higher orders
+    first, then lower orders, so overlapping artificial footprints do not sum.
+    Outside footprints retain the original raster. This is not a PSF or a flux
+    integral, and no physical profile or quantitative output uses this array.
+    """
+    spread = phys.validate_user_value("subring_spread", spread,
+                                      min_value=0.0, max_value=20.0)
+    if spread == 0.0:
+        return img3
+    if sample is None or parts is None:
+        raise ValueError("subring_spread requires the radial intensity table")
+    if parts.shape[1] < 3:
+        return img3
+    spacing = float(abs(bx[0, 1] - bx[0, 0]))
+    radius = np.hypot(bx, by)
+    display = img3.copy()
+    for column in range(parts.shape[1] - 1, 1, -1):
+        peak_index = int(np.argmax(parts[:, column]))
+        peak_intensity = float(parts[peak_index, column])
+        if peak_intensity <= 0.0:
+            continue
+        footprint = abs(radius - sample[peak_index]) <= spread * spacing
+        display[footprint] = img2[footprint] + peak_intensity
+    return display
+
+
 def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
                fov_over_M=16.0, sample=None, parts=None,
-               outdir=None, dpi=140, show=True):
+               outdir=None, dpi=140, show=True, subring_spread=0.0):
+    display3 = subring_display_image(
+        bx, by, img2, img3, sample, parts, spread=subring_spread,
+    )
     fig = plt.figure(figsize=(12.6, 6.4))
     axes = [fig.add_subplot(2, 3, i) for i in range(1, 4)]
     ax_r = fig.add_subplot(2, 1, 2)
@@ -500,9 +533,10 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
     titles = (
         "direct (m=1)",
         "+ lensing (m<=2)",
-        f"+ photon-ring/subring ({phys.photon_order_label(max_m)})",
+        f"+ photon-ring/subring ({phys.photon_order_label(max_m)})"
+        + (f"\ndisplay spread ±{subring_spread:g} pixels" if subring_spread else ""),
     )
-    for ax, img, title in zip(axes, (img1, img2, img3), titles):
+    for ax, img, title in zip(axes, (img1, img2, display3), titles):
         ax.imshow(img, origin="lower", cmap="inferno",
                   extent=extent, vmin=0.0, vmax=vmax)
         _draw_bcrit(ax, M, lw=1.1, ls=(0, (1, 5)))
@@ -535,12 +569,14 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
         ax_r.set_ylabel(r"$I_m(b)$  (pointwise)")
         ax_r.set_title(
             "Radial I(b) from the source-aware table. "
-            "Narrow peaks may miss a pixel centre."
+            + ("Unmodified physical profile; display spread excluded."
+               if subring_spread else "Narrow peaks may miss a pixel centre.")
         )
         ax_r.legend(loc="upper right", fontsize=8)
     fig.suptitle(
-        r"Beat 5 · Point-sampled face-on image  "
-        rf"$I_{{\mathrm{{obs}}}}\approx\sum_{{m=1}}^{{{max_m}}} g^4 I_{{\mathrm{{em}}}}$"
+        ("Beat 5 · Face-on image with display-only subring spread  "
+         if subring_spread else "Beat 5 · Point-sampled face-on image  ")
+        + rf"$I_{{\mathrm{{obs}}}}\approx\sum_{{m=1}}^{{{max_m}}} g^4 I_{{\mathrm{{em}}}}$"
         rf"  (static emitters; {phys.omitted_order_label(max_m)} omitted)"
         "\nFalse-color intensity (inferno colormap; colors are not observed wavelengths)",
         fontsize=11,
@@ -560,10 +596,19 @@ def plot_image(bx, by, img1, img2, img3, M=1.0, r_hot=6.0, peaks=None,
         "n_samples": "None" if sample is None else str(len(sample)),
         "fov_over_M": repr(fov_over_M),
         "I_obs": phys.image_sum_clause(max_m),
-        "pixel_contract": "point sample at pixel centre from adaptive I(b)",
+        "pixel_contract": (
+            "m<=2 point sampled; m>=3 peak footprints for display only; lower m wins overlaps"
+            if subring_spread else "point sample at pixel centre from adaptive I(b)"
+        ),
+        "subring_spread_pixels": repr(subring_spread),
+        "subring_spread_half_width_over_M": repr(
+            subring_spread * abs(float(bx[0, 1] / M - bx[0, 0] / M))
+        ),
+        "profile_and_console": "original point-sampled physics; no display spread",
+        "colour_scale": "shared original raster scale; spread display may saturate",
         "false_colour": "inferno display scale; not a spectrum",
         "emitters": "static; no orbital Doppler",
-        "sampling": "adaptive log cluster around b_crit; no peak stamp",
+        "sampling": "adaptive source-aware table; optional display-only peak footprints",
         "max_m": str(max_m),
     })
     if show:

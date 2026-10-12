@@ -286,9 +286,13 @@ def run_transfer(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
 
 
 def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
-              outdir=None, dpi=140, show=True, interactive=False):
+              outdir=None, dpi=140, show=True, interactive=False,
+              subring_spread=0.0):
     """Beat 5: direct, +lensing, +photon-ring contributions."""
     M = phys.validate_user_value("M", M, positive=True)
+    subring_spread = phys.validate_user_value(
+        "subring_spread", subring_spread, min_value=0.0, max_value=20.0,
+    )
     n_pix = phys.odd_n_pix(n_pix)
     if r_hot is None:
         r_hot_over_M = phys.HOT_RING_R_DEFAULT
@@ -337,6 +341,7 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
     return plotting.plot_image(
         bx, by, img1, img2, img3, M=M, r_hot=r_hot_abs, peaks=peaks,
         fov_over_M=fov_M, sample=sample, parts=parts,
+        subring_spread=subring_spread,
         outdir=outdir, dpi=dpi, show=_show_wanted(show, interactive),
     )
 

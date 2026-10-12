@@ -78,6 +78,11 @@ def parse_args():
                         "Ignored by transfer (uses an adaptive b table).")
     g.add_argument("--fov", type=float, default=16.0, metavar="M",
                    help="field of view on a side, in units of M")
+    g.add_argument("--subring_spread", type=float, default=0.0, metavar="PIXELS",
+                   help="image only: radial half-width (0 to 20 pixel spacings) "
+                        "for display-only peak spreading of m>=3 intensity; "
+                        "0 keeps point sampling. Profiles and printed values "
+                        "are unchanged")
 
     g = p.add_argument_group("Source and compare")
     g.add_argument("--r_hot", type=float, default=argparse.SUPPRESS, metavar="M",
@@ -112,6 +117,8 @@ def _validate_args(args):
     physics_bhs.validate_user_value("lambda_max", args.lambda_max, positive=True)
     physics_bhs.validate_user_value("d_lambda", args.d_lambda, positive=True)
     physics_bhs.validate_user_value("fov", args.fov, positive=True)
+    physics_bhs.validate_user_value("subring_spread", args.subring_spread,
+                                   min_value=0.0, max_value=20.0)
     physics_bhs.validate_user_value("dpi", args.dpi, positive=True)
     inc = float(args.inclination)
     if not math.isfinite(inc) or inc != 0.0:
@@ -157,7 +164,7 @@ def main():
             os.path.join(os.path.dirname(here), "BlackHoleShadow-Documentation"),
             os.path.dirname(here), here,
         ]
-        names = ("BlackHoleShadow-claude.html", "BlackHoleShadow-grok.html")
+        names = ("BlackHoleShadow-extended.html", "BlackHoleShadow-short.html")
         docs = next((directory for directory in doc_dirs
                      if any(os.path.isfile(os.path.join(directory, name))
                             for name in names)), None)
@@ -215,7 +222,8 @@ def main():
         elif args.mode == "image":
             n_pix = 161 if args.n_pix is None else args.n_pix
             driver_bhs.run_image(
-                n_pix=n_pix, fov_M=args.fov, r_hot=args.r_hot, **common)
+                n_pix=n_pix, fov_M=args.fov, r_hot=args.r_hot,
+                subring_spread=args.subring_spread, **common)
         elif args.mode == "radii":
             n_pix = 161 if args.n_pix is None else args.n_pix
             driver_bhs.run_radii(n_pix=n_pix, fov_M=args.fov, **common)

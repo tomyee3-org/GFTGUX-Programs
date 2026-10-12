@@ -1185,5 +1185,78 @@ class TestScaleInvariance(unittest.TestCase):
             self.assertAlmostEqual(r, rmins[0], places=5)
 
 
+class TestSubringDisplay(unittest.TestCase):
+    def setUp(self):
+        self.bx, self.by = np.meshgrid(np.arange(-2., 3.), np.arange(-2., 3.))
+        self.sample = np.array([0., 1.1, 1.3, 4.])
+        self.parts = np.zeros((4, 4))
+        self.parts[1, 2] = 0.4  # m=3 is deliberately fainter than m=4
+        self.parts[2, 3] = 0.8
+        self.img2 = np.full_like(self.bx, 0.1)
+        self.img3 = np.full_like(self.bx, 0.15)
+
+    def display(self, spread, scale=1.):
+        return plotting.subring_display_image(
+            self.bx * scale, self.by * scale, self.img2, self.img3,
+            self.sample * scale, self.parts, spread=spread,
+        )
+
+    def test_zero_preserves_original_raster(self):
+        self.assertIs(self.display(0.), self.img3)
+
+    def test_fractional_miss_and_lower_order_overlap_priority(self):
+        result = self.display(0.31)
+        # Radius 1 includes both peaks: m=3 wins despite being fainter.
+        self.assertAlmostEqual(result[2, 3], 0.5)
+        # Radius sqrt(2) misses m=3's band but lies in m=4's band.
+        self.assertAlmostEqual(result[3, 3], 0.9)
+        # Radius 2 is outside both bands and retains the exact physical value.
+        self.assertEqual(result[2, 4], self.img3[2, 4])
+        self.assertEqual(self.display(0.05)[2, 3], self.img3[2, 3])
+
+    def test_display_inputs_are_not_mutated_and_M_scaling_is_invariant(self):
+        arrays = (self.bx, self.by, self.img2, self.img3, self.sample, self.parts)
+        before = [array.copy() for array in arrays]
+        np.testing.assert_array_equal(self.display(.31), self.display(.31, scale=7.))
+        for original, snapshot in zip(arrays, before):
+            np.testing.assert_array_equal(original, snapshot)
+
+    def test_zero_emission_does_not_create_a_footprint(self):
+        self.parts[:, 2:] = 0.
+        np.testing.assert_array_equal(self.display(20.), self.img3)
+
+    def test_invalid_spread_is_rejected_before_rendering(self):
+        for value in (-1., 20.1, float('nan'), float('inf')):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.display(value)
+        for value in ('-1', '20.1', 'nan', 'inf'):
+            result = run_cli(['--mode', 'image', '--subring_spread', value])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('subring_spread', result.stderr)
+
+    def test_only_third_panel_changes_and_provenance_labels_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = dict(sample=self.sample, parts=self.parts, show=False)
+            raw, _ = plotting.plot_image(self.bx, self.by, self.img2, self.img2,
+                                          self.img3, **args)
+            spread, saved = plotting.plot_image(
+                self.bx, self.by, self.img2, self.img2, self.img3,
+                subring_spread=.31, outdir=tmp, **args,
+            )
+            for index in (0, 1):
+                np.testing.assert_array_equal(raw.axes[index].images[0].get_array(),
+                                               spread.axes[index].images[0].get_array())
+            for original, displayed in zip(raw.axes[3].lines, spread.axes[3].lines):
+                np.testing.assert_array_equal(original.get_xdata(), displayed.get_xdata())
+                np.testing.assert_array_equal(original.get_ydata(), displayed.get_ydata())
+            for first, second in zip(raw.axes[:3], spread.axes[:3]):
+                self.assertEqual(first.images[0].get_clim(), second.images[0].get_clim())
+            self.assertIn('display-only', spread._suptitle.get_text())
+            self.assertIn('±0.31', spread.axes[2].get_title())
+            sidecar = Path(saved).with_suffix('.provenance.txt').read_text()
+            self.assertIn('subring_spread_pixels = 0.31', sidecar)
+            self.assertIn('lower m wins', sidecar)
+
+
 if __name__ == "__main__":
     unittest.main()
