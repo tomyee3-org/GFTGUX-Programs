@@ -78,7 +78,7 @@ def parse_args():
                         "Ignored by transfer (uses an adaptive b table).")
     g.add_argument("--fov", type=float, default=16.0, metavar="M",
                    help="field of view on a side, in units of M")
-    g.add_argument("--subring_spread", type=float, default=0.0, metavar="PIXELS",
+    g.add_argument("--subring_spread", type=float, default=0.05, metavar="PIXELS",
                    help="image only: radial half-width (0 to 20 pixel spacings) "
                         "for display-only peak spreading of m>=3 intensity; "
                         "0 keeps point sampling. Profiles and printed values "
