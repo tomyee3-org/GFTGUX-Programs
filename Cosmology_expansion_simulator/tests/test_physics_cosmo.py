@@ -120,6 +120,10 @@ Run with:   python -m pytest tests/test_physics_cosmo.py -v
        or:  python -m unittest tests.test_physics_cosmo -v
        or:  python tests/test_physics_cosmo.py
 (No pytest dependency is required -- everything here is plain unittest.)
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
 """
 
 import math
@@ -1956,13 +1960,11 @@ class BuildIdentifier(unittest.TestCase):
             self.assertEqual(read_lf, read_crlf)
 
 
-class PairedTutorialHelp(unittest.TestCase):
-    """Validate both current tutorial styles as a single shared build.
+class TestCanonicalHelpFile(unittest.TestCase):
+    """Validate the canonical Help and its current-build sample guide.
 
-    A Programs-only checkout has no documents and skips this class. In a
-    deliverable or sibling Documentation checkout, one missing current Help
-    is an error: a single surviving style does not constitute a paired
-    tutorial release. The historical Reference Guide is not a substitute.
+    A program-only checkout skips documentation checks. Archived tutorial
+    formats are not required or used as substitutes for current Help.
     """
 
     @classmethod
@@ -1975,13 +1977,12 @@ class PairedTutorialHelp(unittest.TestCase):
             roots.append(ancestor / title)
         roots = list(dict.fromkeys(roots))
         folder = next((p for p in roots if
-                       (p / f"{title}-extended.html").exists() or
-                       (p / f"{title}-short.html").exists()), None)
+                       (p / f"{title}.html").exists() or
+                       (p != cls.module_dir and p.is_dir())), None)
         if folder is None:
             raise unittest.SkipTest("Neither current tutorial Help is present")
         cls.docs = folder
-        cls.help_paths = [folder / f"{title}-{style}.html"
-                          for style in ("extended", "short")]
+        cls.help_paths = [folder / f"{title}.html"]
         cls.guide = folder / "SampleOutputs" / f"{title}-SampleOutputs_Guide.html"
 
     @staticmethod
@@ -1989,13 +1990,11 @@ class PairedTutorialHelp(unittest.TestCase):
         return [html.unescape(x).strip() for x in
                 re.findall(r"<pre><code>(.*?)</code></pre>", text, re.S)]
 
-    def test_both_current_styles_present_and_original_separate(self):
-        for path in self.help_paths:
-            self.assertTrue(path.is_file(), f"Current tutorial missing: {path}")
-        self.assertTrue((self.docs / "CosmologyExpansionSimulator-original.html").is_file())
-        self.assertFalse((self.docs / "CosmologyExpansionSimulator.html").exists())
+    def test_single_canonical_help_file_is_present(self):
+        self.assertEqual([p.name for p in self.help_paths], ["CosmologyExpansionSimulator.html"])
+        self.assertTrue(self.help_paths[0].is_file())
 
-    def test_version_and_build_shared_by_two_helps_and_guide(self):
+    def test_version_and_build_shared_by_help_and_guide(self):
         for path in (*self.help_paths, self.guide):
             self.assertTrue(path.is_file(), f"Expected document missing: {path}")
             text = path.read_text(encoding="utf-8")

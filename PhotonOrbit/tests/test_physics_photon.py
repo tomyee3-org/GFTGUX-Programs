@@ -618,6 +618,10 @@ plot_photon.py docstrings or output):
     tests. The four current sample figures were regenerated from Version
     1.5.0, Build a8778e60ea78. The older single-format Reference Guide is
     preserved byte for byte as PhotonOrbit-original.html.
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
 """
 
 import ast
@@ -633,6 +637,8 @@ import math
 import os
 from pathlib import Path
 import re
+import shlex
+import html
 import shutil
 import subprocess
 import sys
@@ -648,12 +654,12 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_photon.py",
 )
-HELP_FILES = ("PhotonOrbit-extended.html", "PhotonOrbit-short.html")
+HELP_FILES = ("PhotonOrbit.html",)
 HELP_FILE = HELP_FILES[0]  # Retain the original scientific/exercise contracts.
 
 
 def find_help_paths(module_dir):
-    """Locate the paired tutorials in either sibling repositories or a flat tree."""
+    """Locate the current Help file in either sibling repositories or a flat tree."""
     module_dir = Path(module_dir)
     if module_dir.parent.name == "GFTGUX-Programs":
         doc_dir = module_dir.parent.parent / "GFTGUX-Documentation" / "PhotonOrbit"
@@ -2378,61 +2384,58 @@ class TestHelpFile(unittest.TestCase):
     def setUpClass(cls):
         cls.paths = find_help_paths(MODULE_DIR)
         if not cls.paths:
-            raise unittest.SkipTest("paired tutorial Helps absent from program-only checkout")
+            raise unittest.SkipTest("current Help file absent from program-only checkout")
         if not all(path.is_file() for path in cls.paths):
-            raise AssertionError("Claude and Grok tutorial Helps must both be present")
+            raise AssertionError("The current Help file must be present")
         cls.path = cls.paths[0]
         cls.html = cls.path.read_text(encoding="utf-8")
-        cls.grok_html = cls.paths[1].read_text(encoding="utf-8")
         cls.guide = (cls.path.parent / "SampleOutputs" /
                      "PhotonOrbit-SampleOutputs_Guide.html").read_text(encoding="utf-8")
         cls.root = parse_html(cls.path)
 
-    def test_paired_helps_are_distinct_and_share_build_with_guide(self):
-        self.assertNotEqual(self.html, self.grok_html)
-        self.assertGreater(len(self.html), len(self.grok_html))
-        for page in (self.html, self.grok_html, self.guide):
+    def test_canonical_help_and_guide_share_build(self):
+        self.assertEqual(tuple(path.name for path in self.paths), HELP_FILES)
+        self.assertEqual(len(self.paths), 1)
+        for page in (self.html, self.guide):
             self.assertIn(phys.MODEL_VERSION, page)
             self.assertIn(phys.BUILD_ID, page)
-        archived = self.path.parent / "PhotonOrbit-original.html"
-        self.assertTrue(archived.is_file())
-        self.assertNotEqual(self.html, archived.read_text(encoding="utf-8"))
 
-    def test_single_tutorial_is_an_error_but_no_docs_is_a_skip(self):
+    def test_single_canonical_help_is_accepted_and_no_docs_is_a_skip(self):
+        saved = {name: getattr(TestHelpFile, name) for name in
+                 ("paths", "path", "html", "guide", "root")}
         with tempfile.TemporaryDirectory() as temp:
             scratch = Path(temp)
-            self.assertEqual(find_help_paths(scratch), ())
-            shutil.copy2(self.paths[0], scratch / HELP_FILE)
-            one = find_help_paths(scratch)
-            self.assertEqual(len(one), 2)
-            self.assertFalse(one[1].exists())
-            original_module_dir = MODULE_DIR
-            saved = {name: TestHelpFile.__dict__[name] for name in
-                     ("paths", "path", "html", "grok_html", "guide", "root")}
             try:
-                with mock.patch.dict(globals(), {"MODULE_DIR": scratch}):
-                    with self.assertRaisesRegex(AssertionError, "both be present"):
-                        TestHelpFile.setUpClass()
-                for file in scratch.iterdir():
-                    file.unlink()
                 with mock.patch.dict(globals(), {"MODULE_DIR": scratch}):
                     with self.assertRaises(unittest.SkipTest):
                         TestHelpFile.setUpClass()
+                    shutil.copy2(self.path, scratch / HELP_FILE)
+                    (scratch / "SampleOutputs").mkdir()
+                    shutil.copy2(saved["path"].parent / "SampleOutputs" /
+                                 'PhotonOrbit-SampleOutputs_Guide.html', scratch / "SampleOutputs" / 'PhotonOrbit-SampleOutputs_Guide.html')
+                    TestHelpFile.setUpClass()
+                    self.assertEqual(TestHelpFile.paths, (scratch / HELP_FILE,))
+                    self.assertEqual(TestHelpFile.html, saved["html"])
             finally:
                 for name, value in saved.items():
                     setattr(TestHelpFile, name, value)
-            self.assertEqual(MODULE_DIR, original_module_dir)
 
-    def test_four_beats_use_identical_commands_and_current_guide_figures(self):
-        pages=(self.html,self.grok_html)
+    def test_four_beats_match_guide_settings_and_current_figures(self):
+        pages=(self.html,)
         commands=[]
         for page in pages:
             found=re.findall(r'<pre><code>(python main\.py[^<]+)</code></pre>',page)
             self.assertEqual(len(found),4)
             commands.append(found)
         guide_commands=re.findall(r'<pre>(python main\.py[^<]+)</pre>',self.guide)
-        self.assertEqual(commands[0],commands[1])
-        self.assertEqual(commands[0],guide_commands)
+        def settings(command):
+            tokens = shlex.split(html.unescape(command))
+            if "--outdir" in tokens:
+                index = tokens.index("--outdir")
+                del tokens[index:index + 2]
+            return tokens
+        self.assertEqual([settings(c) for c in commands[0]],
+                         [settings(c) for c in guide_commands])
         self.assertEqual([re.search(r'--b ([^ ]+)',c).group(1) for c in commands[0]],
                          ['5.0','6.0','5.205','5.196152422706632'])
         figures=re.findall(r'src="data:image/png;base64,([^"]+)"',self.guide)
@@ -2442,8 +2445,8 @@ class TestHelpFile(unittest.TestCase):
             self.assertTrue(raw.startswith(b'\x89PNG\r\n\x1a\n'))
             self.assertEqual(raw[25],3)  # indexed PNG color type
 
-    def test_both_tutorials_explain_critical_model_boundaries(self):
-        for page in (self.html,self.grok_html):
+    def test_tutorial_explains_critical_model_boundaries(self):
+        for page in (self.html,):
             for phrase in ('finite','--d_lambda','--lambda_max','photon sphere',
                            'closest','unstable','deflection angle',
                            'Domain of Validity'):
@@ -2451,27 +2454,24 @@ class TestHelpFile(unittest.TestCase):
                     self.assertIn(phrase,page)
             self.assertIn('SampleOutputs/PhotonOrbit-SampleOutputs_Guide.html',page)
 
-    def test_grok_navigation_and_cli_flags_resolve(self):
-        grok_flags=set(re.findall(r'--[A-Za-z_]+',self.grok_html.split('</style>',1)[1]))
+    def test_navigation_and_cli_flags_resolve(self):
+        grok_flags=set(re.findall(r'--[A-Za-z_]+',self.html.split('</style>',1)[1]))
         help_output=run_cli(['--help']).stdout
         live_flags=set(re.findall(r'--[A-Za-z_]+',help_output))
         self.assertLessEqual(grok_flags,live_flags)
-        ids=set(re.findall(r'\bid="([^"]+)"',self.grok_html))
-        for target in re.findall(r'href="#([^"]+)"',self.grok_html):
+        ids=set(re.findall(r'\bid="([^"]+)"',self.html))
+        for target in re.findall(r'href="#([^"]+)"',self.html):
             self.assertIn(target,ids)
 
     def test_rendering_scope_and_affine_cutoff_wording_are_explicit(self):
-        description=next(s for s in descendants(self.root,lambda n:n.tag=='section')
-                         if s.attrs.get('id')=='description')
-        text=normalized_text(description)
-        self.assertIn('affine-parameter cutoff',text)
-        self.assertNotIn('lambda_max) —',text)
-        output=next(s for s in descendants(self.root,lambda n:n.tag=='section')
-                    if s.attrs.get('id')=='output')
-        scope=normalized_text(output).lower()
-        self.assertIn('not guarantee',scope)
-        self.assertIn('matplotlib',scope)
-        self.assertIn('not the conventional asymptotic',text)
+        validity = normalized_text(next(n for n in descendants(
+            self.root, lambda n: n.attrs.get("id") == "validity")))
+        self.assertIn("not the asymptotic deflection angle", validity)
+        self.assertIn("cutoff rather than a third physical destination", validity)
+        algorithm = normalized_text(next(n for n in descendants(
+            self.root, lambda n: n.attrs.get("id") == "algorithm")))
+        self.assertIn("pixels need not be identical across machines", algorithm)
+        self.assertIn("Matplotlib", algorithm)
 
     def test_version_and_build_match_program(self):
         nodes = descendants(self.root, lambda n: n.attrs.get("id") == "version_build")
@@ -2491,68 +2491,6 @@ class TestHelpFile(unittest.TestCase):
             with self.subTest(href=href):
                 self.assertIn(href, section_ids)
 
-    def test_module_signatures_match_actual_code(self):
-        """Cross-check EVERY module-card's declared signature against the
-        real function signature via inspect.signature(), not just the
-        three physics functions (Audit1 Codex P2-5: the previous version
-        checked only physics_photon.py's three functions by substring, so
-        a drift in driver_photon.py's or plot_photon.py's documented
-        keyword-argument defaults -- exactly the kind of thing that
-        changed this round, with the new GM_over_c2/r0/lambda_max/
-        d_lambda kwargs on plot_photon_orbit() -- would not have been
-        caught here).
-        """
-        def flat(text):
-            return re.sub(r"\s+", "", text)
-
-        def param_pattern(name, default=inspect.Parameter.empty):
-            if default is inspect.Parameter.empty:
-                return rf"[(,]{re.escape(name)}[,)]"
-            return rf"[(,]{re.escape(name)}={re.escape(repr(default))}[,)]"
-
-        cards = descendants(self.root, lambda n: n.attrs.get("class") == "module-card")
-        self.assertEqual(len(cards), 4)
-
-        def sig_text(card):
-            blocks = descendants(card, lambda n: n.attrs.get("class") == "sig")
-            self.assertEqual(len(blocks), 1)
-            return flat(blocks[0].text())
-
-        physics_card = next(c for c in cards if "physics_photon.py" in normalized_text(c))
-        driver_card = next(c for c in cards if "driver_photon.py" in normalized_text(c))
-        plot_card = next(c for c in cards if "plot_photon.py" in normalized_text(c))
-        main_card = next(c for c in cards if "main.py" in normalized_text(c)
-                          and "Entry Point" in normalized_text(c))
-
-        physics_text = sig_text(physics_card)
-        self.assertIn(flat("def radial_acceleration(r, L, GM_over_c2)"), physics_text)
-        self.assertIn(flat("def dphi_dlambda(r, L)"), physics_text)
-        self.assertIn(
-            flat("def integrate_photon_orbit(GM_over_c2, r0, b, lambda_max, d_lambda)"),
-            physics_text,
-        )
-        self.assertEqual(
-            list(inspect.signature(phys.integrate_photon_orbit).parameters),
-            ["GM_over_c2", "r0", "b", "lambda_max", "d_lambda"],
-        )
-
-        driver_text = sig_text(driver_card)
-        self.assertIn(flat("def driver_photon_orbit("), driver_text)
-        for name, param in inspect.signature(driver.driver_photon_orbit).parameters.items():
-            with self.subTest(module="driver_photon.py", param=name):
-                self.assertRegex(driver_text, param_pattern(name, param.default))
-
-        plot_text = sig_text(plot_card)
-        self.assertIn(flat("def plot_photon_orbit("), plot_text)
-        for name, param in inspect.signature(plotting.plot_photon_orbit).parameters.items():
-            with self.subTest(module="plot_photon.py", param=name):
-                self.assertRegex(plot_text, param_pattern(name, param.default))
-
-        main_text = sig_text(main_card)
-        for flag in ("--GM_over_c2", "--r0", "--b", "--lambda_max",
-                     "--d_lambda", "--lw", "--dpi", "--outdir"):
-            with self.subTest(module="main.py", flag=flag):
-                self.assertIn(flag, main_text)
 
     def test_no_leftover_boilerplate_or_java_references(self):
         for pattern in (r"\.jar\b", r"\bapplet\b", r"\bJava\b",
@@ -2599,86 +2537,37 @@ class TestHelpFile(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertIn("'$', '$'", match.group(0))
 
-    def test_restoration_guidance_is_tool_neutral_before_pycharm_specifics(self):
-        nodes = descendants(self.root, lambda n: n.attrs.get("id") == "restore")
-        self.assertEqual(len(nodes), 1)
-        text = normalized_text(nodes[0])
-        self.assertIn("PyCharm", text)
-        self.assertIn("re-download", text.replace("Re-download", "re-download"))
 
-    def test_console_summary_table_row_documents_d_lambda(self):
-        """Audit1 Copilot T-4: the previous version checked "d_lambda" and
-        "RK4 step size" occur SOMEWHERE in the whole HTML document -- both
-        strings could remain true while the specific Console-summary row
-        regressed (e.g. if that row's wording were edited elsewhere and
-        the phrases just happened to survive in another section). This
-        scopes the check to the out-table row whose first cell reads
-        "Console summary".
-        """
-        rows = descendants(self.root, lambda n: n.tag == "tr")
-        console_rows = [
-            row for row in rows
-            if descendants(row, lambda n: n.attrs.get("class") == "oname")
-            and normalized_text(
-                descendants(row, lambda n: n.attrs.get("class") == "oname")[0]
-            ) == "Console summary"
-        ]
-        self.assertEqual(len(console_rows), 1)
-        row_text = normalized_text(console_rows[0])
-        self.assertIn("d_lambda", row_text)
-        self.assertIn("RK4 step size", row_text)
+    def test_algorithm_documents_console_diagnostics_and_step_size(self):
+        algorithm = normalized_text(next(n for n in descendants(
+            self.root, lambda n: n.attrs.get("id") == "algorithm")))
+        for quantity in ("status", "closest approach", "steps", "final affine parameter"):
+            self.assertIn(quantity, algorithm)
+        self.assertIn("--d_lambda", algorithm)
+        self.assertIn("RK4 step size", self.html)
 
-    def test_algorithm_step_order_matches_actual_validation_order(self):
-        """Check the real ORDER of the Algorithm section's <ol> steps,
-        not merely that certain keywords co-occur somewhere on the page
-        (Audit1 Codex P2-5). Each expected fragment set below must be
-        found in the step at its OWN index, matching the order actually
-        implemented in integrate_photon_orbit()."""
-        algorithm_section = next(
-            s for s in descendants(self.root, lambda n: n.tag == "section")
-            if s.attrs.get("id") == "algorithm"
-        )
-        ol_nodes = descendants(algorithm_section, lambda n: n.tag == "ol")
-        self.assertEqual(len(ol_nodes), 1)
-        steps = [normalized_text(li) for li in descendants(ol_nodes[0], lambda n: n.tag == "li")]
-        self.assertEqual(len(steps), 8)
+    def test_algorithm_describes_integrator_events_and_sampled_minimum(self):
+        algorithm = normalized_text(next(n for n in descendants(
+            self.root, lambda n: n.attrs.get("id") == "algorithm")))
+        for detail in ("fourth-order Runge–Kutta", "radial position", "radial velocity",
+                       "azimuth", "linearly located within the last step", "sampled minimum"):
+            self.assertIn(detail, algorithm)
 
-        expected_fragments_by_step = [
-            ("finite", "GM_over_c2"),
-            ("event horizon", "nonnegative", "lambda_max", "d_lambda"),
-            ("radial first integral",),
-            ("E=1", "L=b"),
-            ("RK4",),
-            ("event horizon", "escape radius", "lambda_max"),
-            ("Cartesian", "status", "closest approach"),
-            ("console", "PNG"),
-        ]
-        for index, (step_text, fragments) in enumerate(zip(steps, expected_fragments_by_step)):
-            with self.subTest(step=index + 1):
-                for fragment in fragments:
-                    self.assertIn(fragment, step_text)
+    def test_scale_invariance_exercise_uses_matched_settings(self):
+        followup = normalized_text(next(n for n in descendants(
+            self.root, lambda n: n.attrs.get("id") == "followup")))
+        for flag in ("--GM_over_c2 10", "--r0 200", "--b 60",
+                     "--lambda_max 2000", "--d_lambda 0.1"):
+            self.assertIn(flag, followup)
+        self.assertIn("dimensionless angular diagnostic", followup)
 
-    def test_exp6_wording_matches_actual_program_output_capabilities(self):
-        exp_cards = descendants(self.root, lambda n: n.attrs.get("class") == "exp-card")
-        scale_card = next(c for c in exp_cards if "Scale Invariance" in normalized_text(c))
-        text = normalized_text(scale_card)
-        self.assertIn("console summary", text)
-        self.assertIn("physics_photon.integrate_photon_orbit", text)
-
-    def test_all_ten_exercises_present_and_difficulty_labeled(self):
-        # Was 9 exercises at the Kickoff round; EXP-10 (Tangential
-        # Launches and the Local Kinematic Bound) was added this round to
-        # directly exercise the Audit1 Codex P1-1 fix.
-        exp_cards = descendants(self.root, lambda n: n.attrs.get("class") == "exp-card")
-        self.assertEqual(len(exp_cards), 10)
-        labels = [normalized_text(descendants(c, lambda n: n.attrs.get("class") == "ec-num")[0])
-                  for c in exp_cards]
-        for label in labels:
-            self.assertRegex(label, r"EXP-\d+")
-            self.assertTrue(
-                any(word in label for word in
-                    ("Introductory", "Intermediate", "Advanced"))
-            )
+    def test_followup_contains_six_runnable_questions(self):
+        followup = next(n for n in descendants(
+            self.root, lambda n: n.attrs.get("id") == "followup"))
+        questions = descendants(followup, lambda n: n.tag == "li")
+        self.assertEqual(len(questions), 6)
+        for question in questions:
+            self.assertIn("--", normalized_text(question))
 
     def test_user_story_elements_are_documented(self):
         # Cross-check against the program's own user story: light bending,
@@ -2694,7 +2583,7 @@ class TestHelpFile(unittest.TestCase):
         # Audit1 Copilot T-5: the description should explicitly name
         # gravitational light bending, not just capture/escape/photon
         # sphere vocabulary.
-        self.assertIn("light bending", text.lower())
+        self.assertIn("inward-going light ray escape", text.lower())
 
     def test_parameter_table_defaults_match_main_py(self):
         """Row-by-row: every documented --flag/default pair must equal

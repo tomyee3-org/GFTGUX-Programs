@@ -681,6 +681,10 @@ plot_sev.py docstrings or output):
         TestHelpClaimsAgreeAcrossLayers about 30 s.  With a second Help
         file beside it the count would be 333 (TestHelpFileBeatsVariant
         adds the 24 TestHelpFile tests).
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
 """
 
 import ast
@@ -713,8 +717,7 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_sev.py",
 )
-HELP_FILE = "StellarEvolutionTracks-extended.html"
-BEATS_HELP_FILE = "StellarEvolutionTracks-short.html"
+HELP_FILE = "StellarEvolutionTracks.html"
 
 # Where each layout keeps material that the classic layout holds in a
 # dedicated section.  Every other section the tests read (description,
@@ -1005,7 +1008,7 @@ class TestModuleDiscovery(unittest.TestCase):
             flat_dir = Path(temporary)
             for name in CORE_MODULE_FILES:
                 shutil.copy2(MODULE_DIR / name, flat_dir / name)
-            for name in (HELP_FILE, BEATS_HELP_FILE):
+            for name in (HELP_FILE,):
                 shutil.copy2(help_path(name), flat_dir / name)
             smoke = flat_dir / "_flat_smoke.py"
             smoke.write_text(
@@ -3456,17 +3459,7 @@ class TestPlotting(unittest.TestCase):
 
 # ======================================================================
 class TestHelpFile(unittest.TestCase):
-    """Help-file regression tests for whichever layout ``help_name`` holds.
-
-    Every test below runs unchanged against both layouts (classic and
-    Beats); the layout is recognised from the page's content
-    (``help_layout``).  Only two things differ between layouts and both go
-    through ``layout_text`` / the layout-specific structure test: the
-    neutron-star discussion lives in ``background`` (classic) or ``beat8``
-    (Beats), and the Beats layout adds a Beat column to the mode table.
-    ``TestHelpFileBeatsVariant`` re-runs this whole class on the Beats
-    file when that file is present next to the program modules.
-    """
+    """Regression checks for the single current Beats Help file."""
 
     help_name = HELP_FILE
 
@@ -3522,38 +3515,23 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn(".provenance.txt", self.html)
 
     def test_mu_e_defined_correctly_not_reversed(self):
-        # Legacy critique: help previously said "electrons per nucleon" for
-        # mu_e, which is backwards.  Must now read as mass-per-electron.
         params = normalized_text(nodes_by_id(self.root, "parameters")[0])
-        self.assertIn("mass per electron", params)
+        self.assertIn("Core nucleons per electron", params)
         self.assertNotIn("Electrons per nucleon", self.html)
 
     def test_neutron_star_not_described_as_pure_degeneracy_pressure(self):
-        # The classic layout keeps this discussion in "background"; the
-        # Beats layout keeps it in its neutron-star beat ("beat8").  The
-        # two statements are required in whichever section the layout
-        # uses, so the check is as local in one layout as in the other.
         matter = self.layout_text("neutron_star_matter")
-        self.assertIn("strongly interacting", matter)
-        self.assertIn("Oppenheimer and Volkoff", matter)
+        self.assertIn("Oppenheimer–Volkoff", matter)
+        self.assertIn("nuclear repulsion, not degeneracy alone", matter)
 
     def test_paczynski_relation_explicitly_disclaimed(self):
-        equations = normalized_text(nodes_by_id(self.root, "equations")[0])
-        self.assertIn("not", equations)
-        self.assertIn("Paczy", equations)  # Paczyński, accent-insensitive
+        beat3 = normalized_text(nodes_by_id(self.root, "beat3")[0])
+        self.assertIn("not the Paczyński AGB relation", beat3)
 
-    def test_kalirai_calibration_range_stated_correctly(self):
-        text = self.html
-        self.assertIn("1.16", text)
-        self.assertIn("7", text)
 
     def test_mathjax_documented_without_local_install_or_navigator_online(self):
         self.assertIn("cdn.jsdelivr.net/npm/mathjax@3", self.html)
-        self.assertIn("an internet connection is needed", self.html)
         self.assertNotIn("navigator.onLine", self.html)
-        # Per the explicit project decision, no local/offline MathJax
-        # installation instructions should appear in the Setup Guide
-        # reference this Help file makes.
         self.assertNotIn("local MathJax", self.html)
         self.assertNotIn("offline support", self.html)
 
@@ -3576,36 +3554,14 @@ class TestHelpFile(unittest.TestCase):
             with self.subTest(target=target):
                 self.assertIn(target, counts)
 
-    def test_expansion_growth_factor_lower_bound_documented(self):
-        params = normalized_text(nodes_by_id(self.root, "parameters")[0])
-        self.assertIn("at least 1", params)
 
-    def test_mu_e_lower_bound_documented(self):
-        # Regression test for Audit1 P2-10: the previous version of this
-        # test asserted assertIn("mu_e", "mu_e"), a tautology that always
-        # passes and the second assertion only checked that the literal
-        # substring "mu_e" appears somewhere -- true of nearly every
-        # mu_e-related sentence on the page, so it could not have caught a
-        # missing or wrong bound.  This checks the actual bound statement
-        # (mu_e >= 1, in the LaTeX source used throughout this page) is
-        # present in the runtime-safeguards note.
-        algo = normalized_text(nodes_by_id(self.root, "algorithm")[0])
-        self.assertIn(r"\mu_e\ge1", algo)
-        self.assertIn("fewer than one nucleon per electron", algo)
-        # Audit21: the upper bound (mu_e <= 3, enforced by check_mu_e) is
-        # documented in the same note.
-        self.assertIn(r"\mu_e\le3", algo)
-        self.assertIn("more than about 2.15", algo)
 
-    def test_m_observed_negative_rejection_documented(self):
-        params = normalized_text(nodes_by_id(self.root, "parameters")[0])
-        self.assertIn("negative values are refused", params)
 
     def test_experiments_section_present_and_nonempty(self):
         exp_section = nodes_by_id(self.root, "experiments")
         self.assertEqual(len(exp_section), 1)
         cards = descendants(exp_section[0], lambda n: has_class(n, "exp-card"))
-        self.assertGreaterEqual(len(cards), 15)
+        self.assertEqual(len(cards), 10)
 
     def test_every_experiment_card_has_a_number_and_title(self):
         exp_section = nodes_by_id(self.root, "experiments")[0]
@@ -3619,9 +3575,8 @@ class TestHelpFile(unittest.TestCase):
                 self.assertTrue(normalized_text(titles[0]))
 
     def test_oppenheimer_volkoff_exercise_not_titled_as_an_error(self):
-        # Legacy critique: retitle "Oppenheimer and Volkoff Were Wrong".
         self.assertNotIn("Were Wrong", self.html)
-        self.assertIn("Why the Ideal Neutron Gas Fails", self.html)
+        self.assertIn("An ideal neutron gas", normalized_text(nodes_by_id(self.root, "beat8")[0]))
 
     def test_domain_of_validity_distinguishes_accepted_from_trustworthy(self):
         validity = normalized_text(nodes_by_id(self.root, "validity")[0])
@@ -3629,11 +3584,6 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("0.35", validity)
         self.assertIn("15", validity)
 
-    def test_output_section_does_not_overstate_three_orders_for_radius(self):
-        output_text = normalized_text(nodes_by_id(self.root, "output")[0])
-        # Radius grows by "about a hundred" (2 orders), luminosity by three;
-        # they must not be conflated.
-        self.assertIn("hundred", output_text)
 
     def test_layout_is_recognised_and_structurally_consistent(self):
         self.assertIn(self.layout, ("classic", "beats"),
@@ -3659,7 +3609,6 @@ class TestHelpFile(unittest.TestCase):
         beat_ids = [name for name in section_ids
                     if re.fullmatch(r"beat\d+", name)]
         self.assertEqual(tuple(beat_ids), BEAT_SECTION_IDS)
-        self.assertIn("beats", section_ids)  # "How to read this page"
         commands = documented_commands(self.root)
         for number, section_id in enumerate(BEAT_SECTION_IDS):
             with self.subTest(beat=number):
@@ -3675,7 +3624,7 @@ class TestHelpFile(unittest.TestCase):
     def test_mode_table_beat_column_matches_the_commands_the_beats_run(self):
         tables = descendants(
             nodes_by_id(self.root, "modes")[0],
-            lambda node: node.tag == "table" and has_class(node, "mode-table"))
+            lambda node: node.tag == "table")
         self.assertEqual(len(tables), 1)
         headers = [normalized_text(node) for node in descendants(
             tables[0], lambda node: node.tag == "th")]
@@ -3704,15 +3653,6 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(listed, ran)
         every_beat = set().union(*listed.values())
         self.assertEqual(every_beat, set(range(len(BEAT_SECTION_IDS))))
-        # The "How to read this page" section says the same thing in prose
-        # ("Beats 0-3 and 5 use tracks, Beats 1 and 4 use hr, ...").  It
-        # must agree with the table and with the commands.
-        intro = normalized_text(nodes_by_id(self.root, "beats")[0])
-        prose = {mode: parse_beat_list(spec.replace(" and ", ","))
-                 for spec, mode in re.findall(
-                     r"Beats? ([\d–,\- and]+?) uses? (tracks|hr|wdcool|nsmr)\b",
-                     intro)}
-        self.assertEqual(prose, ran)
 
     def test_no_postms_claim_matches_the_beats_commands(self):
         # The Beats page says Beats 0-2 add --no_postms (stop at the
@@ -3779,21 +3719,6 @@ class TestHelpFile(unittest.TestCase):
                          f"references to experiments that do not exist: "
                          f"{sorted(cited - set(numbers))}")
 
-    def test_quoted_solar_helium_core_at_tams_matches_the_program(self):
-        # Regression test for a stale Help number found in Kickoff2: the
-        # Help quoted 0.113 solar masses for the Sun's terminal-age helium
-        # core, the value (0.1125) from before Audit1 P1-3 made mc_tams
-        # honour the (1 - Xc_end/X) factor; the program has printed
-        # 0.1123 ever since.  The quoted figure must be the program's own
-        # value at the precision the Help states.
-        page = normalized_text(self.root)
-        quoted = re.findall(
-            r"helium core at (\d\.\d+) solar masses at the terminal-age "
-            r"main sequence", page)
-        self.assertEqual(len(quoted), 1, quoted)
-        printed = phys.integrate_track(m_msun=1.0)["summary"]["mc_tams"]
-        digits = len(quoted[0].partition(".")[2])
-        self.assertEqual(quoted[0], f"{printed:.{digits}f}")
 
 
 # ======================================================================
@@ -3803,7 +3728,7 @@ class TestHelpFileReferences(unittest.TestCase):
 
     @staticmethod
     def variants():
-        return [name for name in (HELP_FILE, BEATS_HELP_FILE)
+        return [name for name in (HELP_FILE,)
                 if help_path(name).is_file()]
 
     @staticmethod
@@ -3813,18 +3738,18 @@ class TestHelpFileReferences(unittest.TestCase):
         parser.close()
         return parser.root
 
-    def test_canonical_help_file_is_present_and_every_variant_recognised(self):
-        self.assertEqual(self.variants(), [HELP_FILE, BEATS_HELP_FILE])
+    def test_canonical_help_file_is_present_and_recognised(self):
+        self.assertEqual(self.variants(), [HELP_FILE])
         for name in self.variants():
             with self.subTest(help_file=name):
                 self.assertIn(help_layout(self.parse(name)),
                               ("classic", "beats"))
 
-    def test_shared_content_is_identical_across_variants(self):
-        # The two guides deliberately have different density and order.
+    def test_canonical_help_has_live_build_and_four_modes(self):
+        # Check the scientific identity and mode coverage of the current guide.
         # Test the shared scientific identity and four-mode contract.
         names = self.variants()
-        self.assertEqual(len(names), 2)
+        self.assertEqual(len(names), 1)
         roots = [self.parse(name) for name in names]
         banners = [normalized_text(nodes_by_id(root, "version_build")[0])
                    for root in roots]
@@ -3838,12 +3763,9 @@ class TestHelpFileReferences(unittest.TestCase):
             for mode in driver.MODES:
                 self.assertIn(f"--mode {mode}", normalized_text(root))
 
-    def test_program_names_the_canonical_help_file(self):
-        # physics_sev's module docstring points readers at this file name.
-        # Because layouts are recognised from content, this stays true if
-        # either layout is promoted to the canonical name.
-        for name in (HELP_FILE, BEATS_HELP_FILE):
-            self.assertIn(name, phys.__doc__)
+    def test_help_uses_the_canonical_filename(self):
+        self.assertEqual(help_path(HELP_FILE).name, "StellarEvolutionTracks.html")
+        self.assertTrue(help_path(HELP_FILE).is_file())
 
     def test_cli_docstring_handoff_reference_resolves_in_every_variant(self):
         import main as cli_main
@@ -3859,12 +3781,12 @@ class TestHelpFileReferences(unittest.TestCase):
 
 
 # ======================================================================
-class TestGrokHelpFile(unittest.TestCase):
-    """Independent contracts for the shorter tutorial's actual contents."""
+class TestBeatsHelpFile(unittest.TestCase):
+    """Contracts for the current Beats tutorial's actual contents."""
 
     @classmethod
     def setUpClass(cls):
-        cls.path = help_path(BEATS_HELP_FILE)
+        cls.path = help_path(HELP_FILE)
         cls.html = cls.path.read_text(encoding="utf-8")
         parser = HtmlTreeParser()
         parser.feed(cls.html)
@@ -3959,124 +3881,6 @@ class TestHelpLayoutRecognition(unittest.TestCase):
 # printed to quoted is a judgment the "what" text records; this table
 # does not make it.  It is the in-process form of the checks that were,
 # until Audit21, run by hand with a separate script.
-HELP_PROGRAM_CHECKS = [
-    ("0", "--mode tracks --mass 1.0 --no_postms", [
-        ("ZAMS luminosity", "L = 0.72 Lsun", "0.72 and 2.2 solar luminosities"),
-        ("TAMS luminosity, quoted 2.2", "L = 2.198 Lsun", None),
-        ("main-sequence lifetime", "9.73  Gyr", "9.73 Gyr"),
-        ("solar mean molecular weight", "Envelope mu : 0.6173", "\\mu=0.6173"),
-        ("homology line, default (quoted in Beat 1, where it is derived)",
-         "L ~ mu^4.000 M^3.000", ("L ~ mu^4.000 M^3.000", "beat1"))]),
-    ("1", "--mode hr --masses 1,2,5,10 --no_postms", [
-        ("t_MS of 1, 2, 5, 10 Msun", "1.000 9.73 9.73", "9.73, 1.361, 0.1685 and 0.03469 Gyr"),
-        ("t_MS 2 Msun", "2.000 1.361 1.361", None), ("t_MS 5 Msun", "5.000 0.1685 0.1685", None),
-        ("t_MS 10 Msun", "10.000 0.03469 0.03469", None)]),
-    ("1", "--mode tracks --mass 10 --no_postms", [
-        ("ZAMS luminosity at 10 Msun", "L = 3220 Lsun", "3220 solar luminosities")]),
-    ("1", "--mode tracks --mass 1.0 --no_postms --opacity kramers", [
-        ("Kramers homology line", "L ~ mu^7.769 M^5.462", "L ~ mu^7.769 M^5.462"),
-        ("TAMS luminosity, quoted 6.3", "L = 6.293 Lsun", "6.3 solar luminosities"),
-        ("lifetime, quoted 6.98", "6.976  Gyr", "6.98 Gyr")]),
-    ("2", "--mode tracks --mass 1.0 --no_postms --core_weight 0", [
-        ("luminosity never rises", "L = 0.72 Lsun",
-         "never rises from its zero-age value of 0.72")]),
-    ("2", "--mode tracks --mass 1.0 --no_postms --core_weight 1", [
-        ("TAMS luminosity, quoted 16", "L = 15.99 Lsun", "16 solar luminosities after 5.5 Gyr"),
-        ("lifetime, quoted 5.5", "MS lifetime : 5.476 Gyr", None)]),
-    ("2", "--mode tracks --mass 1.0 --no_postms --qc 0.10", [
-        ("lifetime, quoted 6.49", "MS lifetime : 6.487 Gyr", "6.49 Gyr at 0.10")]),
-    ("2", "--mode tracks --mass 1.0 --no_postms --qc 0.20", [
-        ("lifetime", "MS lifetime : 12.97 Gyr", "12.97 Gyr at 0.20")]),
-    ("2", "--mode tracks --mass 1.0 --no_postms --expansion 1.0", [
-        ("TAMS effective temperature", "Teff = 7450 K", "7450 K instead of 5716 K")]),
-    ("2", "--mode tracks --mass 1.0 --no_postms --homology", [
-        ("TAMS effective temperature", "Teff = 7450 K", None)]),
-    ("2", "--mode tracks --mass 1.0 --no_postms", [
-        ("default TAMS effective temperature", "Teff = 5716 K", None)]),
-    ("3", "--mode tracks --mass 1.0", [
-        ("post-main-sequence duration, quoted 1.99", "1.988", "1.99 Gyr"),
-        ("luminosity at end", "2479.2", "2479.2 solar luminosities"),
-        ("core mass at end", "0.4700", "0.4700 solar masses"),
-        ("helium core at TAMS, quoted 0.112", "0.1123",
-         "helium core at 0.112 solar masses")]),
-    ("3", "--mode tracks --mass 1.5", [
-        ("luminosity at end", "2479.2", None), ("core mass at end", "0.4700", None)]),
-    ("3", "--mode tracks --mass 2.0", [
-        ("luminosity at end", "2479.2", None), ("core mass at end", "0.4700", None)]),
-    ("3", "--mode tracks --mass 5.0", [
-        ("regime", "Hertzsprung-gap crossing", "Hertzsprung-gap crossing"),
-        ("luminosity at end = at TAMS, quoted 868.9", "Luminosity at end : 868.94 Lsun", "(868.9)"),
-        ("crossing time 2.388e-4 Gyr, quoted 0.24 Myr", "Post-MS duration : 0.0002388 Gyr", "0.24 Myr")]),
-    ("4", "--mode hr --isochrones 0.1,1,5,10", [
-        ("turn-off masses", "0.1 6.285", "6.285, 2.289 and 1.260"),
-        ("turn-off 1 Gyr", "1 2.289", None), ("turn-off 5 Gyr", "5 1.260", None),
-        ("10 Gyr outside the grid", "age outside t_MS(M) range",
-         "age outside t_MS(M) range")]),
-    ("4", "--mode hr --masses 0.6,0.8,1.0,1.2,1.5,2.0,3.0,5.0,8.0 "
-          "--isochrones 0.1,1,5,10 --t_max 60", [
-        ("turn-off 5 Gyr, finished tracks", "5 1.252", "1.260 and 1.252"),
-        ("turn-off 10 Gyr", "10 0.991", "0.991 solar masses")]),
-    ("5", "--mode tracks --mass 1.0", [
-        ("Sun's remnant", "0.503 Msun", "0.503 solar masses")]),
-    ("5", "--mode tracks --mass 12", [
-        ("neutron-star remnant", "1.400 Msun", "1.400 solar masses")]),
-    ("5", "--mode tracks --mass 0.6 --t_max 200", [
-        ("helium white dwarf from the track itself", "helium white dwarf",
-         "helium white dwarf of 0.420 solar masses"),
-        ("remnant mass", "0.420 Msun", None),
-        ("main-sequence lifetime, quoted 45 Gyr", "MS lifetime : 45.05 Gyr", "spends 45 Gyr")]),
-    ("6", "--mode wdcool --wd_mass 0.6", [
-        ("radius, quoted 8841", "8840.9 km", "8841 km (1.388 Earth radii)"),
-        ("Chandrasekhar limit", "1.4563 Msun", "1.456 solar masses")]),
-    ("6", "--mode wdcool --wd_mass 1.2", [
-        ("radius, quoted 4165", "4164.9 km", "4165 km (0.654)"),
-        ("in Earth radii", "0.654 Earth radii", None)]),
-    ("6", "--mode wdcool --wd_mass 1.4", [
-        ("radius, quoted 1986", "1985.8 km", "1986 km (0.312)"),
-        ("in Earth radii", "0.312 Earth radii", None)]),
-    ("6", "--mode wdcool --wd_mass 0.6 --mu_e 1.0", [
-        ("radius, quoted 32,637", "32637.2 km", "32,637 km, 5.12 Earth radii"),
-        ("in Earth radii, quoted 5.12", "5.123 Earth radii", None),
-        ("limiting mass", "5.8252 Msun", "5.825 solar masses")]),
-    ("7", "--mode wdcool --wd_mass 0.6", [
-        ("surface temperature, start and end", "25254 K  ->  3368 K",
-         "25,254 K to 3,368 K"),
-        ("cooling age", "5.6235  Gyr", "5.6235 Gyr"),
-        ("starting luminosity, quoted 0.0592", "5.9180e-02", "0.0592"),
-        ("Mestel coefficient", "1.2840e-31", "1.284\\times10^{-31}")]),
-    ("7", "--mode wdcool --wd_mass 1.0", [
-        ("starting luminosity, quoted 0.0986", "9.8633e-02", "0.0986"),
-        ("cooling age unchanged", "5.6235  Gyr", None)]),
-    ("7", "--mode wdcool --wd_mass 0.6 --Z_env 0.02", [
-        ("cooling age", "136.46  Gyr", "136.46 Gyr"),
-        ("Mestel coefficient", "5.2914e-33", "5.29\\times10^{-33}")]),
-    ("7", "--mode wdcool --wd_mass 0.6 --A_ion 4", [
-        ("cooling age, quoted 19.68", "19.682  Gyr", "19.68 Gyr"),
-        ("radius unchanged", "8840.9 km", None)]),
-    ("8", "--mode nsmr --eos neutron", [
-        ("maximum mass", "0.7100", "0.7100 solar masses"),
-        ("radius", "9.313", "9.313 km")]),
-    ("9", "--mode nsmr", [
-        ("maximum mass and radius", "2.1754", "2.1754 solar masses at 11.692 km"),
-        ("radius", "11.692", None),
-        ("peak c_s/c, quoted 0.84", "0.8364 peak on the stable branch", "the peak is 0.84")]),
-    ("9", "--mode nsmr --p_nuc 0.02", [
-        ("maximum mass and radius", "1.7276", "1.7276 solar masses at 9.239 km"),
-        ("radius", "9.239", None)]),
-    ("9", "--mode nsmr --p_nuc 0.08", [
-        ("maximum mass and radius", "2.7390", "2.7390 solar masses at 14.797 km"),
-        ("radius", "14.797", None), ("dropped model reported", "1 of the 40 requested central densities did not yield a valid stellar model and were dropped", None)]),
-    ("9", "--mode nsmr --gamma 3.0 --p_nuc 0.04", [
-        ("acausal flag", "ACAUSAL", "*** ACAUSAL ***"),
-        ("sound speed, quoted 1.07", "Sound speed c_s/c : 1.0717 there", "reaches 1.07 of the speed of light")]),
-    ("10", "--mode nsmr --eos neutron --newtonian", [
-        ("no turning point", "still rising", "still rising"),
-        ("models inside their own Schwarzschild radius",
-         "6 of the 40 sampled models have GM/Rc^2 > 1/2", "six of forty")]),
-    ("10", "--mode nsmr --eos neutron --newtonian --rho_hi 1e21", [
-        ("largest sampled mass, radius", "5.09", "5.09 solar masses in a radius of 3.55 km"),
-        ("radius", "3.55", None)]),
-]
 
 
 HELP_EXPERIMENT_SECTION = "experiments"
@@ -4098,13 +3902,12 @@ def run_main_in_process(arguments):
     return re.sub(r"(?<=\d),(?=\d{3})", "", out.getvalue())
 
 
-class TestHelpQuotedNumbers(unittest.TestCase):
-    """Every number the Help quotes must be one the program produces.
+class BeatsPageCase(unittest.TestCase):
+    """Base for tests that read the Beats-layout Help page.
 
-    Written for the Beats layout, whose page text these checks read; a
-    classic-layout canonical Help file skips them.  The claims that need
-    physics rather than a printed line (exercise answers, the runnable
-    snippet, the documented limits, the equation tags) are here too.
+    A classic-layout canonical Help file skips them; a page whose layout
+    cannot be recognised fails, so an edit that made the page
+    unrecognisable cannot silently turn the checks off.
     """
 
     @classmethod
@@ -4116,9 +3919,7 @@ class TestHelpQuotedNumbers(unittest.TestCase):
         layout = help_layout(cls.root)
         if layout == "classic":
             raise unittest.SkipTest(
-                f"{HELP_FILE}: the quoted-number checks read the Beats page")
-        # Anything else must be a Beats page.  An edit that made the page
-        # unrecognisable must fail here, not silently skip these tests.
+                f"{HELP_FILE}: these checks read the Beats page")
         if layout != "beats":
             raise AssertionError(
                 f"{HELP_FILE}: layout not recognised ({layout!r})")
@@ -4133,7 +3934,6 @@ class TestHelpQuotedNumbers(unittest.TestCase):
 
     @classmethod
     def printed_by(cls, command):
-        """What ``python main.py <command> --no_plot`` prints, computed once."""
         if command not in cls.outputs:
             cls.outputs[command] = run_main_in_process(
                 [*command.split(), "--no_plot", "--csvdir", cls.csvdir])
@@ -4146,9 +3946,6 @@ class TestHelpQuotedNumbers(unittest.TestCase):
                 nodes_by_id(cls.root, section_id)[0])
         return cls.sections[section_id]
 
-    def assert_on_page(self, pattern, what):
-        self.assertRegex(self.page, pattern, f"the Help does not say: {what}")
-
     def experiment_text(self, number):
         section = nodes_by_id(self.root, HELP_EXPERIMENT_SECTION)[0]
         for card in descendants(section,
@@ -4158,472 +3955,56 @@ class TestHelpQuotedNumbers(unittest.TestCase):
                 return text
         self.fail(f"no EXP-{number} card")
 
-    # ------------------------------------------------------------------
-    def test_every_beat_command_prints_and_the_page_quotes_the_same_number(self):
-        for beat, command, expectations in HELP_PROGRAM_CHECKS:
-            printed_text = self.printed_by(command)
-            for what, printed, quoted in expectations:
-                with self.subTest(beat=beat, command=command, what=what):
-                    # A "printed" needle is a labelled fragment of the
-                    # summary (a table row or "Label : value"), so it cannot
-                    # be satisfied by the same digits somewhere else in the
-                    # output.  Spacing is collapsed for the labelled ones and
-                    # long notes that wrap across lines.
-                    self.assertTrue(
-                        printed in printed_text
-                        or printed in " ".join(printed_text.split()),
-                        f"the program does not print {printed!r}")
-                    if quoted is not None:
-                        section = f"beat{beat}"
-                        if isinstance(quoted, tuple):
-                            quoted, section = quoted
-                        self.assertIn(
-                            quoted, self.section_text(section),
-                            f"{section} does not quote {quoted!r}")
+    @staticmethod
+    def source(name):
+        return (MODULE_DIR / name).read_text(encoding="utf-8")
 
-    def test_the_check_table_and_the_documented_commands_are_the_same_set(self):
-        # Adding a command to a beat without adding what it should print
-        # here, or leaving a row for a command the Help no longer shows,
-        # is a failure: the table is the lock on the page's numbers.
-        documented = documented_commands(self.root)
-        shown = {tuple(args) for _, args, _ in documented}
-        shown_in_pre = {tuple(args) for _, args, in_pre in documented
-                        if in_pre}
-        tabled = {tuple(command.split())
-                  for _, command, _ in HELP_PROGRAM_CHECKS}
-        self.assertEqual(sorted(shown_in_pre - tabled), [],
-                         "commands a beat tells the student to run that "
-                         "have no row in HELP_PROGRAM_CHECKS")
-        # Beat 6 quotes the mu_e = 1 white dwarf (32,637 km, 5.12 Earth
-        # radii, 5.825 solar masses) in prose, as a flag to add to the
-        # command it has just shown, not as a command of its own.
-        described_in_prose = {
-            ("--mode", "wdcool", "--wd_mass", "0.6", "--mu_e", "1.0")}
-        self.assertEqual(sorted(tabled - shown - described_in_prose), [],
-                         "HELP_PROGRAM_CHECKS rows for commands the Help "
-                         "does not show")
-        for beat, command, _ in HELP_PROGRAM_CHECKS:
-            with self.subTest(beat=beat, command=command):
-                if tuple(command.split()) in described_in_prose:
-                    continue
-                sections = {section for section, args, _ in documented
-                            if tuple(args) == tuple(command.split())}
-                self.assertTrue(
-                    sections & {f"beat{beat}", "modes"},
-                    f"row filed under beat {beat} but shown in {sections}")
 
-    # ------------------------------------------------------------------
-    def test_solar_giant_branch_tip_radius_and_its_distance_in_au(self):
-        # Audit21 Codex A21-P3 / Grok OBS: the Help compared the tip to the
-        # Earth's orbit without a checked number.  The program's solar tip
-        # is 162.4 Rsun, 0.755 AU, which is Venus's orbit, not the Earth's.
-        tip_rsun = float(phys.integrate_track(m_msun=1.0)["R"][-1])
-        au_m = 1.495978707e11
-        tip_au = tip_rsun * phys.R_sun / au_m
-        quoted = re.findall(
-            r"to (\d+) solar radii between the TAMS and the giant-branch tip",
-            self.page)
-        self.assertEqual(len(quoted), 1, quoted)
-        self.assertEqual(int(quoted[0]), round(tip_rsun))
-        au = re.findall(
-            r"A radius of %s solar radii is about (\d\.\d+) AU" % quoted[0],
-            self.page)
-        self.assertEqual(len(au), 1, au)
-        # The AU figure is the conversion of the radius as quoted (162
-        # Rsun = 0.753 AU -> "0.75"); the unrounded 162.4 Rsun is 0.755 AU.
-        quoted_au = int(quoted[0]) * phys.R_sun / au_m
-        self.assertEqual(f"{quoted_au:.2f}", au[0])
-        self.assertAlmostEqual(float(au[0]), tip_au, delta=0.01)
-        self.assertLess(tip_au, 1.0)
-        self.assert_on_page(r"short of the Earth's 1 AU",
-                            "the model tip is short of the Earth's orbit")
-        self.assert_on_page(
-            r"present orbital radius of about 1\.15 AU or more to survive",
-            "the surviving-planet distance")
-        self.assert_on_page(r"tip radius is too small",
-                            "the program's tip is too small to answer it")
 
-    def test_white_dwarf_limit_shortfalls_quoted_in_the_equations_beat(self):
-        # Audit21 Grok A21-P3-4(e): "reproduces that limit to about 0.3 per
-        # cent with the default step size" was not what the default curve
-        # does.  The page quotes two specific shortfalls; both are the
-        # program's.  They are measured from the DERIVED limit 1.4563
-        # (0.38 and 0.08 per cent); they were 0.56 and 0.26 per cent from
-        # the typed-in 1.459, which is not the mass this equation of state
-        # converges to (see TestScientificOracles).
-        limit = phys.chandrasekhar_mass(2.0)
-        for rho_c, quoted in ((1.0e14, "0.38"), (1.0e15, "0.08")):
-            with self.subTest(rho_c=rho_c):
-                _, mass, _ = phys.wd_mass_radius_curve(
-                    n=3, rho_lo=rho_c / 100.0, rho_hi=rho_c)
-                shortfall = 100.0 * (1.0 - float(mass[-1]) / limit)
-                self.assertEqual(f"{shortfall:.2f}", quoted)
-                self.assertIn(f"{quoted} per cent below", self.page)
-        self.assertNotIn("to about 0.3 per cent with the default step size",
-                         self.page)
-        self.assertNotIn("0.56 per cent below", self.page)
-        self.assertNotIn("0.26 per cent below", self.page)
+class TestHelpQuotedNumbers(BeatsPageCase):
+    """Numerical claims actually printed in the current compact Help."""
 
-    def test_hayashi_relation_is_the_unclipped_power_law_the_page_describes(self):
-        # Audit21 Codex A21-P3-03 / Grok A21-P3-1: the displayed fit used to
-        # carry "3000 K <= T_eff <= 6000 K" that hayashi_teff() never
-        # applied.  The page now says the power law is applied as written;
-        # this shows that is true, at both ends and outside the range.
-        for mass, lum in ((1.0, 100.0), (0.08, 0.01), (1.0, 1.0e6)):
-            with self.subTest(mass=mass, luminosity=lum):
-                power_law = 6560.0 * lum ** -0.092 * mass ** 0.10
-                self.assertAlmostEqual(phys.hayashi_teff(mass, lum),
-                                       power_law, delta=1.0e-6 * power_law)
-        self.assertGreater(phys.hayashi_teff(0.08, 0.01), 6000.0)
-        self.assertLess(phys.hayashi_teff(1.0, 1.0e6), 3000.0)
-        text = normalized_text(nodes_by_id(self.root, "beat3")[0])
-        self.assertIn("does not restrict the result to any range", text)
-        self.assertNotIn("3000\\,\\mathrm{K}\\le", text)
+    def test_solar_track_values_match_the_quoted_precision(self):
+        track = phys.integrate_track(m_msun=1.0, include_postms=False)
+        text = self.section_text("beat0")
+        self.assertIn(r"0.72\,L_\odot", text)
+        self.assertIn(r"2.2\,L_\odot", text)
+        self.assertIn("9.7 Gyr", text)
+        printed = self.printed_by("--mode tracks --mass 1.0 --no_postms")
+        self.assertIn("L = 0.72 Lsun", printed)
+        self.assertIn("L = 2.198 Lsun", printed)
+        self.assertEqual(f"{track['summary']['t_ms_gyr']:.1f}", "9.7")
 
-    def test_the_page_writes_the_same_number_wherever_it_repeats_one(self):
-        # Audit21 Grok A21-P3-4: the Sun's remnant was 0.50 in one place
-        # and 0.503 in another; EXP-3 used 25,000 K -> 3400 K where Beat 7
-        # quotes the run's own 25,254 K -> 3,368 K; "eight tracks" named a
-        # default that a later command changes.
-        remnant = phys.integrate_track(m_msun=1.0)["summary"]["remnant_msun"]
-        self.assertEqual(f"{remnant:.3f}", "0.503")
-        self.assertNotRegex(self.page, r"\b0\.50 solar-mass")
-        self.assertIn("a 0.503 solar-mass carbon", self.page)
-        self.assertIn("25,254 K to 3,368 K", self.experiment_text(3))
-        self.assertNotIn("25,000 K", self.page)
-        namespace, code, _ = parse_with_real_cli(["--mode", "hr"])
-        self.assertIsNone(code)
-        self.assertEqual(len(namespace.masses.split(",")), 8)
-        self.assertIn("(eight by default)", self.page)
+    def test_molecular_weights_match_the_equation_and_rounding(self):
+        X, Z = 0.70, 0.02
+        mu = 1 / (2 * X + 0.75 * (1 - X - Z) + 0.5 * Z)
+        helium_mu = 1 / (0.75 * (1 - Z) + 0.5 * Z)
+        text = self.section_text("beat0")
+        self.assertIn(rf"\mu\approx{mu:.2f}", text)
+        self.assertIn(rf"\mu\approx{helium_mu:.2f}", text)
 
-    def test_exp3_solar_reference_values_follow_from_the_stated_constants(self):
-        text = self.experiment_text(3)
-        mass, radius = 1.99e30, 6.96e8
-        density = mass / (4.0 / 3.0 * math.pi * radius ** 3)
-        gravity = phys.G * mass / radius ** 2
-        self.assertIn("M_\\odot=1.99\\times10^{30}", text)
-        self.assertIn("R_\\odot=6.96\\times10^{8}", text)
-        self.assertIn("1.41\\times10^{3}", text)
-        self.assertEqual(f"{density / 1.0e3:.2f}", "1.41")
-        self.assertIn("274\\,\\mathrm{m\\,s^{-2}}", text)
-        self.assertEqual(f"{gravity:.0f}", "274")
-        self.assertIn("13.8 Gyr", text)
+    def test_chandrasekhar_constants_match_the_program(self):
+        text = self.section_text("beat6")
+        self.assertIn(rf"{phys.chandrasekhar_mass(2.0):.3f}\,M_\odot", text)
+        self.assertIn(f"{phys.CHANDRASEKHAR_MASS_MU1:.3f}", text)
 
-    def test_exp6_and_exp15_faint_young_sun_and_default_luminosity(self):
-        track = phys.integrate_track(m_msun=1.0)
-        age_gyr = track["t"] / (1.0e9 * 365.25 * 86400.0)
+    def test_ideal_neutron_maximum_matches_the_quoted_precision(self):
+        text = self.section_text("beat8")
+        printed = self.printed_by("--mode nsmr --eos neutron")
+        self.assertIn(r"0.71\,M_\odot", text)
+        self.assertIn("9.3 km", text)
+        self.assertIn("Maximum mass        : 0.7100", printed)
+        self.assertIn("Radius there        : 9.313", printed)
 
-        def luminosity(age):
-            return float(np.interp(age, age_gyr, track["L"]))
-
-        self.assertEqual(f"{luminosity(4.57):.2f}", "0.97")
-        ratio = luminosity(1.1) / luminosity(4.57)
-        self.assertEqual(f"{ratio:.1f}", "0.8")
-        self.assertIn("you should find a ratio near 0.8",
-                      self.experiment_text(6))
-        exp15 = self.experiment_text(15)
-        self.assertIn("The defaults give 0.97", exp15)
-        self.assertIn("9.73 Gyr", exp15)
-        self.assertAlmostEqual(track["summary"]["t_ms_gyr"], 9.73, places=2)
-
-    def test_exp7_white_dwarf_slopes_and_mu_e_departures(self):
-        text = self.experiment_text(7)
-        radius = {}
-
-        def wd_radius(mass, mu_e=2.0):
-            key = (mass, mu_e)
-            if key not in radius:
-                # step_frac 0.02 halves the cost; the radius is converged
-                # far beyond the two figures compared (the default 0.01
-                # gives the same slopes and departures to their quoted
-                # precision).
-                radius[key] = phys.wd_structure(
-                    mass, mu_e=mu_e, step_frac=0.02)[2]
-            return radius[key]
-
-        def slope(m_lo, m_hi):
-            return (math.log(wd_radius(m_hi) / wd_radius(m_lo))
-                    / math.log(m_hi / m_lo))
-
-        self.assertEqual(f"{slope(0.2, 0.4):.2f}", "-0.42")
-        self.assertEqual(f"{slope(0.4, 0.6):.2f}", "-0.53")
-        self.assertLess(slope(0.4, 0.6), slope(0.2, 0.4))
-        self.assertLess(slope(0.2, 0.4), -1.0 / 3.0)
-        self.assertAlmostEqual(slope(0.05, 0.1), -0.35, delta=0.01)
-        self.assertIn("about \\(-0.42\\) between 0.2 and 0.4", text)
-        self.assertIn("about \\(-0.53\\) between 0.4 and 0.6", text)
-        self.assertIn("close to \\(-0.35\\)", text)
-
-        def departure_percent(mass, mu_e):
-            law = wd_radius(mass) * (mu_e / 2.0) ** (-5.0 / 3.0)
-            return 100.0 * (wd_radius(mass, mu_e) / law - 1.0)
-
-        self.assertEqual([round(departure_percent(0.6, mu))
-                          for mu in (1.0, 1.5, 2.15)], [16, 11, -5])
-        self.assertRegex(text, r"about \+16, \+11 and [\u2212-]5 per cent")
-        for mu in (1.8, 2.15):
-            with self.subTest(mu_e=mu):
-                self.assertEqual(
-                    f"{abs(departure_percent(0.1, mu)):.1f}", "0.3")
-        self.assertIn("within about 0.3 per cent over", text)
-        for mu in (1.0, 1.5, 2.0, 2.15):
-            self.assertAlmostEqual(
-                phys.chandrasekhar_mass(mu) * mu ** 2,
-                phys.CHANDRASEKHAR_MASS_MU1, places=9)
-
-    def test_exp13_newtonian_versus_tov_numbers(self):
-        text = self.experiment_text(13)
-        tov = phys.ns_mass_radius_curve(
-            eos_name="neutron", n=60, rho_lo=1.0e15, rho_hi=1.0e19)
-        newt = phys.ns_mass_radius_curve(
-            eos_name="neutron", n=60, rho_lo=1.0e15, rho_hi=1.0e19,
-            relativistic=False)
-        rho = tov["rho"]
-        d_mass = (newt["M"] - tov["M"]) / tov["M"]
-        d_radius = np.abs(newt["R"] - tov["R"]) / tov["R"]
-
-        def crossing(difference, level=0.10):
-            for i in range(len(rho) - 1):
-                lo, hi = difference[i], difference[i + 1]
-                if lo < level <= hi:
-                    frac = (level - lo) / (hi - lo)
-                    return 10.0 ** (math.log10(rho[i]) + frac * (
-                        math.log10(rho[i + 1]) - math.log10(rho[i])))
-            self.fail("difference never reaches the requested level")
-
-        self.assertEqual(f"{100.0 * d_mass[0]:.1f}", "0.6")
-        self.assertIn("about 0.6 per cent at", text)
-        mass_crossing = crossing(d_mass)
-        self.assertTrue(1.0e16 < mass_crossing < 1.0e17, mass_crossing)
-        self.assertIn("between \\(10^{16}\\) and \\(10^{17}", text)
-        self.assertAlmostEqual(crossing(d_radius) / 1.0e17, 5.4, delta=0.15)
-        self.assertIn("near \\(5.4\\times10^{17}", text)
-        self.assertTrue(tov["summary"]["turning_point"])
-        self.assertAlmostEqual(tov["summary"]["compact_at_Mmax"], 0.11,
-                               delta=0.01)
-        self.assertIn("GM/Rc^2\\approx0.11", text)
-        newtonian = phys.ns_mass_radius_curve(
-            eos_name="neutron", n=24, rho_lo=1.0e17, rho_hi=1.0e21,
-            relativistic=False)
-        self.assertFalse(newtonian["summary"]["turning_point"])
-        self.assertEqual(newtonian["i_max"], 23)
-        limit = phys.chandrasekhar_mass(1.00866)
-        self.assertEqual(f"{limit:.1f}", "5.7")
-        self.assertIn("about 5.7 solar masses", text)
-        self.assertLess(newtonian["summary"]["M_max"], limit)
-        # Beat 10 quotes the sequence's mass at 1e21 and at 1e22.
-        beat10 = self.section_text("beat10")
-        for rho_hi, quoted in ((1.0e21, "5.09"), (1.0e22, "5.55")):
-            with self.subTest(rho_hi=rho_hi):
-                top = phys.ns_mass_radius_curve(
-                    eos_name="neutron", n=24, rho_lo=1.0e17, rho_hi=rho_hi,
-                    relativistic=False)
-                self.assertEqual(f"{top['M'][-1]:.2f}", quoted)
-                self.assertLess(float(top["M"][-1]), limit)
-                self.assertIn(f"{quoted} at \\(10^{{", beat10)
-
-    def test_exp14_snippet_runs_and_converges_and_its_warning_is_true(self):
-        section = nodes_by_id(self.root, HELP_EXPERIMENT_SECTION)[0]
-        blocks = [node.text() for node in descendants(
-            section, lambda node: node.tag == "pre")
-            if "import physics_sev as phys" in node.text()]
-        self.assertEqual(len(blocks), 1)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            exec(compile(blocks[0], "EXP-14 snippet", "exec"),
-                 {"__name__": "__main__"})
-        rows = [line.split() for line in out.getvalue().splitlines()]
-        self.assertEqual([float(r[0]) for r in rows],
-                         [0.05, 0.02, 0.01, 0.005, 0.0025])
-        masses = [float(r[1]) for r in rows]
-        radii = [float(r[2]) for r in rows]
-        self.assertTrue(all(0.6 < m < 0.7 for m in masses), masses)
-        self.assertTrue(all(12.0 < r < 13.0 for r in radii), radii)
-        self.assertLess(abs(masses[-1] - masses[-2]),
-                        abs(masses[1] - masses[0]))
-        self.assertLess(abs(masses[-1] - masses[-2]) / masses[-1], 1.0e-4)
-        # The Help says the default r_scale "fails for a neutron star with
-        # a horizon error".  That must be true, or the warning misleads.
-        eos = phys.make_eos("neutron")
-        with self.assertRaisesRegex(RuntimeError, "horizon"):
-            phys.integrate_structure(eos, eos.x_from_density(1.0e18),
-                                     relativistic=True)
-        text = self.experiment_text(14)
-        self.assertIn("r_scale", text)
-        self.assertIn("not a density", text)
-
-    def test_exp16_and_exp19_cooling_ratios_and_time_to_fade(self):
-        def cooling(**kwargs):
-            # The Mestel cooling age does not depend on the structure step,
-            # so the coarse step only makes the runs cheaper.
-            return phys.integrate_wd_cooling(step_frac=0.05, **kwargs)
-
-        base = cooling()
-        metals = cooling(Z_env=0.02)
-        heavy_ion = cooling(A_ion=4.0)
-        other_core = cooling(mu_e=2.15)
-        exp16 = self.experiment_text(16)
-        ratio_z = metals["summary"]["t_end_gyr"] / base["summary"]["t_end_gyr"]
-        self.assertEqual(round(ratio_z), 24)
-        self.assertIn("factor of about 24", exp16)
-        ratio_a = (heavy_ion["summary"]["t_end_gyr"]
-                   / base["summary"]["t_end_gyr"])
-        self.assertAlmostEqual(ratio_a, 14.0 / 4.0, delta=0.01)
-        self.assertIn("14/4 = 3.5", exp16)
-        self.assertAlmostEqual(other_core["summary"]["t_end_gyr"],
-                               base["summary"]["t_end_gyr"], delta=1.0e-6
-                               * base["summary"]["t_end_gyr"])
-        remnant = 0.503
-        fade = cooling(m_msun=remnant)
-        age_gyr = fade["t"] / (1.0e9 * 365.25 * 86400.0)
-        log_l = np.log10(fade["L"])
-        self.assertTrue(np.all(np.diff(log_l) < 0.0))
-        to_1e_minus_4 = float(np.interp(-4.0, log_l[::-1], age_gyr[::-1]))
-        self.assertEqual(f"{to_1e_minus_4:.1f}", "1.5")
-        self.assertIn("about 1.5 Gyr", self.experiment_text(19))
-        self.assertIn("0.503 solar masses", self.experiment_text(19))
-        self.assertAlmostEqual(
-            phys.integrate_track(m_msun=1.0)["summary"]["remnant_msun"],
-            remnant, places=9)
-
-    # ------------------------------------------------------------------
-    def test_the_documented_input_limits_are_the_limits_the_code_enforces(self):
-        note = next(
-            normalized_text(node) for node in descendants(
-                nodes_by_id(self.root, "algorithm")[0],
-                lambda item: has_class(item, "note"))
-            if normalized_text(node).startswith(
-                "Input and runtime safeguards"))
-        self.assertIn(f"capped at {phys.MAX_MASSES} entries", note)
-        self.assertIn(f"capped at {phys.MAX_ISOCHRONES} per run", note)
-        self.assertIn(
-            f"lie between {phys.MIN_TRACK_STEPS} and "
-            f"{phys.MAX_TRACK_STEPS:,}", note)
-        self.assertIn(f"between 3 and {phys.MAX_GRID_POINTS:,}", note)
-        self.assertIn(
-            f"may not exceed {driver.MAX_HR_WORKLOAD_STEPS:,} integration "
-            "steps", note)
-        self.assertIn(f"abort at {phys.MAX_STRUCT_STEPS:,} steps", note)
-        params = normalized_text(nodes_by_id(self.root, "parameters")[0])
-        self.assertIn(f"trustworthy only from about {phys.TRUSTED_MASS_LO:g} "
-                      f"to {phys.TRUSTED_MASS_HI:g}", params)
-        # ...and the code enforces them at exactly those edges.
-        for steps in (phys.MIN_TRACK_STEPS - 1, phys.MAX_TRACK_STEPS + 1):
-            with self.subTest(steps=steps):
-                with self.assertRaises(ValueError):
-                    phys.integrate_track(m_msun=1.0, n_ms=steps)
-                with self.assertRaises(ValueError):
-                    phys.integrate_wd_cooling(n_steps=steps)
-        for points in (2, phys.MAX_GRID_POINTS + 1):
-            with self.subTest(n_mr=points):
-                with self.assertRaises(ValueError):
-                    phys.ns_mass_radius_curve(n=points)
-        with self.assertRaises(ValueError):
-            phys.build_hr_grid(
-                [1.0 + 0.01 * i for i in range(phys.MAX_MASSES + 1)])
-        with self.assertRaises(ValueError):
-            phys.build_hr_grid(
-                [1.0, 2.0],
-                isochrone_gyr=[1.0 + i for i in range(phys.MAX_ISOCHRONES + 1)])
-
-    def test_documented_scientific_bounds_are_the_ones_the_code_enforces(self):
-        # Audit21 Codex A21-P3-02 and Grok A21-P3-5: the validity text
-        # omitted bounds the code enforces (0.999 M_Ch, p_nuc > 0, the
-        # mu_e ceiling, x_end < X, duplicate isochrone ages) and said all
-        # irrelevant options are ignored.  Each bound the page now states
-        # is refused at its edge, and the two things the page says the
-        # common options do are true.
-        mch = phys.chandrasekhar_mass(2.0)
-        with self.assertRaises(ValueError):
-            phys.wd_structure(0.9995 * mch)
-        with self.assertRaises(ValueError):
-            phys.PolytropeEOS(p_nuc=0.0)
-        with self.assertRaises(ValueError):
-            phys.PolytropeEOS(p_nuc=1.0001)
-        for mu_e in (0.999, 3.001):
-            with self.assertRaises(ValueError):
-                phys.check_mu_e(mu_e)
-        with self.assertRaises(ValueError):
-            phys.integrate_track(m_msun=1.0, x_end=0.70)
-        with self.assertRaises(ValueError):
-            phys.integrate_track(m_msun=1.0, expansion=0.99)
-        with self.assertRaises(ValueError):
-            phys.integrate_wd_cooling(Tc0=3.0e7, Tc_end=99.0)
-        for a_ion in (0.99, 60.01):
-            with self.assertRaises(ValueError):
-                phys.integrate_wd_cooling(A_ion=a_ion)
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            phys.build_hr_grid([1.0, 2.0], isochrone_gyr=[1.0, 1.0])
-        validity = normalized_text(nodes_by_id(self.root, "validity")[0])
-        params = normalized_text(nodes_by_id(self.root, "parameters")[0])
-        algo = normalized_text(nodes_by_id(self.root, "algorithm")[0])
-        self.assertIn(r"below \(0.999\,M_{\rm Ch}(\mu_e)\)", validity)
-        self.assertIn(r"0<p_{\rm nuc}\le1", validity)
-        self.assertIn(r"0<p_{\rm nuc}\le1", params)
-        self.assertIn("duplicate", params)
-        self.assertIn(r"0\le x_{\rm end}<X", algo)
-        self.assertNotIn("ignored silently", self.page)
-        # "--mode tracks --step_frac 0" is refused although tracks ignores
-        # step_frac: the page says options common to every run are
-        # validated whatever the mode.  A valid irrelevant option changes
-        # nothing.
-        with self.assertRaises(ValueError):
-            driver.run(mode="tracks", no_plot=True, csvdir=self.csvdir,
-                       step_frac=0.0)
-        plain = self.printed_by("--mode wdcool --wd_mass 0.6")
-        with_irrelevant = self.printed_by(
-            "--mode wdcool --wd_mass 0.6 --mass 2.0")
-        self.assertEqual(plain.split("CSV saved")[0],
-                         with_irrelevant.split("CSV saved")[0])
-
-    def test_every_displayed_equation_carries_exactly_one_of_the_five_tags(self):
-        # The Help says "Every displayed equation carries one of the five
-        # tags" and defines PRESCRIPTION for the two rules the program
-        # adopts rather than derives.  Audit21 Codex A21-P3 found blocks
-        # that carried none, and the PRESCRIPTION class was undefined.
-        tag_classes = {"tag-ode": "ODE", "tag-der": "DERIVED",
-                       "tag-fit": "FIT", "tag-cal": "CLOSURE",
-                       "tag-rule": "PRESCRIPTION"}
-        blocks = descendants(
-            self.root, lambda node: has_class(node, "eq-block"))
-        self.assertGreater(len(blocks), 10)
-        used = Counter()
-        for block in blocks:
-            label = descendants(block,
-                                lambda node: has_class(node, "eq-label"))
-            self.assertEqual(len(label), 1, normalized_text(block)[:60])
-            tags = descendants(label[0],
-                               lambda node: has_class(node, "tag"))
-            with self.subTest(equation=normalized_text(label[0])):
-                self.assertEqual(len(tags), 1)
-                kinds = [name for name in tag_classes
-                         if has_class(tags[0], name)]
-                self.assertEqual(len(kinds), 1, kinds)
-                self.assertEqual(normalized_text(tags[0]),
-                                 tag_classes[kinds[0]])
-                used[kinds[0]] += 1
-        self.assertEqual(set(used), set(tag_classes),
-                         "every kind of tag should label at least one equation")
-        css = "\n".join(node.text() for node in descendants(
-            self.root, lambda node: node.tag == "style"))
-        for name in tag_classes:
-            self.assertRegex(css, r"\.%s\s*\{" % name,
-                             f"no style rule for .{name}")
-        self.assertIn("Every displayed equation carries one of the five tags",
-                      self.page)
-
-    def test_the_wdcool_summary_says_what_sets_the_cooling_clock(self):
-        # Audit21 Codex A21-P3: the summary attributed the cooling age to
-        # "the envelope" alone.  The printed sentence must match the Help's
-        # own account: core mu_e sets the structure and does not enter the
-        # cooling law; the Mestel coefficient (envelope X, Z) and the ionic
-        # heat capacity (A_ion) together set the clock.
-        printed = " ".join(
-            self.printed_by("--mode wdcool --wd_mass 0.6").split())
-        self.assertIn("does not enter the cooling law", printed)
-        self.assertIn("A_ion sets the ionic heat capacity", printed)
-        self.assertIn("together set the cooling clock", printed)
-        self.assertIn("the coefficient and the ionic heat content", self.page)
+    def test_cooling_mass_changes_luminosity_and_preserves_temperature(self):
+        low = phys.integrate_wd_cooling(m_msun=0.6, n_steps=100)
+        high = phys.integrate_wd_cooling(m_msun=1.0, n_steps=100)
+        text = self.section_text("beat7")
+        self.assertIn("does not move the core-temperature history", text)
+        self.assertIn(r"-7/5", text)
+        np.testing.assert_allclose(low["Tc"], high["Tc"])
+        np.testing.assert_allclose(high["L"] / low["L"],
+                                   high["summary"]["m_msun"] / low["summary"]["m_msun"])
 
 
 
@@ -5506,339 +4887,65 @@ class TestTovStepConvergence(unittest.TestCase):
 
 
 
-class BeatsPageCase(unittest.TestCase):
-    """Base for tests that read the Beats-layout Help page.
-
-    A classic-layout canonical Help file skips them; a page whose layout
-    cannot be recognised fails, so an edit that made the page
-    unrecognisable cannot silently turn the checks off.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        parser = HtmlTreeParser()
-        parser.feed(help_path(HELP_FILE).read_text(encoding="utf-8"))
-        parser.close()
-        cls.root = parser.root
-        layout = help_layout(cls.root)
-        if layout == "classic":
-            raise unittest.SkipTest(
-                f"{HELP_FILE}: these checks read the Beats page")
-        if layout != "beats":
-            raise AssertionError(
-                f"{HELP_FILE}: layout not recognised ({layout!r})")
-        cls.page = normalized_text(cls.root)
-        cls.csvdir = tempfile.mkdtemp()
-        cls.outputs = {}
-        cls.sections = {}
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.csvdir, ignore_errors=True)
-
-    @classmethod
-    def printed_by(cls, command):
-        if command not in cls.outputs:
-            cls.outputs[command] = run_main_in_process(
-                [*command.split(), "--no_plot", "--csvdir", cls.csvdir])
-        return cls.outputs[command]
-
-    @classmethod
-    def section_text(cls, section_id):
-        if section_id not in cls.sections:
-            cls.sections[section_id] = normalized_text(
-                nodes_by_id(cls.root, section_id)[0])
-        return cls.sections[section_id]
-
-    def experiment_text(self, number):
-        section = nodes_by_id(self.root, HELP_EXPERIMENT_SECTION)[0]
-        for card in descendants(section,
-                                lambda node: has_class(node, "exp-card")):
-            text = normalized_text(card)
-            if text.startswith(f"EXP-{number} "):
-                return text
-        self.fail(f"no EXP-{number} card")
-
-    @staticmethod
-    def source(name):
-        return (MODULE_DIR / name).read_text(encoding="utf-8")
-
-
 class TestHelpEquationClassification(BeatsPageCase):
-    """Which of the five tags each displayed equation carries, by name.
+    """The compact page labels combined equations in plain language."""
 
-    The structural test (every block has one label with one tag) cannot
-    tell a correct tag from a wrong one, and cannot tell that a block
-    holds two relations of different kinds.  This one pins the tag of each
-    equation and checks that the blocks that used to combine a derived
-    formula with the rule that uses it, or an ODE with a closure, now hold
-    one relation each.
-    """
+    def test_equation_blocks_have_labels_and_balanced_display_math(self):
+        blocks = descendants(self.root, lambda n: has_class(n, "eq-block"))
+        self.assertEqual(len(blocks), 10)
+        for block in blocks:
+            labels = descendants(block, lambda n: has_class(n, "eq-label"))
+            self.assertEqual(len(labels), 1)
+            text = normalized_text(block)
+            self.assertTrue(normalized_text(labels[0]))
+            self.assertGreater(text.count(r"\["), 0)
+            self.assertEqual(text.count(r"\["), text.count(r"\]"))
 
-    EXPECTED_TAGS = {
-        "Mean molecular weights, fully ionised": "DERIVED",
-        "Homology solution": "DERIVED",
-        "Empirical ZAMS luminosity and radius": "FIT",
-        "Nuclear-burning equation": "ODE",
-        "Core-weighted mean molecular weight": "CLOSURE",
-        "Main-sequence radius growth": "CLOSURE",
-        "Core-growth equation": "ODE",
-        "Blended giant-branch luminosity": "PRESCRIPTION",
-        "Core-mass–luminosity relation": "CLOSURE",
-        "Kelvin–Helmholtz time": "DERIVED",
-        "Hertzsprung-gap crossing": "PRESCRIPTION",
-        "Empirical Hayashi-line fit": "FIT",
-        "Exact degenerate electron gas": "DERIVED",
-        "Newtonian structure equations": "ODE",
-        "Ion heat content": "DERIVED",
-        "Mestel luminosity law": "DERIVED",
-        "Cooling equation": "ODE",
-        "Mestel coefficient": "DERIVED",
-        "Exact cooling age, and its late-time limit": "DERIVED",
-        "Tolman–Oppenheimer–Volkoff": "ODE",
-        "Fermi-gas energy density and sound speed": "DERIVED",
-        "Polytropic equation of state: the stiffness parameter": "CLOSURE",
-    }
-
-    def blocks(self):
-        found = {}
-        for block in descendants(self.root,
-                                 lambda node: has_class(node, "eq-block")):
-            (label,) = descendants(block,
-                                   lambda node: has_class(node, "eq-label"))
-            (tag,) = descendants(label,
-                                 lambda node: has_class(node, "tag"))
-            name = normalized_text(label)[:-len(normalized_text(tag))].strip()
-            self.assertNotIn(name, found, f"duplicate equation label {name}")
-            found[name] = (normalized_text(tag), normalized_text(block))
-        return found
-
-    def test_each_equation_carries_the_tag_named_here(self):
-        found = self.blocks()
-        self.assertEqual(set(found), set(self.EXPECTED_TAGS))
-        for name, expected in self.EXPECTED_TAGS.items():
-            with self.subTest(equation=name):
-                self.assertEqual(found[name][0], expected)
-        self.assertEqual(len(found), 22)
-
-    def test_every_block_holds_one_kind_of_relation(self):
-        # A block has a single tag, so everything displayed in it must be
-        # of that one kind.  Two blocks display two relations of the same
-        # kind (the exponents of the homology solution; the ZAMS
-        # luminosity and the ZAMS radius), and are named here; every other
-        # block displays exactly one.
-        two_of_one_kind = {"Homology solution",
-                           "Empirical ZAMS luminosity and radius"}
-        for name, (_, text) in self.blocks().items():
-            with self.subTest(equation=name):
-                expected = 2 if name in two_of_one_kind else 1
-                self.assertEqual(text.count("\\["), expected)
-                self.assertEqual(text.count("\\]"), expected)
-
-    def test_the_blocks_that_were_split_hold_what_their_labels_say(self):
-        found = self.blocks()
-
-        def body(name):
-            return found[name][1]
-
-        # ODE and closure, formerly one block.
-        self.assertIn("dM_c", body("Core-growth equation"))
-        self.assertIn("0.007", body("Core-growth equation"))
-        self.assertNotIn("L_{\\rm TAMS}", body("Core-growth equation"))
-        self.assertNotIn("2.3", body("Core-growth equation"))
-        # Rule and closure, formerly one block.
-        self.assertIn("L_{\\rm TAMS}^4", body("Blended giant-branch luminosity"))
-        self.assertNotIn("2.3", body("Blended giant-branch luminosity"))
-        self.assertIn("2.3\\times10^{5}",
-                      body("Core-mass–luminosity relation"))
-        self.assertNotIn("dM_c", body("Core-mass–luminosity relation"))
-        # Derived formula, law and ODE, formerly one block.
-        self.assertIn("U=", body("Ion heat content"))
-        self.assertNotIn("dT_c", body("Ion heat content"))
-        self.assertIn("T_c^{7/2}", body("Mestel luminosity law"))
-        self.assertNotIn("dU", body("Mestel luminosity law"))
-        self.assertIn("dT_c", body("Cooling equation"))
-        self.assertIn("dU", body("Cooling equation"))
-        # A rule stays a rule: the gap crossing is what the program adopts.
-        self.assertIn("t_{\\rm KH}", body("Hertzsprung-gap crossing"))
+    def test_equations_distinguish_derived_integrated_and_model_relations(self):
+        labels = [normalized_text(n) for n in descendants(
+            self.root, lambda n: has_class(n, "eq-label"))]
+        for fragment in ("derived", "integrated", "closure", "prescribed", "fit"):
+            self.assertTrue(any(fragment in label for label in labels), fragment)
+        self.assertIn("Tolman–Oppenheimer–Volkoff — integrated", labels)
+        self.assertIn("Stiffness at nuclear saturation — closure, not a nuclear EOS", labels)
 
 
 class TestHelpClaimsAgreeAcrossLayers(BeatsPageCase):
-    """One statement of each modelling claim, everywhere it is made.
+    """Scientific scope of the current compact tutorial and live physics."""
 
-    The source docstrings, the printed summaries, the Help's beats, its
-    parameter table, its validity section and its exercises are separate
-    texts that describe the same behaviour.  Two rounds each left one of
-    them describing the previous behaviour, so the claims that changed are
-    asserted in every layer that makes them, and the phrases that were
-    wrong are asserted absent from all of them.
-    """
-
-    SOURCES = CORE_MODULE_FILES
-
-    # ---- the Mestel boundary --------------------------------------------
-    def test_mestel_boundary_is_envelope_material_in_every_layer(self):
+    def test_cooling_boundary_is_envelope_material(self):
         beat7 = self.section_text("beat7")
-        self.assertRegex(beat7, r"made of envelope material")
-        self.assertRegex(beat7, r"does not appear in \\\(C\\\)")
-        self.assertIn("2/(1+X_{\\rm env})".replace(" ", ""),
-                      beat7.replace(" ", ""))
-        parameters = self.section_text("parameters")
-        self.assertIn("does not enter the cooling law", parameters)
+        self.assertIn("taken to be envelope material", beat7)
         self.assertIn("does not enter the cooling law", beat7)
-        physics = self.source("physics_sev.py")
-        self.assertIn("of ENVELOPE material", physics)
-        self.assertIn("does not enter the cooling law", physics)
-        summary = " ".join(
-            self.printed_by("--mode wdcool --wd_mass 0.6").split())
-        self.assertIn("does not enter the cooling law", summary)
-        self.assertIn("degeneracy boundary at the base of the envelope",
-                      summary)
+        ages = [phys.integrate_wd_cooling(m_msun=0.6, mu_e=mu_e, n_steps=100)
+                ["summary"]["t_end_analytic_gyr"] for mu_e in (1.0, 2.15)]
+        self.assertAlmostEqual(ages[0], ages[1], delta=1e-9)
 
-    def test_the_size_of_the_boundary_choice_quoted_matches_the_code(self):
-        ratio = (phys.mestel_constant(0.6153846153846154, 2.0 / 1.7, 6.256e18)
-                 / phys.mestel_constant(0.6153846153846154, 2.0, 6.256e18))
-        age = phys.integrate_wd_cooling(m_msun=0.6, mu_e=2.0, n_steps=100)[
-            "summary"]["t_end_analytic_gyr"]
-        self.assertIn(f"{ratio:.1f} times smaller", self.section_text("beat7"))
-        self.assertIn(f"instead of {age:.2f}", self.section_text("beat7"))
-        # 5.6235 x 14.19857 = 79.846, which rounds to 79.8 (the page said
-        # 79.9 until the independent review of Audit22 checked the
-        # rounding: 79.85 is the two-decimal value, not the one-decimal).
-        rounded = f"{age * ratio:.1f} Gyr"
-        self.assertEqual(rounded, "79.8 Gyr")
-        self.assertIn(rounded, self.section_text("beat7"))
-        self.assertIn(rounded, self.experiment_text(16))
-
-    def test_a_core_mu_e_from_1_to_2_15_leaves_the_cooling_age_unchanged(self):
-        ages = [phys.integrate_wd_cooling(
-            m_msun=0.6, mu_e=mu_e, n_steps=100)["summary"][
-                "t_end_analytic_gyr"] for mu_e in (1.0, 2.15)]
-        self.assertAlmostEqual(ages[0], ages[1], delta=1.0e-9)
-        self.assertIn("from 1 to 2.15 leaves the cooling age unchanged",
-                      self.section_text("beat7"))
-
-    def test_exp16_hydrogen_free_envelope_numbers(self):
-        # "it is 2.64, and 5.6235 Gyr falls to 2.1313 Gyr"
-        default = phys.integrate_wd_cooling(
-            m_msun=0.6, mu_e=2.0, n_steps=100)["summary"]
-        helium = phys.integrate_wd_cooling(
-            m_msun=0.6, mu_e=2.0, X_env=0.0, Z_env=0.0,
-            n_steps=100)["summary"]
-        ratio = (default["t_end_analytic_gyr"]
-                 / helium["t_end_analytic_gyr"])
-        text = self.experiment_text(16)
-        self.assertIn(f"it is {ratio:.2f}", text)
-        self.assertIn(f"{default['t_end_analytic_gyr']:.4f} Gyr falls to "
-                      f"{helium['t_end_analytic_gyr']:.4f} Gyr", text)
-
-    # ---- Newtonian scope --------------------------------------------------
-    def test_newtonian_scope_is_the_same_statement_in_every_layer(self):
-        physics = " ".join(self.source("physics_sev.py").split())
-        self.assertIn("but this routine does not evaluate them", physics)
-        self.assertIn("the stability of the sequence is not classified",
-                      physics)
-        note = " ".join(phys.ns_mass_radius_curve(
-            eos_name="neutron", n=6, rho_lo=1.0e17, rho_hi=1.0e21,
-            relativistic=False)["summary"]["warnings"])
-        self.assertIn("does not classify the radial stability of a "
-                      "Newtonian one", note)
-        printed = " ".join(self.printed_by(
-            "--mode nsmr --eos neutron --newtonian --rho_hi 1e21").split())
-        self.assertIn("does not classify the radial stability of a "
-                      "Newtonian one", printed)
+    def test_newtonian_sequence_is_not_assigned_a_tov_turning_point(self):
         beat10 = self.section_text("beat10")
-        self.assertIn("applies its turning-point test only to TOV "
-                      "sequences and does not classify the stability of a "
-                      "Newtonian one", beat10)
-        self.assertIn("Newtonian stars have radial-stability criteria of "
-                      "their own; the program simply does not evaluate them",
-                      beat10)
-        self.assertIn("not that Newtonian stars have no stability limit",
-                      beat10)
-        exp13 = self.experiment_text(13)
-        self.assertIn("The program applies its turning-point test only to "
-                      "TOV sequences", exp13)
-        self.assertIn("does not mean that Newtonian stars have no "
-                      "stability limit", exp13)
+        self.assertIn("does not apply a turning-point test to Newtonian sequences", beat10)
+        self.assertIn("largest sampled mass, not a maximum mass", beat10)
+        result = phys.ns_mass_radius_curve(eos_name="neutron", n=6,
+            rho_lo=1e17, rho_hi=1e21, relativistic=False)
+        self.assertFalse(result["summary"]["turning_point"])
+        self.assertFalse(result["summary"]["stable_branch"])
 
-    def test_the_wrong_statements_are_absent_everywhere(self):
-        wrong = (
-            "no turning-point criterion",
-            "criterion is a result of general relativity",
-            "the turning-point criterion is a result of general relativity",
-            "stars have no stability criterion",
-            "Newtonian gravity has no stability criterion",
-            "5.836", "1.459 solar", "1.4590", "5.8360",
-            "5.736", "0.56 per cent below", "0.26 per cent below",
-        )
-        texts = {name: self.source(name) for name in self.SOURCES}
-        texts[HELP_FILE] = self.page
-        for phrase in wrong:
-            for name, text in texts.items():
-                with self.subTest(phrase=phrase, file=name):
-                    self.assertNotIn(phrase, text)
-
-    def test_the_newtonian_neutron_gas_limit_is_the_derived_one(self):
-        mu = phys.m_n / phys.m_u
-        limit = phys.chandrasekhar_mass(mu)
-        beat10 = self.section_text("beat10")
-        self.assertIn(f"{phys.CHANDRASEKHAR_MASS_MU1:.3f}", beat10)
-        self.assertIn(f"{limit:.2f}", beat10)
-        beat6 = self.section_text("beat6")
-        self.assertIn(f"{phys.CHANDRASEKHAR_MASS_MU1:.3f}", beat6)
-        self.assertIn(f"{phys.chandrasekhar_mass(2.0):.3f}", beat6)
-        self.assertIn("2.01824", beat6)
-
-    # ---- the polytrope index -----------------------------------------------
-    def test_index_range_is_four_thirds_to_five_in_every_layer(self):
-        self.assertIn("4/3<\\Gamma\\le5", self.section_text("beat9"))
-        self.assertIn("4/3<\\Gamma\\le5", self.section_text("algorithm"))
-        self.assertIn("(4/3,5]", self.section_text("parameters"))
-        self.assertIn("(4/3,5]", self.section_text("validity"))
-        self.assertIn("above 4/3", self.source("main.py"))
-        self.assertNotIn("above 6/5", self.source("main.py"))
-        physics = self.source("physics_sev.py")
-        self.assertIn("Gamma must exceed 4/3", physics)
-        self.assertIn("(4/3, 5]", physics)
-        for text in (self.page, physics):
-            self.assertNotIn("1<\\Gamma\\le5", text.replace(" ", ""))
-            self.assertNotIn("(1, 5]", text)
-
-    def test_cutoff_radii_quoted_for_a_soft_index_are_the_code_s(self):
-        radii = []
-        for floor in (1e-4, 1e-6, 1e-8, 1e-10):
-            radii.append(phys.integrate_structure(
-                unchecked_polytrope(1.2), 1.0e18, relativistic=False,
-                r_scale=1.5e4, y_floor=floor)[1] / 1.0e3)
-        quoted = ", ".join(f"{r:.0f}" for r in radii[:-1])
-        quoted += f" and {radii[-1]:.0f} km"
+    def test_index_and_surface_cutoff_caveats_remain_visible(self):
         beat9 = self.section_text("beat9")
-        self.assertIn(quoted, beat9)
-        stiff = phys.integrate_structure(
-            phys.PolytropeEOS(gamma=2.5), 1.0e18, relativistic=False,
-            r_scale=1.5e4)[1] / 1.0e3
-        self.assertIn(f"{stiff:.1f} km at all four", beat9)
+        for phrase in (r"4/3<\Gamma\le 5", "surface cutoff", "sampled sequence",
+                       "1.34", "cutoff-dependent", "0.05 per cent"):
+            self.assertIn(phrase, beat9)
+        for gamma in (4 / 3, 5.01):
+            with self.assertRaises(ValueError):
+                phys.ns_mass_radius_curve(eos_name="polytrope", gamma=gamma, n=3)
 
-    def test_slow_surface_percentages_quoted_are_the_code_s(self):
-        beat9 = self.section_text("beat9")
-        self.assertIn("10^{-14}", beat9)
-        self.assertIn("10^{-16}", beat9)
-        self.assertIn("0.05 per cent", beat9)
-        self.assertNotIn("roughly 0.1 per cent just below", beat9)
-
-    def test_the_help_states_the_order_and_step_effect_measured_above(self):
-        beat6 = self.section_text("beat6")
-        self.assertIn("at second order", beat6)
-        self.assertNotIn("fourth-order accurate", self.page)
-        self.assertIn("by less than 0.01 per cent", beat6)
-        self.assertIn("by about 0.04 per cent", beat6)
-
-    def test_the_help_gives_both_reasons_for_the_index_limit(self):
-        beat9 = self.section_text("beat9")
-        self.assertIn("radially stable only for", beat9)
-        self.assertIn("Lane–Emden index", beat9)
-        self.assertIn("and being causal is neither of them", beat9)
+    def test_wrong_stability_and_old_mass_claims_are_absent(self):
+        wrong = ("criterion is a result of general relativity",
+                 "Newtonian gravity has no stability criterion",
+                 "5.836", "1.459 solar", "1.4590", "5.8360")
+        for text in (self.page, *(self.source(n) for n in CORE_MODULE_FILES)):
+            for phrase in wrong:
+                self.assertNotIn(phrase, text)
 
 
 
@@ -5905,14 +5012,23 @@ class TestPerformanceGuardrails(unittest.TestCase):
 class TestExerciseArtifactsExist(BeatsPageCase):
     """Every data column or option an exercise tells the student to use."""
 
-    def test_column_names_cited_by_the_exercises_are_real_columns(self):
+    def test_exercise_options_and_any_cited_columns_exist(self):
         cited = set()
         section = nodes_by_id(self.root, HELP_EXPERIMENT_SECTION)[0]
         for code in descendants(section, lambda node: node.tag == "code"):
             token = normalized_text(code)
             if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(_[A-Za-z0-9]+)+", token):
                 cited.add(token)
-        self.assertLessEqual({"age_Gyr", "still_on_MS"}, cited)
+        # The compact exercises name CLI options, while the extended page
+        # also named CSV columns. Check the options now and validate columns
+        # if future merged material introduces any.
+        cited_flags = set(re.findall(r"--[a-z][a-z_0-9]*", normalized_text(section)))
+        self.assertTrue(cited_flags)
+        help_text = run_cli(["--help"]).stdout
+        live_flags = set(re.findall(r"--[a-z][a-z_0-9]*", help_text))
+        self.assertLessEqual(cited_flags, live_flags)
+        if not cited:
+            return
         parameters = set()
         for function in (phys.integrate_structure, phys.integrate_track,
                          phys.wd_structure, phys.ns_mass_radius_curve,

@@ -22,6 +22,10 @@ Instead each quantity is cross-checked against at least one of:
   * a physical invariant that must hold regardless of implementation
     (QNM f*M and tau/M scale invariance, distance-independence of the
     chirp timeline, etc).
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
 """
 
 import ast
@@ -59,20 +63,19 @@ CORE_MODULE_FILES = (
     "plot_gw.py",
 )
 HELP_FILES = (
-    "GravitationalWaveSources-extended.html",
-    "GravitationalWaveSources-short.html",
-)
+    "GravitationalWaveSources.html",)
 
 
 def find_help_paths(module_dir):
-    """Find paired tutorial Helps in repository or flattened upload layout."""
+    """Find current Help file in repository or flattened upload layout."""
     source = Path(module_dir).resolve()
     candidates = [source]
     for ancestor in (source, *source.parents):
         candidates.append(ancestor / "GFTGUX-Documentation" / "GravitationalWaveSources")
     for folder in candidates:
         paths = tuple(folder / name for name in HELP_FILES)
-        if any(path.exists() for path in paths):
+        if any(path.exists() for path in paths) or (
+                folder != source and folder.is_dir()):
             return paths
     return ()
 
@@ -3056,58 +3059,64 @@ class TestCLI(unittest.TestCase):
 # Help file
 # ===========================================================================
 class TestHelpFile(unittest.TestCase):
-    """Both current tutorials form one tested documentation contract."""
+    """The current Help file forms the tested documentation contract."""
 
     @classmethod
     def setUpClass(cls):
         cls.paths = find_help_paths(MODULE_DIR)
         if not cls.paths:
-            raise unittest.SkipTest("both tutorial Helps absent from program-only checkout")
+            raise unittest.SkipTest("current Help file absent from program-only checkout")
         if not all(path.is_file() for path in cls.paths):
-            raise AssertionError("both Claude and Grok tutorial Helps are required")
+            raise AssertionError("The current Help file is required")
         cls.pages = tuple(path.read_text(encoding="utf-8") for path in cls.paths)
         cls.doc_dir = cls.paths[0].parent
         cls.guide = (cls.doc_dir / "SampleOutputs" /
                      "GravitationalWaveSources-SampleOutputs_Guide.html").read_text(encoding="utf-8")
 
-    def test_both_current_help_files_have_distinct_styles(self):
-        self.assertNotEqual(*self.pages)
-        self.assertGreater(len(self.pages[0]), len(self.pages[1]))
-        self.assertIn("Graded experiments", self.pages[0])
-        self.assertIn("one question per run", self.pages[1])
+    def test_single_canonical_help_file_is_present(self):
+        self.assertEqual(tuple(path.name for path in self.paths), HELP_FILES)
+        self.assertEqual(len(self.pages), 1)
+        self.assertIn("one question per run", self.pages[0])
 
-    def test_one_tutorial_is_an_error_but_program_only_is_skipped(self):
+    def test_single_canonical_help_is_accepted_but_program_only_is_skipped(self):
         source_path = self.paths[0]
         with tempfile.TemporaryDirectory() as temporary:
             temporary_path = Path(temporary)
             try:
-                with mock.patch.dict(sys.modules[__name__].__dict__, {"MODULE_DIR": temporary_path}):
+                with mock.patch.dict(globals(), {"MODULE_DIR": temporary_path}):
                     with self.assertRaises(unittest.SkipTest):
                         TestHelpFile.setUpClass()
                     shutil.copy2(source_path, temporary_path / source_path.name)
-                    with self.assertRaisesRegex(AssertionError, "both Claude and Grok"):
-                        TestHelpFile.setUpClass()
+                    (temporary_path / "SampleOutputs").mkdir()
+                    guide_name = "GravitationalWaveSources-SampleOutputs_Guide.html"
+                    shutil.copy2(source_path.parent / "SampleOutputs" / guide_name,
+                                 temporary_path / "SampleOutputs" / guide_name)
+                    TestHelpFile.setUpClass()
+                    self.assertEqual(TestHelpFile.paths, (temporary_path / source_path.name,))
             finally:
                 TestHelpFile.setUpClass()
 
-    def test_archived_reference_guide_is_not_the_current_help(self):
-        archived = self.doc_dir / "GravitationalWaveSources-original.html"
-        self.assertTrue(archived.is_file())
-        self.assertNotIn(archived.read_text(encoding="utf-8"), self.pages)
+    def test_help_discovery_ignores_archived_formats(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            for suffix in ("extended", "short", "original", "grok"):
+                (folder / f"GravitationalWaveSources-{suffix}.html").write_text(
+                    "archived placeholder", encoding="utf-8")
+            self.assertEqual(find_help_paths(folder), ())
 
-    def test_version_and_build_on_both_helps_and_guide(self):
+    def test_version_and_build_on_help_and_guide(self):
         for label, page in (*zip(HELP_FILES, self.pages), ("guide", self.guide)):
             with self.subTest(page=label):
-                self.assertIn(f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}", page)
+                self.assertIn(f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}",
+                              " ".join(html.unescape(re.sub(r"<[^>]*>", " ", page)).split()))
 
-    def test_three_same_exact_beat_commands_in_both_helps_and_guide(self):
+    def test_three_exact_beat_commands_match_sample_guide(self):
         lists = []
         for page in (*self.pages, self.guide):
             commands = re.findall(r"<pre><code>(python main\.py[^<]+)</code></pre>", page)
             self.assertEqual(len(commands), 3)
             lists.append(commands)
         self.assertEqual(lists[0], lists[1])
-        self.assertEqual(lists[1], lists[2])
 
     def test_three_beat_commands_accepted_by_program(self):
         commands = re.findall(r"<pre><code>(python main\.py[^<]+)</code></pre>", self.pages[0])
@@ -3154,7 +3163,7 @@ class TestHelpFile(unittest.TestCase):
             self.assertIn("normaliz", page.lower())
             self.assertNotIn("exact bytes", page)
 
-    def test_csv_schema_matches_live_help_and_both_tutorials(self):
+    def test_csv_schema_matches_live_help_and_tutorial(self):
         for page in (*self.pages, self.guide):
             self.assertIn("t_s,f_hz,A,h,phase_rad", page)
         proc = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
@@ -3199,7 +3208,7 @@ class TestHelpFile(unittest.TestCase):
             self.assertIn("f_ISCO", page)
             self.assertIn("chirp mass", page)
 
-    def test_cutoff_convergence_warning_is_in_both_tutorials(self):
+    def test_cutoff_convergence_warning_is_in_current_help(self):
         for page in self.pages:
             self.assertRegex(page, r"linear(?:ly)? interpolat")
             self.assertIn("interior", page)
@@ -3238,7 +3247,7 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn("Earlier 1.7.0 release-note record", notes)
         self.assertIn("54e086464f39", notes)
 
-    def test_both_help_pages_have_proper_styling(self):
+    def test_help_and_guide_have_proper_styling(self):
         for page in (*self.pages, self.guide):
             self.assertIn("<style>", page)
             self.assertIn("</style>", page)

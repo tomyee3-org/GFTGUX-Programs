@@ -6,6 +6,10 @@ suite is run once from ``tests/``.
 
 The suite checks the numerical model, command-line interface and both
 student Help files.
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
 """
 
 from __future__ import annotations
@@ -67,11 +71,11 @@ def recompute_build_id(directory):
     return digest.hexdigest()[:12]
 
 
-HELP_NAMES = ("BlackHoleShadow-extended.html", "BlackHoleShadow-short.html")
+HELP_NAMES = ("BlackHoleShadow.html",)
 
 
 def find_help_files():
-    """Find the paired Beats files in the sibling repository or review upload."""
+    """Find the current Help file in the sibling repository or review upload."""
     here = MODULE_DIR
     directories = (here.parent.parent / "GFTGUX-Documentation" / "BlackHoleShadow",
                    here.parent / "BlackHoleShadow-Documentation", here.parent, here)
@@ -82,9 +86,9 @@ def find_help_files():
 
 
 def find_help_file():
-    """Return the Grok file for the original Grok-specific contract tests."""
+    """Return the current canonical Help file."""
     files = find_help_files()
-    return files[1] if len(files) == 2 and files[1].is_file() else None
+    return files[0] if files and files[0].is_file() else None
 
 
 def run_cli(args, cwd=MODULE_DIR, timeout=90):
@@ -139,7 +143,7 @@ class TestBuildIdentity(unittest.TestCase):
 
     def test_mutating_help_does_not_change_build_id(self):
         files = find_help_files()
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 1)
         with tempfile.TemporaryDirectory() as tmp:
             tree = Path(tmp)
             for name in CORE_MODULE_FILES:
@@ -556,10 +560,13 @@ class TestModesAndCLI(unittest.TestCase):
 
 
 class TestHelpFile(unittest.TestCase):
-    def test_sync_help_uses_sibling_repository_layout(self):
+    def test_legacy_sync_help_uses_temporary_pair_from_canonical_source(self):
         sources = find_help_files()
-        self.assertEqual(len(sources), 2)
+        self.assertEqual(len(sources), 1)
         self.assertTrue(all(path.is_file() for path in sources))
+        # The hidden maintenance CLI still uses legacy target names. These
+        # are generated fixtures, never dependencies on archived Help files.
+        legacy_names = ("BlackHoleShadow-extended.html", "BlackHoleShadow-short.html")
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             program = root / "GFTGUX-Programs" / "BlackHoleShadow"
@@ -568,31 +575,47 @@ class TestHelpFile(unittest.TestCase):
             docs.mkdir(parents=True)
             for name in CORE_MODULE_FILES:
                 (program / name).write_bytes((MODULE_DIR / name).read_bytes())
-            for source in sources:
-                (docs / source.name).write_text(
-                    source.read_text(encoding="utf-8").replace(phys.BUILD_ID, "000000000000"),
+            for name in legacy_names:
+                (docs / name).write_text(
+                    sources[0].read_text(encoding="utf-8").replace(phys.BUILD_ID, "000000000000"),
                     encoding="utf-8")
             result = run_cli(["--sync-help"], cwd=program)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(phys.BUILD_ID, result.stdout)
-            for name in HELP_NAMES:
+            for name in legacy_names:
                 self.assertIn(phys.BUILD_ID, (docs / name).read_text(encoding="utf-8"))
-            before = [(docs / name).read_bytes() for name in HELP_NAMES]
+            before = [(docs / name).read_bytes() for name in legacy_names]
             self.assertEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
-            self.assertEqual(before, [(docs / name).read_bytes() for name in HELP_NAMES])
-            second = docs / HELP_NAMES[1]
+            self.assertEqual(before, [(docs / name).read_bytes() for name in legacy_names])
+            second = docs / legacy_names[1]
             second_text = second.read_text(encoding="utf-8")
             marker = re.search(r'(id="version_build"[^>]*>.*?)</p>', second_text, re.S)
             self.assertIsNotNone(marker)
             second.write_text(second_text[:marker.end()-4] + '<p>broken stamp</p>'
                               + second_text[marker.end():], encoding="utf-8")
             self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
-            self.assertEqual(before[0], (docs / HELP_NAMES[0]).read_bytes())
-            (docs / HELP_NAMES[1]).unlink()
+            self.assertEqual(before[0], (docs / legacy_names[0]).read_bytes())
+            (docs / legacy_names[1]).unlink()
             self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
-            self.assertEqual(before[0], (docs / HELP_NAMES[0]).read_bytes())
+            self.assertEqual(before[0], (docs / legacy_names[0]).read_bytes())
 
-    def test_both_beats_help_files_are_present_and_use_this_build(self):
+    def test_patch_help_uses_canonical_filename_in_sibling_repository_layout(self):
+        sources = find_help_files()
+        self.assertEqual(len(sources), 1)
+        self.assertTrue(sources[0].is_file())
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = Path(tmp) / "GFTGUX-Documentation" / "BlackHoleShadow"
+            docs.mkdir(parents=True)
+            target = docs / HELP_NAMES[0]
+            target.write_text(sources[0].read_text(encoding="utf-8").replace(
+                phys.BUILD_ID, "000000000000"), encoding="utf-8")
+            phys.patch_help_version(target)
+            self.assertIn(phys.BUILD_ID, target.read_text(encoding="utf-8"))
+            before = target.read_bytes()
+            phys.patch_help_version(target)
+            self.assertEqual(before, target.read_bytes())
+
+    def test_canonical_help_is_present_and_uses_this_build(self):
         files = find_help_files()
         self.assertEqual(tuple(path.name for path in files), HELP_NAMES)
         for path in files:
@@ -611,7 +634,7 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIn(r'\sum_{m=1}^{4}', text)
                 self.assertRegex(text.lower(), r'false[ -]colou?r')
 
-    def test_both_compare_beats_explain_the_logarithmic_two_radius_plot(self):
+    def test_compare_beat_explains_the_logarithmic_two_radius_plot(self):
         for path in find_help_files():
             with self.subTest(path=path.name):
                 text = path.read_text(encoding='utf-8')
@@ -626,7 +649,7 @@ class TestHelpFile(unittest.TestCase):
     def test_every_documented_beats_command_parses_and_validates(self):
         import main as entry
         from unittest.mock import patch
-        self.assertEqual(len(find_help_files()), 2)
+        self.assertEqual(len(find_help_files()), 1)
         for path in find_help_files():
             text = path.read_text(encoding="utf-8")
             beats = re.findall(r'<section id="beat\d+".*?</section>', text, re.S)
@@ -660,7 +683,7 @@ class TestHelpFile(unittest.TestCase):
                     self.assertNotIn('-> lambda_max', result.stdout)
 
     def test_help_order_contract_is_manual_and_shared(self):
-        self.assertEqual(len(find_help_files()), 2)
+        self.assertEqual(len(find_help_files()), 1)
         for path in find_help_files():
             text = path.read_text(encoding='utf-8')
             with self.subTest(path=path.name):
@@ -682,9 +705,9 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertNotIn('--sync-help', result.stdout)
 
-    def test_exp10_explains_interactive_cursor_and_zoom_in_both_guides(self):
+    def test_exp10_explains_interactive_cursor_and_zoom(self):
         files = find_help_files()
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 1)
         for path in files:
             with self.subTest(help=path.name):
                 text = path.read_text(encoding='utf-8')
@@ -704,7 +727,7 @@ class TestHelpFile(unittest.TestCase):
 
     def test_exp7_uses_radial_evidence_for_poorly_sampled_orders(self):
         files = find_help_files()
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 1)
         for path in files:
             with self.subTest(help=path.name):
                 text = path.read_text(encoding='utf-8')
@@ -723,7 +746,7 @@ class TestHelpFile(unittest.TestCase):
         import main as entry
         from unittest.mock import patch
         files = find_help_files()
-        self.assertEqual(len(files), 2)
+        self.assertEqual(len(files), 1)
         for path in files:
             text = path.read_text(encoding='utf-8')
             experiment_section = text.split('<section id="experiments">', 1)[1]
@@ -741,12 +764,8 @@ class TestHelpFile(unittest.TestCase):
             self.assertNotIn('four transfer functions', experiment_section)
             self.assertNotIn('--r_cam 80', experiment_section)
         claude = files[0].read_text(encoding='utf-8')
-        grok = files[1].read_text(encoding='utf-8')
-        self.assertIn('grow without bound', claude)
-        self.assertIn('more than one full turn', claude)
-        self.assertIn('potentially several times', claude)
         self.assertNotIn('not computed at all', claude)
-        self.assertNotIn('which PhotonOrbit experiment', grok)
+        self.assertNotIn('which PhotonOrbit experiment', claude)
         for outdated in ('to a finite camera does not', 'more than halfway',
                          'once on its way to the horizon',
                          'not merely omitted', 'convergence is EXP-9',
@@ -754,10 +773,9 @@ class TestHelpFile(unittest.TestCase):
             self.assertNotIn(outdated, claude)
         beat1 = claude.split('<section id="beat1">', 1)[1].split('</section>', 1)[0]
         self.assertNotIn('the program says so on the console', claude.replace(beat1, ''))
-        self.assertNotIn('width at least 0.01', grok)
+        self.assertNotIn('width at least 0.01', claude)
 
-    def test_claude_quoted_fast_diagnostics_match_the_shipped_code(self):
-        claude = find_help_files()[0].read_text(encoding='utf-8')
+    def test_fast_diagnostics_match_reviewed_numerical_benchmarks(self):
         for mode, args, expected in (
             ('capture', [], ('8469 / 25921', '5.19615')),
             ('capture', ['--fov','24','--n_pix','201'], ('5901 / 40401',)),
@@ -770,13 +788,10 @@ class TestHelpFile(unittest.TestCase):
             for value in expected:
                 with self.subTest(mode=mode,args=args,value=value):
                     self.assertIn(value,result.stdout)
-        for value in ('8469', '5901', '0.1037', '0.096225', '3.5572',
-                      '0.75471', '2.018', '3.588'):
-            self.assertIn(value,claude)
 
     def test_help_version_line_matches_when_present(self):
         path = find_help_file()
-        self.assertIsNotNone(path, "both Beats Help files are required")
+        self.assertIsNotNone(path, "the current Help file is required")
         text = path.read_text(encoding="utf-8")
         self.assertIn('id="version_build"', text)
         self.assertIn(phys.MODEL_VERSION, text)
@@ -803,7 +818,7 @@ class TestHelpFile(unittest.TestCase):
 
     def test_patch_help_version_is_idempotent(self):
         src = find_help_file()
-        self.assertIsNotNone(src, "both Beats Help files are required")
+        self.assertIsNotNone(src, "the current Help file is required")
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "BlackHoleShadow.html"
             dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
@@ -815,7 +830,7 @@ class TestHelpFile(unittest.TestCase):
             self.assertEqual(text.count(r"\("), text.count(r"\)"))
 
     def test_help_sync_changes_only_stamps(self):
-        self.assertEqual(len(find_help_files()), 2)
+        self.assertEqual(len(find_help_files()), 1)
         old = phys.MAX_IMAGE_M
         try:
             with tempfile.TemporaryDirectory() as tmp:

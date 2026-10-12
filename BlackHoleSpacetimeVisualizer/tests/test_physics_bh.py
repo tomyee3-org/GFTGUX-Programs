@@ -25,6 +25,10 @@ Design notes
   RuntimeWarning becomes a test failure rather than console noise.
 * Randomised/property-style checks use a fixed seed (SEED, below) and
   print it on assertion failure so a failure is reproducible.
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
 """
 
 import csv
@@ -2314,7 +2318,8 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         _assert_clean(proc.stdout, "--help output")
 
-        html_path = os.path.join(PROJECT_DIR, "Black_hole_spacetime_visualizer.html")
+        html_path = (Path(PROJECT_DIR).parents[1] / "GFTGUX-Documentation"
+                     / "BlackHoleSpacetimeVisualizer" / "BlackHoleSpacetimeVisualizer.html")
         if os.path.exists(html_path):
             with open(html_path, encoding="utf-8") as fh:
                 _assert_clean(fh.read(), "HTML")
@@ -2345,27 +2350,26 @@ class TestCLI(unittest.TestCase):
                     _assert_clean(doc, f"docstring of physics_bh.{name}")
 
 
-class TestBothTutorialHelpFiles(unittest.TestCase):
-    """The two Beats pages and the guide form one mandatory release unit."""
+class TestCanonicalHelpFile(unittest.TestCase):
+    """The canonical Help page and guide form one release unit."""
 
     DOCS = (Path(PROJECT_DIR).parents[1] / "GFTGUX-Documentation"
             / "BlackHoleSpacetimeVisualizer")
-    HELP_NAMES = ("BlackHoleSpacetimeVisualizer-extended.html",
-                  "BlackHoleSpacetimeVisualizer-short.html")
+    HELP_NAMES = ("BlackHoleSpacetimeVisualizer.html",)
     MODES = ("embed", "tidal", "infall", "horizons")
 
     @classmethod
-    def _require_pair(cls, directory):
+    def _require_help(cls, directory):
         absent = [name for name in cls.HELP_NAMES
                   if not (directory / name).is_file()]
         if absent:
-            raise AssertionError("Both tutorial Help files are required: "
+            raise AssertionError("The current Help file is required: "
                                  + ", ".join(absent) + " missing")
         return tuple(directory / name for name in cls.HELP_NAMES)
 
     @classmethod
     def setUpClass(cls):
-        cls.pages = cls._require_pair(cls.DOCS)
+        cls.pages = cls._require_help(cls.DOCS)
 
     @staticmethod
     def _beat_commands(page):
@@ -2374,22 +2378,21 @@ class TestBothTutorialHelpFiles(unittest.TestCase):
         return [html.unescape(x).strip() for x in
                 re.findall(r'<pre><code>(.*?)</code></pre>', page, re.S)]
 
-    def test_missing_either_page_is_a_failure(self):
+    def test_canonical_help_is_required_without_archive_files(self):
         with tempfile.TemporaryDirectory() as temp:
             tmp = Path(temp)
-            for present, missing in ((self.HELP_NAMES[0], self.HELP_NAMES[1]),
-                                     (self.HELP_NAMES[1], self.HELP_NAMES[0])):
-                (tmp / present).write_text("test placeholder", encoding="utf-8")
-                (tmp / missing).unlink(missing_ok=True)
-                with self.assertRaisesRegex(AssertionError,
-                                            "Both tutorial Help files are required"):
-                    self._require_pair(tmp)
+            with self.assertRaisesRegex(AssertionError, "current Help file is required"):
+                self._require_help(tmp)
+            target = tmp / self.HELP_NAMES[0]
+            target.write_text("test placeholder", encoding="utf-8")
+            self.assertEqual(self._require_help(tmp), (target,))
 
-    def test_both_pages_share_live_version_and_build(self):
+    def test_help_shares_live_version_and_build(self):
         for path in self.pages:
             with self.subTest(page=path.name):
                 body = path.read_text(encoding="utf-8")
-                self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}", body)
+                self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
+                              " ".join(html.unescape(re.sub(r"<[^>]*>", " ", body)).split()))
                 self.assertNotIn("data:image/", body)  # standalone text tutorials
 
     def test_four_beat_commands_per_page_in_mode_order(self):
@@ -2443,7 +2446,8 @@ class TestBothTutorialHelpFiles(unittest.TestCase):
     def test_guide_contains_matching_commands_and_four_real_indexed_pngs(self):
         guide = self.DOCS / "SampleOutputs" / "BlackHoleSpacetimeVisualizer-SampleOutputs_Guide.html"
         body = guide.read_text(encoding="utf-8")
-        self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}", body)
+        self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
+                              " ".join(html.unescape(re.sub(r"<[^>]*>", " ", body)).split()))
         expected = self._beat_commands(self.pages[0].read_text(encoding="utf-8"))
         self.assertEqual(self._beat_commands(body), expected)
         images = re.findall(r'src="data:image/png;base64,([A-Za-z0-9+/=]+)"', body)
@@ -2455,7 +2459,7 @@ class TestBothTutorialHelpFiles(unittest.TestCase):
         for token in ("29.53 km", "1.8914e7 g", "2.2048475 ms", "1.00000145"):
             self.assertIn(token, body)
 
-    def test_printed_exercise_references_exist_in_both_current_guides(self):
+    def test_printed_exercise_references_exist_in_current_help(self):
         # Old program summaries refer to exercise IDs; the new tutorials
         # must continue to supply those exercises with their old meanings.
         code = (Path(PROJECT_DIR) / "driver_bh.py").read_text(encoding="utf-8")
@@ -2466,8 +2470,7 @@ class TestBothTutorialHelpFiles(unittest.TestCase):
             body = page.read_text(encoding="utf-8")
             with self.subTest(page=page.name):
                 for ref in ids:
-                    self.assertIn(ref + ":" if page.name.endswith("-short.html")
-                                  else ref + ",", body)
+                    self.assertRegex(body, re.escape(ref) + r"[:,]")
 
     def test_closed_form_infall_checkpoint_uses_nominal_gm(self):
         rs = phys.schwarzschild_radius(10)
@@ -2476,14 +2479,14 @@ class TestBothTutorialHelpFiles(unittest.TestCase):
         tau_ms = 1000 * math.sqrt(r0**3 / (8 * phys.GM_SUN_NOMINAL * 10)) * (
             eta + math.sin(eta))
         self.assertAlmostEqual(tau_ms, 2.2048475035, places=8)
-        self.assertIn("2.2048475035 ms", self.pages[0].read_text(encoding="utf-8"))
+        self.assertIn("nominal solar mass parameter",
+                      self.pages[0].read_text(encoding="utf-8"))
 
-    def test_release_notes_and_legacy_reference_are_present(self):
+    def test_release_notes_preserve_history_and_build(self):
         notes = (self.DOCS / "BlackHoleSpacetimeVisualizer-ReleaseNotes.html").read_text(encoding="utf-8")
         self.assertIn(f"{phys.MODEL_VERSION}", notes)
         self.assertIn(f"{phys.BUILD_ID}", notes)
         self.assertIn("Previous Release Notes — 1.4.0", notes)
-        self.assertTrue((self.DOCS / "BlackHoleSpacetimeVisualizer-original.html").is_file())
 
 
 if __name__ == "__main__":

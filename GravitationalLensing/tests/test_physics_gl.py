@@ -38,6 +38,10 @@ plot_gl.py docstrings or output):
     *-Grok-Response-to-Audit6-20260908.txt
     Complete texts live with the other GFTGUX audit records on GitHub;
     these lines are locators only.
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
 """
 
 from __future__ import annotations
@@ -100,14 +104,13 @@ def recompute_build_id(directory):
     return digest.hexdigest()[:12]
 
 
-HELP_FILES = ("GravitationalLensing-extended.html",
-              "GravitationalLensing-short.html")
+HELP_FILES = ("GravitationalLensing.html",)
 DOC_DIR = (MODULE_DIR.parent.parent / "GFTGUX-Documentation"
            / "GravitationalLensing")
 
 
 def help_files():
-    """Require the paired sibling documentation or a paired flat upload."""
+    """Require the current Help file in sibling documentation or a flat upload."""
     sibling = [DOC_DIR / name for name in HELP_FILES]
     if all(path.is_file() for path in sibling):
         return sibling
@@ -117,7 +120,7 @@ def help_files():
     missing = [name for name in HELP_FILES
                if not (DOC_DIR / name).is_file() and
                not (MODULE_DIR / name).is_file()]
-    raise FileNotFoundError(f"Both tutorial Help files are required: {missing}")
+    raise FileNotFoundError(f"The current Help file is required: {missing}")
 
 
 def run_cli(args, cwd=MODULE_DIR, timeout=60):
@@ -411,10 +414,10 @@ class TestHelpFile(unittest.TestCase):
     def setUpClass(cls):
         cls.paths = help_files()
 
-    def test_both_tutorial_styles_are_present(self):
+    def test_canonical_help_is_present(self):
         self.assertEqual([path.name for path in self.paths], list(HELP_FILES))
 
-    def test_both_version_build_elements_match_core_files(self):
+    def test_version_build_element_matches_core_files(self):
         for path in self.paths:
             with self.subTest(help_file=path.name):
                 raw = path.read_text(encoding="utf-8")
@@ -426,7 +429,7 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIn(f"Version {phys.MODEL_VERSION}", text)
                 self.assertIn(f"Build {phys.BUILD_ID}", text)
 
-    def test_every_beat_and_mode_occurs_in_both_styles(self):
+    def test_every_beat_and_mode_occurs_in_current_help(self):
         for path in self.paths:
             raw = path.read_text(encoding="utf-8")
             with self.subTest(help_file=path.name):
@@ -466,9 +469,9 @@ class TestHelpFile(unittest.TestCase):
         self.assertLess(0.50, theta_e)
         claude = self.paths[0].read_text(encoding="utf-8")
         self.assertIn('0.50', claude)
-        self.assertIn('inside that circle', claude)
+        self.assertIn('default source is already off-axis (beta_x=0.50)', claude)
 
-    def test_both_beat2_image_positions_match_the_current_lens(self):
+    def test_beat2_image_positions_match_the_current_lens(self):
         theta_e = phys.default_point_mass_theta_e()
         plus, minus = phys.point_mass_image_radii(
             phys.arcsec_to_rad(1.0), theta_e)

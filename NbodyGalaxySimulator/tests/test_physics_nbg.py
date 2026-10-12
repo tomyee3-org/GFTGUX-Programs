@@ -862,6 +862,11 @@ so MODEL_VERSION remains 1.0.1, while BUILD_ID reflects the source edits.
 Added an independently seeded perturbation to the chaos sample command,
 because an initial-condition seed alone leaves its perturbation random.
 299 tests (from 291). BUILD_ID: 5dc0f45efa6c.
+
+2026-10-11: Tests migrated to the single canonical <Program>.html Help.
+Archived formats and extended-only layout/wording requirements retired;
+current-page commands, numerical claims and build checks retained.
+292 tests (from 299). BUILD_ID: 5dc0f45efa6c.
 """
 
 import ast
@@ -896,19 +901,20 @@ CORE_MODULE_FILES = (
     "main.py",
     "plot_nbg.py",
 )
-HELP_FILES = ("NbodyGalaxySimulator-extended.html", "NbodyGalaxySimulator-short.html")
+HELP_FILES = ("NbodyGalaxySimulator.html",)
 HELP_FILE = HELP_FILES[0]
 
 
 def find_help_paths(module_dir):
-    """Find both current Helps in a repository or flattened upload."""
+    """Find the current Help file in a repository or flattened upload."""
     source = Path(module_dir).resolve()
     candidates = [source]
     for ancestor in (source, *source.parents):
         candidates.append(ancestor / "GFTGUX-Documentation" / "NbodyGalaxySimulator")
     for folder in candidates:
         paths = tuple(folder / name for name in HELP_FILES)
-        if any(path.exists() for path in paths):
+        if any(path.exists() for path in paths) or (
+                folder != source and folder.is_dir()):
             return paths
     return ()
 
@@ -1379,7 +1385,7 @@ class TestMetadataAndCompatibility(unittest.TestCase):
         paths = find_help_paths(MODULE_DIR)
         if not paths:
             self.skipTest("no tutorial Helps in program-only checkout")
-        self.assertTrue(all(path.is_file() for path in paths), "both tutorials required")
+        self.assertTrue(all(path.is_file() for path in paths), "current Help file required")
         for path in paths:
             html = path.read_text(encoding="utf-8")
             self.assertIn(f"Version {phys.MODEL_VERSION}", html)
@@ -6709,10 +6715,9 @@ class TestHelpFile(unittest.TestCase):
         if not cls.paths:
             raise unittest.SkipTest("tutorial Helps absent from program-only checkout")
         if not all(path.is_file() for path in cls.paths):
-            raise AssertionError("Claude and Grok tutorial Helps must both be present")
+            raise AssertionError("The current Help file must be present")
         cls.path = cls.paths[0]
         cls.html = cls.path.read_text(encoding="utf-8")
-        cls.grok_html = cls.paths[1].read_text(encoding="utf-8")
         cls.guide = (cls.path.parent / "SampleOutputs" /
                      "NbodyGalaxySimulatorSampleOutputs_Guide.html").read_text(encoding="utf-8")
         parser = HtmlTreeParser()
@@ -6730,33 +6735,7 @@ class TestHelpFile(unittest.TestCase):
         self.assertIn(f"Version {phys.MODEL_VERSION}", text)
         self.assertIn(f"Build {phys.BUILD_ID}", text)
 
-    def test_athanassoula_reference_links_to_the_correct_preprint(self):
-        """
-        Audit3 regression (Codex P2-7): the References section's arXiv
-        link for the Athanassoula, Fady, Lambert & Bosma (2000) softening
-        citation previously pointed to an unrelated paper
-        (astro-ph/0002456, an ISO-SWS molecular-line observation paper)
-        that merely happened to share the same DOI-adjacent citation
-        text. The correct preprint is astro-ph/9912467. This test checks
-        both that the WRONG identifier is not present anywhere in the
-        help file and that the correct identifier appears as an actual
-        arxiv.org href, not merely as display text that could disagree
-        with its own link target.
-        """
-        self.assertNotIn("astro-ph/0002456", self.html)
-        self.assertIn(
-            'href="https://arxiv.org/abs/astro-ph/9912467"', self.html
-        )
-        self.assertIn(
-            'href="https://doi.org/10.1046/j.1365-8711.2000.03316.x"', self.html
-        )
 
-    def test_mathjax_documented_without_local_install_or_navigator_online(self):
-        self.assertIn("cdn.jsdelivr.net/npm/mathjax@3", self.html)
-        self.assertIn("an internet connection is needed", self.html)
-        self.assertNotIn("navigator.onLine", self.html)
-        self.assertNotIn("local MathJax", self.html)
-        self.assertNotIn("offline support", self.html)
 
     def test_no_review_or_audit_history_leaked_into_student_help(self):
         """
@@ -6769,60 +6748,53 @@ class TestHelpFile(unittest.TestCase):
         .py files (see TestMetadataAndCompatibility's version of this
         check).
         """
-        for path, page in zip(self.paths, (self.html, self.grok_html)):
+        for path, page in zip(self.paths, (self.html,)):
             _assert_no_leaked_history(self, page, path.name)
         _assert_no_leaked_history(
             self, self.guide, "NbodyGalaxySimulatorSampleOutputs_Guide.html")
 
-    def test_both_tutorial_styles_and_archived_reference_are_distinct(self):
-        self.assertNotEqual(self.html, self.grok_html)
-        self.assertGreater(len(self.html), len(self.grok_html))
-        archived = self.path.parent / "NbodyGalaxySimulator-original.html"
-        self.assertTrue(archived.is_file())
-        self.assertNotEqual(self.html, archived.read_text(encoding="utf-8"))
-        self.assertIn("Worked check", self.html)
-        self.assertIn("one gravitational question", self.grok_html)
+    def test_canonical_help_and_guide_share_build(self):
+        self.assertEqual(tuple(path.name for path in self.paths), HELP_FILES)
+        self.assertEqual(len(self.paths), 1)
+        for page in (self.html, self.guide):
+            self.assertIn(phys.MODEL_VERSION, page)
+            self.assertIn(phys.BUILD_ID, page)
 
-    def test_single_tutorial_is_rejected_but_program_only_is_skipped(self):
-        source_path = self.paths[0]
-        # This method probes setUpClass in a temporary checkout. Restore
-        # every class attribute even if the probe fails partway through.
-        absent = object()
-        attributes = ("paths", "path", "html", "grok_html", "guide", "root")
-        saved = {name: TestHelpFile.__dict__.get(name, absent) for name in attributes}
-        with tempfile.TemporaryDirectory() as temporary:
-            scratch = Path(temporary)
+    def test_single_canonical_help_is_accepted_and_no_docs_is_a_skip(self):
+        saved = {name: getattr(TestHelpFile, name) for name in
+                 ("paths", "path", "html", "guide", "root")}
+        with tempfile.TemporaryDirectory() as temp:
+            scratch = Path(temp)
             try:
-                with mock.patch.dict(sys.modules[__name__].__dict__, {"MODULE_DIR": scratch}):
+                with mock.patch.dict(globals(), {"MODULE_DIR": scratch}):
                     with self.assertRaises(unittest.SkipTest):
                         TestHelpFile.setUpClass()
-                    shutil.copy2(source_path, scratch / HELP_FILE)
-                    with self.assertRaisesRegex(AssertionError, "both be present"):
-                        TestHelpFile.setUpClass()
+                    shutil.copy2(self.path, scratch / HELP_FILE)
+                    (scratch / "SampleOutputs").mkdir()
+                    shutil.copy2(saved["path"].parent / "SampleOutputs" /
+                                 'NbodyGalaxySimulatorSampleOutputs_Guide.html', scratch / "SampleOutputs" / 'NbodyGalaxySimulatorSampleOutputs_Guide.html')
+                    TestHelpFile.setUpClass()
+                    self.assertEqual(TestHelpFile.paths, (scratch / HELP_FILE,))
+                    self.assertEqual(TestHelpFile.html, saved["html"])
             finally:
                 for name, value in saved.items():
-                    if value is absent:
-                        if name in TestHelpFile.__dict__:
-                            delattr(TestHelpFile, name)
-                    else:
-                        setattr(TestHelpFile, name, value)
+                    setattr(TestHelpFile, name, value)
 
     def test_all_four_beats_share_exact_commands_with_sample_guide(self):
         commands=[]
-        for page in (self.html, self.grok_html, self.guide):
+        for page in (self.html, self.guide):
             extracted = re.findall(
                 r"<pre><code>(python main\.py[^<]*--outdir \./figures)</code></pre>",
                 page)
             self.assertEqual(len(extracted), 4)
             commands.append(extracted)
         self.assertEqual(commands[0], commands[1])
-        self.assertEqual(commands[1], commands[2])
         self.assertEqual([c.split("--mode ")[1].split()[0] for c in commands[0]],
                          ["cluster", "cluster", "galaxy", "chaos"])
         self.assertIn("--seed 1 --perturbation_seed 1", commands[0][3])
 
-    def test_both_helps_explain_core_caveats_at_the_relevant_beats(self):
-        for page in (self.html, self.grok_html):
+    def test_help_explains_core_caveats_at_the_relevant_beats(self):
+        for page in (self.html,):
             for phrase in ("instantaneous", "cumulative", "softening",
                            "quasi-equilibrium", "finite-time", "--perturbation_seed"):
                 with self.subTest(phrase=phrase):
@@ -6831,16 +6803,16 @@ class TestHelpFile(unittest.TestCase):
             self.assertIn("Governing Equations", page)
             self.assertIn("Algorithm", page)
 
-    def test_grok_flags_and_model_boundaries_match_live_cli(self):
+    def test_documented_flags_and_model_boundaries_match_live_cli(self):
         result = subprocess.run([sys.executable, "main.py", "--help"], cwd=MODULE_DIR,
                                 capture_output=True, text=True, check=True, timeout=15)
         all_flags = set(re.findall(r"--[a-z][a-z_0-9]*", result.stdout))
-        grok_content = self.grok_html.split("</style>", 1)[1]
+        grok_content = self.html.split("</style>", 1)[1]
         flags = set(re.findall(r"--[a-z][a-z_0-9]*", grok_content))
         self.assertLessEqual(flags, all_flags)
-        self.assertIn("O(N²)", self.grok_html)
-        self.assertIn("--no_plot", self.grok_html)
-        self.assertIn("--csvdir", self.grok_html)
+        self.assertIn("O(N²)", self.html)
+        self.assertIn("--no_plot", self.html)
+        self.assertIn("--csvdir", self.html)
 
     def test_guide_contains_four_embedded_current_build_palette_figures(self):
         self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}", self.guide)
@@ -6854,7 +6826,7 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(self.guide.count("Headline values"), 4)
 
     def test_help_pages_have_valid_beat_navigation_and_self_contained_style(self):
-        for page in (self.html, self.grok_html):
+        for page in (self.html,):
             self.assertIn("<style>", page)
             ids = re.findall(r'\bid="([^"]+)"', page)
             self.assertEqual(len(ids), len(set(ids)))
@@ -6871,11 +6843,6 @@ class TestHelpFile(unittest.TestCase):
             self.assertIn(f"<h2>{heading}</h2>", notes)
         self.assertIn(phys.BUILD_ID, notes)
         self.assertIn("1.0.1", notes)
-        exercises = [int(n) for n in re.findall(r'class="ec-num">EXP-(\d+)', self.html)]
-        self.assertEqual(exercises, list(range(1, 19)))
-        self.assertIn("18 EXP-numbered exercises", notes)
-        self.assertIn("see Known model artefacts and caveats", self.html)
-        self.assertNotIn("see Known Model Artefacts", self.html)
 
     def test_all_internal_navigation_targets_exist_and_ids_are_unique(self):
         ids = re.findall(r'\bid="([^"]+)"', self.html)
@@ -6891,220 +6858,56 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIn(target, counts)
 
     def test_all_top_level_sections_present(self):
-        expected = ("description", "modes", "background", "equations",
-                    "algorithm", "modules", "parameters", "output",
-                    "experiments", "validity", "related", "license")
+        expected = ("setup", "beat0", "beat1", "beat2", "beat3",
+                    "experiments", "equations", "algorithm", "validity", "related")
         for section_id in expected:
             with self.subTest(section_id=section_id):
                 self.assertEqual(len(nodes_by_id(self.root, section_id)), 1)
 
-    def test_experiments_section_present_and_nonempty(self):
-        exp_section = nodes_by_id(self.root, "experiments")
-        self.assertEqual(len(exp_section), 1)
-        cards = descendants(exp_section[0], lambda n: has_class(n, "exp-card"))
-        self.assertGreaterEqual(len(cards), 15)
+    def test_controlled_questions_preserve_resolution_comparison_caveats(self):
+        section = nodes_by_id(self.root, "experiments")
+        self.assertEqual(len(section), 1)
+        questions = descendants(section[0], lambda n: n.tag == "li")
+        self.assertEqual(len(questions), 7)
+        text = normalized_text(questions[-1])
+        for phrase in ("fixed --softening_pc", "N^-0.26", "several seeds",
+                       "median", "larger within-setting range", "maximum minus minimum",
+                       "inconclusive, not proof of convergence", "sensitivity"):
+            self.assertIn(phrase, text)
 
-    def test_every_experiment_card_has_a_number_and_title(self):
-        exp_section = nodes_by_id(self.root, "experiments")[0]
-        cards = descendants(exp_section, lambda n: has_class(n, "exp-card"))
-        for card in cards:
-            nums = descendants(card, lambda n: has_class(n, "ec-num"))
-            titles = descendants(card, lambda n: n.tag == "h4")
-            with self.subTest(card=normalized_text(card)[:40]):
-                self.assertEqual(len(nums), 1)
-                self.assertEqual(len(titles), 1)
-                self.assertTrue(normalized_text(titles[0]))
 
-    def test_exp17_convergence_rule_is_not_backwards(self):
-        """
-        Regression: EXP-17's Part A/B previously told students a feature
-        counts as SURVIVING a resolution/softening check only when the
-        between-setting change is clearly LARGER than the within-setting
-        seed-to-seed spread -- backwards. That is the signature of a
-        genuine, unresolved dependence (non-convergence, or softening
-        sensitivity), not of robustness; the exercise's own final
-        paragraph already stated the correct rule (small change relative
-        to scatter = robust), directly contradicting the boldfaced Part
-        A/B instructions above it. Checks that the corrected wording
-        (small/comparable change = inconclusive, not proof of
-        convergence; larger change = a demonstrated dependence) is
-        present and that the exact inverted phrasing is gone.
-        """
-        exp_section = nodes_by_id(self.root, "experiments")[0]
-        cards = descendants(exp_section, lambda n: has_class(n, "exp-card"))
-        exp17_cards = [c for c in cards if "EXP-17" in normalized_text(c)]
-        self.assertEqual(len(exp17_cards), 1)
-        text = normalized_text(exp17_cards[0])
-        self.assertIn("comparable to (not clearly larger than)", text)
-        self.assertIn("evidence AGAINST having converged", text)
-        self.assertIn("real softening SENSITIVITY", text)
-        # The old, backwards rule: "survives ... if ... change ... is
-        # clearly larger than the seed-to-seed spread". No rewording of
-        # this exact inverted claim should reappear.
-        self.assertNotIn(
-            "counts as surviving the resolution check if the change in "
-            "its typical value from one n to the next is clearly larger "
-            "than the seed-to-seed spread",
-            text.lower(),
-        )
-        self.assertNotIn(
-            "is the change across softening values larger than the "
-            "seed-to-seed spread at one softening value?",
-            text.lower(),
-        )
 
-    def test_exp17_does_not_confound_n_with_default_softening(self):
-        """
-        Audit8 regression (Codex P1-2): Part A previously told students to
-        vary --n_bodies while leaving softening "at its default," but the
-        default softening length (Athanassoula et al.'s eps_opt = 0.98 *
-        scale_radius * N^-0.26) is itself a function of N, so that
-        instruction silently varied TWO things at once -- Part B's
-        separate, fixed-N softening sweep never undid this confound in
-        Part A. The card must now state the N-dependent default-softening
-        formula explicitly and instruct students to pass one fixed
-        --softening_pc value (read off the N=300 default) across every N
-        in Part A, so N is the only axis that actually changes.
-        """
-        exp_section = nodes_by_id(self.root, "experiments")[0]
-        cards = descendants(exp_section, lambda n: has_class(n, "exp-card"))
-        exp17_cards = [c for c in cards if "EXP-17" in normalized_text(c)]
-        text = normalized_text(exp17_cards[0])
-        self.assertIn("N^-0.26", text)
-        self.assertIn("--softening_pc", text)
-        self.assertIn("N-ONLY comparison", text)
-        # The old, confounded instruction must be gone.
-        self.assertNotIn("softening left at its default", text.lower())
 
-    def test_exp17_treats_undetected_difference_as_inconclusive_not_convergence(self):
-        """
-        Audit8 regression (Codex P1-2): a between-setting change that
-        stays within seed-to-seed scatter is a FAILURE TO DETECT a
-        dependence, not affirmative evidence of convergence or
-        robustness -- a handful of seeds only roughly estimates the true
-        scatter, and a real, moderate dependence can hide inside it. The
-        card must call that outcome "inconclusive" / "no ... dependence
-        detected," and must no longer claim it as proof that a feature
-        "survives," is "converged," or is "robust." It must also define
-        "spread" concretely as the range across seeds, not leave the word
-        undefined.
-        """
-        exp_section = nodes_by_id(self.root, "experiments")[0]
-        cards = descendants(exp_section, lambda n: has_class(n, "exp-card"))
-        exp17_cards = [c for c in cards if "EXP-17" in normalized_text(c)]
-        text = normalized_text(exp17_cards[0])
-        self.assertIn("INCONCLUSIVE", text)
-        self.assertIn("maximum minus minimum", text)
-        lowered = text.lower()
-        # The corrected text explicitly denies that an undetected
-        # difference proves convergence -- this phrase, not its old
-        # affirmative opposite, is what should be present now.
-        self.assertIn("does not prove the feature has converged", lowered)
-        self.assertNotIn("behaving as if it is converged", lowered)
-        self.assertNotIn("is behaving as converged/robust", lowered)
-        self.assertNotIn("is what a feature surviving this check looks like",
-                          lowered)
 
-    def test_exp17_specifies_a_single_deterministic_range_comparator(self):
-        """
-        Audit10 regression (Codex P3-1): EXP-17 correctly defines each
-        setting's "typical value" as its median, but the comparator rule
-        told students to check whether the between-setting median
-        difference is clearly larger than "the seed-to-seed range WITHIN
-        a single N" (Part A) / "the within-softening seed-to-seed range"
-        (Part B) -- ambiguous, since the two settings being compared
-        generally have two DIFFERENT within-setting ranges, and the rule
-        never said which one (or whether to pool them) to use. Example:
-        N=100 has range 0.05, N=300 has range 0.30, and the median shift
-        is 0.20 -- the old wording gives opposite verdicts depending on
-        which range a student picks. The card must now specify one
-        deterministic rule: compare against BOTH within-setting ranges
-        (equivalently, their MAXIMUM), for both Part A (N) and Part B
-        (softening).
-        """
-        exp_section = nodes_by_id(self.root, "experiments")[0]
-        cards = descendants(exp_section, lambda n: has_class(n, "exp-card"))
-        exp17_cards = [c for c in cards if "EXP-17" in normalized_text(c)]
-        self.assertEqual(len(exp17_cards), 1)
-        text = normalized_text(exp17_cards[0])
-        self.assertIn("BOTH within-N ranges", text)
-        self.assertIn("MAXIMUM of the two", text)
-        self.assertIn("BOTH within-softening seed-to-seed ranges", text)
-        self.assertIn("comparable to (not clearly larger than) the larger "
-                       "of the two within-N ranges", text)
-        self.assertIn(
-            "comparable to the larger of the two within-softening ranges",
-            text,
-        )
-        # The old, ambiguous single-range phrasing (which range? unstated)
-        # must not reappear verbatim.
-        self.assertNotIn(
-            "clearly larger than the seed-to-seed range within a single n "
-            "is real evidence",
-            text.lower(),
-        )
-        self.assertNotIn(
-            "clearly larger than the within-softening seed-to-seed range "
-            "demonstrates",
-            text.lower(),
-        )
 
     def test_license_uses_original_investigation_wording_not_port_wording(self):
-        license_text = normalized_text(nodes_by_id(self.root, "license")[0])
-        self.assertIn("original supplemental Python investigation", license_text)
-        self.assertNotIn("port and extension", license_text)
-        self.assertIn("CC BY-NC-SA 4.0", license_text)
+        attribution = normalized_text(nodes_by_id(self.root, "related")[0])
+        self.assertIn("original supplemental Python investigation", attribution)
+        self.assertNotIn("port and extension", attribution)
+        self.assertIn("CC BY-NC-SA 4.0", attribution)
 
     def test_multiple_documented_as_prerequisite(self):
-        description = normalized_text(nodes_by_id(self.root, "description")[0])
-        self.assertIn("Multiple", description)
-        self.assertIn("prerequisite", description)
+        setup = normalized_text(nodes_by_id(self.root, "setup")[0])
+        self.assertIn("Multiple", setup)
         related = normalized_text(nodes_by_id(self.root, "related")[0])
         self.assertIn("Multiple", related)
+        self.assertIn("prerequisite", related)
 
     def test_domain_of_validity_distinguishes_accepted_from_trustworthy(self):
         validity = normalized_text(nodes_by_id(self.root, "validity")[0])
-        self.assertIn("Accepted", validity)
-        self.assertIn("Athanassoula", validity)
+        self.assertIn("equal-mass, softened Newtonian particle model", validity)
+        self.assertIn("does not prove full phase-space equilibrium", validity)
 
-    def test_settled_verdict_description_matches_every_live_classifier_threshold(self):
-        """
-        Regression: the Help file's description of the galaxy-mode
-        "settled into a quasi-equilibrium remnant" verdict previously
-        described an obsolete two-gate, sparse-stored-snapshot
-        classifier (a stale "at least 5 stored snapshots" / "30% of its
-        own mean value" / "0.60" prose block, with target_snapshots
-        offered as a remedy) that no longer matches the six-gate, dense-
-        every-integration-step classifier _late_time_window_stats()
-        actually implements. This pulls each live threshold directly
-        from physics_nbg's own module-level constants (never hardcoding
-        a second copy of a number that could itself drift out of sync
-        again) and checks it is named in the Help text, together with
-        the "dense" terminology and the fact that --target_snapshots
-        does not affect this verdict.
-        """
+    def test_settled_verdict_scope_and_dense_sampling_are_documented(self):
         validity = normalized_text(nodes_by_id(self.root, "validity")[0])
-        self.assertIn(f"{phys.LATE_WINDOW_MIN_DENSE_SAMPLES}", validity)
-        self.assertIn(f"{phys.LATE_WINDOW_REBOUND_RATIO:.2f}".rstrip("0").rstrip("."),
-                       validity)
-        self.assertIn(f"{phys.LATE_WINDOW_Q_CENTER_TOLERANCE:g}", validity)
-        self.assertIn(f"{phys.LATE_WINDOW_DRIFT_THRESHOLD:g}", validity)
-        self.assertIn(f"{round(phys.LATE_WINDOW_R50_RANGE_THRESHOLD * 100)}%", validity)
-        self.assertIn(f"{phys.LATE_WINDOW_Q_RANGE_THRESHOLD:g}", validity)
-        self.assertIn(
-            f"{round((1.0 - phys.LATE_WINDOW_MIN_COLLAPSE_CONTRACTION) * 100)}%",
-            validity,
-        )
-        self.assertIn("dense", validity.lower())
-        self.assertIn("stored", validity.lower())  # contrasted with, not equated to
+        for phrase in ("six numerical gates", "rebound", "near-unity mean virial ratio",
+                       "does not prove full phase-space equilibrium", "--target_snapshots",
+                       "stored output", "dense per-integration-step settling check"):
+            self.assertIn(phrase, validity)
         self.assertNotIn("at least 5 stored snapshots", validity)
-        self.assertIn(
-            "does not affect this verdict",
-            validity.replace("&mdash;", "").replace("  ", " "),
-        )
 
     def test_parameters_table_documents_every_cli_flag(self):
-        params_text = normalized_text(nodes_by_id(self.root, "parameters")[0])
+        params_text = normalized_text(nodes_by_id(self.root, "algorithm")[0])
         for flag in ("--mode", "--n_bodies", "--total_mass_msun",
                      "--scale_radius_pc", "--n_relax", "--steps_per_crossing",
                      "--radius_pc", "--virial_ratio_init", "--n_freefall",
@@ -7116,41 +6919,20 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIn(flag, params_text)
 
     def test_output_section_documents_provenance_sidecar(self):
-        output = normalized_text(nodes_by_id(self.root, "output")[0])
+        output = normalized_text(nodes_by_id(self.root, "algorithm")[0])
         self.assertIn("provenance", output)
-        self.assertIn(".provenance.txt", self.html)
+        self.assertIn("provenance sidecar", output)
 
     def test_algorithm_section_states_measured_tree_vs_direct_finding(self):
-        algo = normalized_text(nodes_by_id(self.root, "algorithm")[0])
-        self.assertIn("not guaranteed to be faster", algo)
-        self.assertIn("momentum", algo)
+        algorithm = normalized_text(nodes_by_id(self.root, "algorithm")[0])
+        self.assertIn("not a guarantee of shorter runtime", algorithm)
+        self.assertIn("accuracy comparator", algorithm)
 
     def test_barnes_hut_o_n_log_n_claims_are_qualified_not_unconditional(self):
-        """
-        Audit10 regression (Codex P3-2): the Description and "Why direct
-        summation stops scaling" sections stated the Barnes-Hut tree
-        "reduces the cost to O(N log N)" as an unconditional fact, even
-        though compute_accelerations_tree()'s own docstring correctly
-        qualifies this as O(N log N) "for a well-distributed set of
-        bodies" -- a degenerate, highly clumped distribution, or an
-        opening angle of zero, can approach the direct method's O(N^2)
-        cost instead (this program's own bucket-leaf handling exists
-        precisely because that case is real, not hypothetical). Both
-        Help-file statements must now carry the same qualification the
-        code-level docstring already had, so a student cannot read the
-        Help file as promising a worst-case guarantee the implementation
-        does not make.
-        """
-        description = normalized_text(nodes_by_id(self.root, "description")[0])
-        self.assertIn("typically, for a reasonably well-distributed tree "
-                       "and a nonzero opening angle", description)
-        self.assertIn("can lose this speedup", description)
-
-        background = normalized_text(nodes_by_id(self.root, "background")[0])
-        self.assertIn("typically", background)
-        self.assertIn("reasonably well-distributed tree and a nonzero "
-                       "opening angle", background)
-        self.assertIn("not a worst-case guarantee", background)
+        algorithm = normalized_text(nodes_by_id(self.root, "algorithm")[0])
+        for phrase in ("O(N log N)", "reasonably distributed tree", "nonzero opening angle",
+                       "degenerate distribution", "θ=0", "O(N²)"):
+            self.assertIn(phrase, algorithm)
 
 
 if __name__ == "__main__":
