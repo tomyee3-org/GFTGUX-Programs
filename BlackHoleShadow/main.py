@@ -161,29 +161,28 @@ def main():
         doc_dirs = [
             os.path.join(os.path.dirname(os.path.dirname(here)),
                          "GFTGUX-Documentation", "BlackHoleShadow"),
+            os.path.join(os.path.dirname(os.path.dirname(here)),
+                         "documentation", "BlackHoleShadow"),
             os.path.join(os.path.dirname(here), "BlackHoleShadow-Documentation"),
             os.path.dirname(here), here,
         ]
-        names = ("BlackHoleShadow-extended.html", "BlackHoleShadow-short.html")
+        name = "BlackHoleShadow.html"
         docs = next((directory for directory in doc_dirs
-                     if any(os.path.isfile(os.path.join(directory, name))
-                            for name in names)), None)
-        if docs is None or not all(os.path.isfile(os.path.join(docs, name))
-                                   for name in names):
-            raise SystemExit("BlackHoleShadow: --sync-help needs both Beats Help "
-                             "files in the same documentation directory")
+                     if os.path.isfile(os.path.join(directory, name))), None)
+        if docs is None:
+            raise SystemExit("BlackHoleShadow: --sync-help needs "
+                             "BlackHoleShadow.html in a documentation directory")
+        target = os.path.join(docs, name)
         try:
-            # Validate both targets before changing either one.
-            for name in names:
-                with open(os.path.join(docs, name), encoding="utf-8") as source:
-                    if not re.search(r'id="version_build"[^>]*>(?:(?!<p\b).)*?</p>',
-                                     source.read(), re.S):
-                        raise ValueError(f"malformed #version_build in {name}")
-            for name in names:
-                ver, bid = physics_bhs.patch_help_version(os.path.join(docs, name))
+            # Validate the canonical target before changing its stamp.
+            with open(target, encoding="utf-8") as source:
+                if not re.search(r'id="version_build"[^>]*>(?:(?!<p\b).)*?</p>',
+                                 source.read(), re.S):
+                    raise ValueError(f"malformed #version_build in {name}")
+            ver, bid = physics_bhs.patch_help_version(target)
         except (OSError, ValueError) as exc:
             raise SystemExit(f"BlackHoleShadow: {exc}") from exc
-        print(f"Wrote Version {ver}  Build {bid} -> both Beats Help files in {docs}")
+        print(f"Wrote Version {ver}  Build {bid} -> {target}")
         return
     try:
         _validate_args(args)

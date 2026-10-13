@@ -4,8 +4,8 @@ Discovery supports both the repository layout
 (``tests/test_physics_bhs.py``) and a flattened upload layout.  The full
 suite is run once from ``tests/``.
 
-The suite checks the numerical model, command-line interface and both
-student Help files.
+The suite checks the numerical model, command-line interface and the
+canonical student Help file.
 
 2026-10-11: Tests migrated to the single canonical <Program>.html Help.
 Archived formats and extended-only layout/wording requirements retired;
@@ -78,6 +78,7 @@ def find_help_files():
     """Find the current Help file in the sibling repository or review upload."""
     here = MODULE_DIR
     directories = (here.parent.parent / "GFTGUX-Documentation" / "BlackHoleShadow",
+                   here.parent.parent / "documentation" / "BlackHoleShadow",
                    here.parent / "BlackHoleShadow-Documentation", here.parent, here)
     for directory in directories:
         if any((directory / name).is_file() for name in HELP_NAMES):
@@ -560,44 +561,42 @@ class TestModesAndCLI(unittest.TestCase):
 
 
 class TestHelpFile(unittest.TestCase):
-    def test_legacy_sync_help_uses_temporary_pair_from_canonical_source(self):
-        sources = find_help_files()
-        self.assertEqual(len(sources), 1)
-        self.assertTrue(all(path.is_file() for path in sources))
-        # The hidden maintenance CLI still uses legacy target names. These
-        # are generated fixtures, never dependencies on archived Help files.
-        legacy_names = ("BlackHoleShadow-extended.html", "BlackHoleShadow-short.html")
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            program = root / "GFTGUX-Programs" / "BlackHoleShadow"
-            docs = root / "GFTGUX-Documentation" / "BlackHoleShadow"
-            program.mkdir(parents=True)
-            docs.mkdir(parents=True)
-            for name in CORE_MODULE_FILES:
-                (program / name).write_bytes((MODULE_DIR / name).read_bytes())
-            for name in legacy_names:
-                (docs / name).write_text(
-                    sources[0].read_text(encoding="utf-8").replace(phys.BUILD_ID, "000000000000"),
-                    encoding="utf-8")
-            result = run_cli(["--sync-help"], cwd=program)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(phys.BUILD_ID, result.stdout)
-            for name in legacy_names:
-                self.assertIn(phys.BUILD_ID, (docs / name).read_text(encoding="utf-8"))
-            before = [(docs / name).read_bytes() for name in legacy_names]
-            self.assertEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
-            self.assertEqual(before, [(docs / name).read_bytes() for name in legacy_names])
-            second = docs / legacy_names[1]
-            second_text = second.read_text(encoding="utf-8")
-            marker = re.search(r'(id="version_build"[^>]*>.*?)</p>', second_text, re.S)
-            self.assertIsNotNone(marker)
-            second.write_text(second_text[:marker.end()-4] + '<p>broken stamp</p>'
-                              + second_text[marker.end():], encoding="utf-8")
-            self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
-            self.assertEqual(before[0], (docs / legacy_names[0]).read_bytes())
-            (docs / legacy_names[1]).unlink()
-            self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
-            self.assertEqual(before[0], (docs / legacy_names[0]).read_bytes())
+    def test_sync_help_updates_only_canonical_file_in_supported_layouts(self):
+        source = find_help_file()
+        self.assertIsNotNone(source)
+        for layout in ("repository", "package"):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                program = root / ("GFTGUX-Programs" if layout == "repository" else "program") / "BlackHoleShadow"
+                docs = root / ("GFTGUX-Documentation" if layout == "repository" else "documentation") / "BlackHoleShadow"
+                program.mkdir(parents=True)
+                docs.mkdir(parents=True)
+                for name in CORE_MODULE_FILES:
+                    (program / name).write_bytes((MODULE_DIR / name).read_bytes())
+                target = docs / "BlackHoleShadow.html"
+                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                archive = docs / "BlackHoleShadow-extended.html"
+                archive.write_text("archived content must remain unchanged", encoding="utf-8")
+                archived_before = archive.read_bytes()
+                result = run_cli(["--sync-help"], cwd=program)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(phys.MODEL_VERSION, target.read_text(encoding="utf-8"))
+                self.assertIn(phys.BUILD_ID, target.read_text(encoding="utf-8"))
+                self.assertEqual(archive.read_bytes(), archived_before)
+                before = target.read_bytes()
+                self.assertEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
+                self.assertEqual(target.read_bytes(), before)
+                text = target.read_text(encoding="utf-8")
+                marker = re.search(r'(id="version_build"[^>]*>.*?)</p>', text, re.S)
+                self.assertIsNotNone(marker)
+                target.write_text(text[:marker.end()-4] + '<p>broken stamp</p>'
+                                  + text[marker.end():], encoding="utf-8")
+                malformed = target.read_bytes()
+                self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
+                self.assertEqual(target.read_bytes(), malformed)
+                target.unlink()
+                self.assertNotEqual(run_cli(["--sync-help"], cwd=program).returncode, 0)
+                self.assertEqual(archive.read_bytes(), archived_before)
 
     def test_patch_help_uses_canonical_filename_in_sibling_repository_layout(self):
         sources = find_help_files()
@@ -814,7 +813,7 @@ class TestHelpFile(unittest.TestCase):
         self.assertEqual(text.count(r"\("), text.count(r"\)"))
         self.assertIn(r"Narrow \(" + phys.photon_order_label() + r"\) peaks", text)
         self.assertIn(r"photon-ring (\(m\ge 3\))", text)
-        self.assertIn(rf"\(m\ge {phys.MAX_IMAGE_M + 1}\) is omitted", text)
+        self.assertRegex(text, rf"\\\(m\\ge\s*{phys.MAX_IMAGE_M + 1}\\\)\s+(?:is|are) omitted")
 
     def test_patch_help_version_is_idempotent(self):
         src = find_help_file()
@@ -837,9 +836,17 @@ class TestHelpFile(unittest.TestCase):
                 phys.MAX_IMAGE_M = 5
                 for src in find_help_files():
                     dest = Path(tmp) / src.name
-                    dest.write_bytes(src.read_bytes())
+                    original = src.read_bytes()
+                    dest.write_bytes(original)
                     phys.patch_help_version(dest)
-                    self.assertEqual(dest.read_bytes(), src.read_bytes())
+                    after = dest.read_bytes()
+                    stamp = rb'(id="version_build"[^>]*>).*?(</p>)'
+                    self.assertEqual(re.sub(stamp, rb'\1[STAMP]\2', original, flags=re.S),
+                                     re.sub(stamp, rb'\1[STAMP]\2', after, flags=re.S))
+                    self.assertIn(phys.MODEL_VERSION.encode(), after)
+                    self.assertIn(phys.BUILD_ID.encode(), after)
+                    phys.patch_help_version(dest)
+                    self.assertEqual(dest.read_bytes(), after)
         finally:
             phys.MAX_IMAGE_M = old
 
@@ -1271,6 +1278,42 @@ class TestSubringDisplay(unittest.TestCase):
             sidecar = Path(saved).with_suffix('.provenance.txt').read_text()
             self.assertIn('subring_spread_pixels = 0.31', sidecar)
             self.assertIn('lower m wins', sidecar)
+
+
+class TestSubringDefaultAndConsole(unittest.TestCase):
+    def test_cli_default_and_explicit_zero_are_forwarded_to_image_driver(self):
+        import main as entry
+        from unittest.mock import patch
+        for arguments, expected in (([], .05), (["--subring_spread", "0"], 0.)):
+            with self.subTest(arguments=arguments), patch.object(
+                    sys, "argv", ["main.py", "--mode", "image", *arguments]), patch.object(
+                    entry.driver_bhs, "run_image") as image_driver:
+                entry.main()
+                self.assertEqual(image_driver.call_args.kwargs["subring_spread"], expected)
+
+    def test_console_distinguishes_spread_display_from_raw_quantities(self):
+        import io
+        import contextlib
+        from unittest.mock import patch
+        shape = (41, 41)
+        arrays = tuple(np.full(shape, value) for value in (.1, .2, .3))
+        sample = np.array([4., 5., 6.])
+        parts = np.full((3, 4), .01)
+        products = (*arrays, sample, parts, [6., 5.5, 5.2, 5.197])
+        for spread in (0., .05):
+            stream = io.StringIO()
+            with self.subTest(spread=spread), patch.object(
+                    driver.phys, "disk_image_components", return_value=products), patch.object(
+                    driver.plotting, "plot_image", return_value=(None, None)) as plot, contextlib.redirect_stdout(stream):
+                driver.run_image(n_pix=41, fov_M=16., show=False, subring_spread=spread)
+                self.assertEqual(plot.call_args.kwargs["subring_spread"], spread)
+            output = stream.getvalue()
+            self.assertIn(f"subring_spread         : {spread:g} pixel spacings", output)
+            if spread:
+                self.assertIn("third panel spreads m=3,4 peaks for display", output)
+                self.assertIn("Reported raster maxima and radial I(b) use the unspread data", output)
+            else:
+                self.assertIn("third panel also uses point sampling (no display spread)", output)
 
 
 if __name__ == "__main__":

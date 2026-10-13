@@ -314,6 +314,21 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
     g4 = (1.0 - 2.0 / r_hot_over_M) ** 2
     t_hi = float(parts[:, 2:].sum(axis=1).max()) if parts.shape[1] > 2 else 0.0
     t2 = float(parts[:, 1].max()) if parts.shape[1] > 1 else 0.0
+    sampling_note = [
+        f"subring_spread         : {subring_spread:g} pixel spacings (display only)",
+        "The first two image panels use point samples at cell centres.",
+    ]
+    if subring_spread:
+        sampling_note.extend([
+            f"The third panel spreads {phys.photon_order_label()} peaks for display.",
+            "Reported raster maxima and radial I(b) use the unspread data.",
+        ])
+    else:
+        sampling_note.append("The third panel also uses point sampling (no display spread).")
+    sampling_note.extend([
+        f"Narrow {phys.photon_order_label()} peaks may miss raster centres;",
+        "the radial I(b) panel shows their unspread profiles.",
+    ])
     note = []
     if float(img2.max()) > float(img1.max()) * 1.02:
         note.append(
@@ -331,13 +346,11 @@ def run_image(M=1.0, n_pix=161, fov_M=16.0, r_hot=None,
         f"I(b) sample count      : {sample.size}",
         f"max table I_2 / I_{phys.photon_order_label()}  : {t2:.4g} / {t_hi:.4g}",
         f"max raster {phys.omitted_order_label(2)} increment : {photon_inc:.4g}",
-        f"Pixels are point samples at cell centres.  Narrow {phys.photon_order_label()}",
-        "peaks live in the radial I(b) panel; they may miss a centre.",
         f"I_obs ≈ {phys.image_sum_clause()}.",
         "g=sqrt(1-2M/r) for static emitters (no orbital Doppler).",
         "A captured backward ray crosses the horizon; it may hit",
         "the disk first.  The integrator stops at r=2M.",
-    ] + note)
+    ] + sampling_note + note)
     return plotting.plot_image(
         bx, by, img1, img2, img3, M=M, r_hot=r_hot_abs, peaks=peaks,
         fov_over_M=fov_M, sample=sample, parts=parts,
