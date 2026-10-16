@@ -49,7 +49,7 @@ gravity g.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.4.0"
+MODEL_VERSION = "1.5.1"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -1339,7 +1339,7 @@ def _integrate_event_horizon_backward(v_bc, r_bc, v_target, m0, m1, v1, v2,
 
     r = 2M(v) is a fixed point of this ODE whenever M is locally constant
     (before v1, and after v2). Linearising an offset epsilon = r - 2M
-    gives d(epsilon)/dv = epsilon/(2M): epsilon grows exponentially
+    gives d(epsilon)/dv = epsilon/(4M): epsilon grows exponentially
     FORWARD in v (the fixed point is unstable forward) and shrinks
     exponentially BACKWARD in v (the identical ODE run in reverse is
     stable/self-correcting). The forward "shooting" construction kept
@@ -1463,8 +1463,14 @@ def _integrate_event_horizon_backward(v_bc, r_bc, v_target, m0, m1, v1, v2,
 
 def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
                     v_start_margin_rs0=25.0, v_end_margin_rs0=15.0,
-                    n_steps=6000, bisect_iters=60, n_family=9):
+                    n_steps=6000, bisect_iters=60, n_family=9,
+                    forward_diagnostics=True):
     """
+    Set forward_diagnostics=False to return only the stable primary horizon,
+    with an empty family and no shooting diagnostic fields. The command-line
+    teaching program uses this setting. The default retains the legacy
+    numerical-diagnostic API for existing Python callers.
+
     Locate the apparent and event horizons of a black hole whose mass grows
     from m0 to m1 (solar masses) between advanced times v1 and v1+duration,
     in units of the initial Schwarzschild radius r_s0 = 2 G m0/c^2.
@@ -1484,17 +1490,14 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     v = v2 (once accretion has finished the spacetime is exactly static
     with mass m1, so the event and apparent horizons coincide there
     exactly, by definition, needing no search). This is the PRIMARY source
-    of the reported horizon. A forward "shooting" construction -- bisecting
-    a starting radius deep in the static era and integrating forward to
-    v_end -- is also computed, but only as (a) the mechanism behind the
-    geodesic-family visualisation panel, and (b) a secondary diagnostic
-    that quantifies its own error against the primary curve, never as the
-    thing being reported.
+    of the reported horizon. Forward shooting and nearby-ray diagnostics
+    are retained only for legacy Python callers; the teaching driver disables
+    them and displays just the apparent and event horizons.
 
     Why backward rather than forward: r = 2M(v) is a fixed point of
     dr/dv = (1/2)(1-2M/r) whenever M is locally constant (before v1, and
     again after v2). Linearising an offset epsilon = r - 2M gives
-    d(epsilon)/dv = epsilon/(2M): the fixed point is UNSTABLE forward in v
+    d(epsilon)/dv = epsilon/(4M): the fixed point is UNSTABLE forward in v
     and STABLE backward in v (same ODE, opposite direction). The forward
     shooting construction inherits that instability -- any offset from the
     true generator, even one at the single-ULP level that is all bisection
@@ -1506,8 +1509,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     r_EH >= r_AH (reproducible with M0=10, M1=10.5 at every documented
     default -- no unusual --bisect_iters or margin needed -- where a
     forward-only r_EH undershoots r_s1, and hence r_AH there, by several
-    parts in a million), and at the low --bisect_iters values Exercise
-    EXP-13 directly asks students to try, can be wrong by *several r_s0*.
+    parts in a million), and at low bisect_iters values, can be wrong by *several r_s0*.
     The M0==M1 case is handled as a fast path (the exact algebraic answer
     r_EH=r_AH=r_s0), but the general backward construction would also
     recover it directly, without needing a special case, if asked to.
@@ -1526,7 +1528,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     forward-shooting trial has already plunged or escaped well before v2
     and differs from the true (backward) horizon by order unity in r_s0
     somewhere along its own track -- exactly what the low --bisect_iters
-    settings Exercise EXP-13 asks students to try produce. The genuinely
+    settings can produce. The genuinely
     useful curve-wise diagnostics are `shooting_reached_v2` (whether the
     forward trial even got as far as v2), `shooting_v2_boundary_residual_rs0`
     (how far its own endpoint landed from r_s1, when it did reach v2), and
@@ -1536,7 +1538,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     the union of both curves' own integration nodes rather than a fixed
     sampling grid). Use those three fields, not `shooting_vs_backward_rs0`
     alone, to judge whether a forward-shooting trial has actually tracked
-    the true event horizon (see EXP-13 in the help file).
+    the true event horizon in legacy diagnostic mode.
     `shooting_v2_boundary_residual_rs0` is the Python float `nan` (not 0.0
     and not omitted) whenever `shooting_reached_v2` is False, since "how
     far the endpoint landed from r_s1" is undefined for a trial that never
@@ -1567,6 +1569,8 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     returned/exported absolute-v arrays -- so that an extreme v1_rs0 never
     by itself degrades the numerical conditioning of the result.
     """
+    # The teaching driver disables the legacy shooting/family diagnostics.
+    # Direct Python callers retain the previous diagnostic API by default.
     m0_msun, warn0 = check_mass("M0", m0_msun)
     m1_msun, warn1 = check_mass("M1", m1_msun)
     if m1_msun < m0_msun:
@@ -1772,6 +1776,27 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             "can fix (it only changes plot/CSV sampling, not the "
             "underlying adaptive integration); check that --M0/--M1 and "
             "the accretion window are physically reasonable."
+        )
+
+    if not forward_diagnostics:
+        # Return precisely the same primary horizon, without running any
+        # forward trial or allowing a diagnostic search to fail this run.
+        v_raw = np.append(v_eh_back, v_end) if v_end > v2 else v_eh_back
+        r_raw = np.append(r_eh_back, rs1) if v_end > v2 else r_eh_back
+        warnings = list(warn0) + list(warn1)
+        return dict(
+            kind="horizons", v=v_grid + v1_abs, r_AH=r_ah, r_EH=r_eh_grid,
+            v_eh_raw=v_raw + v1_abs, r_eh_raw=r_raw, family=[],
+            summary=dict(
+                m0_msun=m0_msun, m1_msun=m1_msun,
+                rs0_m=rs0, rs1_m=rs1, rs0_km=rs0/1e3, rs1_km=rs1/1e3,
+                v1_rs0=v1_rs0_summary, v2_rs0=v2_rs0_summary,
+                duration_rs0=duration_rs0,
+                v_start_rs0=v_start_rs0_summary, v_end_rs0=v_end_rs0_summary,
+                r_crit_over_rs0=r_crit/rs0, n_steps=n_steps,
+                light_crossing_time_rs0_s=rs0/c, n_points=v_grid.size,
+                warnings=warnings, model_version=MODEL_VERSION, build_id=BUILD_ID,
+            ),
         )
 
     # --- secondary: forward bisection shooting, retained for the

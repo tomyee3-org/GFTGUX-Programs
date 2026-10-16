@@ -2025,7 +2025,7 @@ class TestCLI(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 proc = run_cli(["--mode", mode, "--no_plot", "--csvdir", tmp,
                                  "--n_r", "20", "--n_points", "50",
-                                 "--n_steps", "200", "--bisect_iters", "15"])
+                                 "--n_steps", "200"])
                 self.assertEqual(proc.returncode, 0,
                                   msg=f"mode={mode}\nstdout={proc.stdout}\nstderr={proc.stderr}")
                 self.assertTrue(any(f.endswith(".csv") for f in os.listdir(tmp)),
@@ -2067,9 +2067,12 @@ class TestCLI(unittest.TestCase):
             # gaussian_curvature_K_per_m2 added this round (Reviewer Audit
             # round 1, Codex/Copilot EXP-18: K(r) exposed as a genuine
             # program output).
-            self.assertEqual(header, ["r_over_rs", "r_m", "z_m",
-                                       "proper_radial_distance_m",
+            self.assertEqual(header, ["r_over_rs", "r", "z",
+                                       "proper_radial_distance",
                                        "gaussian_curvature_K_per_m2"])
+            self.assertIn("r, z and proper_radial_distance are in meters", comments[0])
+            self.assertIn("r_over_rs is dimensionless", comments[0])
+            self.assertIn("gaussian_curvature_K_per_m2 is in inverse square meters", comments[0])
             self.assertEqual(len(rows), 37)
             self.assertAlmostEqual(float(rows[0][0]), 1.0, delta=1e-6)
             self.assertLess(float(rows[0][4]), 0.0)   # K is negative everywhere
@@ -2130,7 +2133,7 @@ class TestCLI(unittest.TestCase):
         # family-panel code intends.
         with tempfile.TemporaryDirectory() as tmp:
             proc = run_cli(["--mode", "horizons", "--no_plot", "--csvdir", tmp,
-                             "--n_steps", "200", "--bisect_iters", "15",
+                             "--n_steps", "200",
                              "--n_family", "2"])
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("n_family", proc.stderr)
@@ -2168,39 +2171,19 @@ class TestCLI(unittest.TestCase):
             csv_files = [f for f in os.listdir(tmp) if f.endswith(".csv")]
             self.assertEqual(len(csv_files), 3)
 
-    def test_horizons_writes_main_and_family_csv(self):
+    def test_horizons_writes_only_the_primary_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             proc = run_cli(["--mode", "horizons", "--no_plot", "--csvdir", tmp,
-                             "--n_steps", "200", "--bisect_iters", "15", "--n_family", "5"])
-            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
-            files = sorted(f for f in os.listdir(tmp) if f.endswith(".csv"))
-            self.assertEqual(len(files), 2)
-            family_file = [f for f in files if "family" in f][0]
-            comments, header, rows = read_csv_rows(os.path.join(tmp, family_file))
-            # CORRECTED ORACLE (Audit Round 3, Codex P3-3): the escapes
-            # column previously held a long prose value for the primary
-            # member ("n/a (primary backward curve, not a forward
-            # trial)") instead of a short categorical value like ordinary
-            # rows' yes/no. escapes is now a plain "n/a"/"yes"/"no", and
-            # the explanation moved to its own trajectory_kind column.
-            self.assertEqual(header, ["trajectory_id", "r_i_over_rs0", "escapes",
-                                       "trajectory_kind", "v_over_rs0",
-                                       "r_over_rs0"])
-            traj_ids = sorted(set(int(r[0]) for r in rows))
-            self.assertEqual(traj_ids, list(range(5)))
-            escapes_col = set(r[2] for r in rows)
-            self.assertTrue(escapes_col <= {"yes", "no", "n/a"})
-            kind_col = set(r[3] for r in rows)
-            self.assertTrue(kind_col <= {"forward_trial", "primary_backward"})
-            # n_family=5 is odd, so exactly one trajectory_id is the
-            # primary backward curve.
-            primary_ids = set(int(r[0]) for r in rows if r[3] == "primary_backward")
-            self.assertEqual(len(primary_ids), 1)
-            for r in rows:
-                if r[3] == "primary_backward":
-                    self.assertEqual(r[2], "n/a")
-                else:
-                    self.assertIn(r[2], ("yes", "no"))
+                            "--n_steps", "200"])
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            files = sorted(Path(tmp).glob("*.csv"))
+            self.assertEqual(len(files), 1)
+            comments, header, rows = read_csv_rows(files[0])
+            self.assertEqual(header, ["v_over_rs0", "v_m", "r_AH_over_rs0",
+                                     "r_EH_over_rs0", "r_AH_m", "r_EH_m"])
+            self.assertEqual(len(rows), 201)
+            for word in ("shooting", "bisection", "forward_trial", "n_family"):
+                self.assertNotIn(word, proc.stdout.lower() + "".join(comments).lower())
 
     def test_infall_csv_summary_fields_agree_with_returned_arrays(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2216,13 +2199,12 @@ class TestCLI(unittest.TestCase):
 
     def test_plot_facing_labels_present_in_source(self):
         # Static check that the mislabelling-sensitive plot annotations
-        # (stretching/compressing, escapes/plunges) are actually present
+        # (stretching/compressing, apparent/event horizon) are actually present
         # in plot_bh.py, so a future edit that silently drops or swaps
         # them is caught even without rendering a figure.
         with open(os.path.join(PROJECT_DIR, "plot_bh.py"), encoding="utf-8") as fh:
             src = fh.read()
-        for token in ("stretching", "compressing", "escapes to infinity",
-                      "plunges to $r=0$", "apparent horizon", "event horizon"):
+        for token in ("stretching", "compressing", "apparent horizon", "event horizon"):
             self.assertIn(token, src)
 
     def test_concurrent_processes_writing_same_csvdir_and_outdir_do_not_collide(self):
@@ -2326,8 +2308,7 @@ class TestCLI(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             proc = run_cli(["--mode", "horizons", "--no_plot", "--csvdir", tmp,
-                             "--n_steps", "200", "--bisect_iters", "15",
-                             "--n_family", "5"])
+                             "--n_steps", "200"])
             self.assertEqual(proc.returncode, 0, msg=proc.stderr)
             _assert_clean(proc.stdout, "printed CLI output")
             for fname in os.listdir(tmp):
@@ -2435,8 +2416,9 @@ class TestCanonicalHelpFile(unittest.TestCase):
         for mode, command, expected in zip(self.MODES, commands, signature):
             with tempfile.TemporaryDirectory() as folder:
                 parts = shlex.split(command)
-                index = parts.index("--outdir")
-                del parts[index:index + 2]
+                if "--outdir" in parts:
+                    index = parts.index("--outdir")
+                    del parts[index:index + 2]
                 result = run_cli(parts[2:] + ["--no_plot", "--csvdir", folder])
                 with self.subTest(mode=mode):
                     self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -2449,7 +2431,14 @@ class TestCanonicalHelpFile(unittest.TestCase):
         self.assertIn(f"Version {phys.MODEL_VERSION} Build {phys.BUILD_ID}",
                               " ".join(html.unescape(re.sub(r"<[^>]*>", " ", body)).split()))
         expected = self._beat_commands(self.pages[0].read_text(encoding="utf-8"))
-        self.assertEqual(self._beat_commands(body), expected)
+        def physical_command(command):
+            tokens = shlex.split(command)
+            if "--outdir" in tokens:
+                index = tokens.index("--outdir")
+                del tokens[index:index + 2]
+            return tokens
+        self.assertEqual([physical_command(c) for c in self._beat_commands(body)],
+                         [physical_command(c) for c in expected])
         images = re.findall(r'src="data:image/png;base64,([A-Za-z0-9+/=]+)"', body)
         self.assertEqual(len(images), 4)
         for image in images:
@@ -2488,6 +2477,81 @@ class TestCanonicalHelpFile(unittest.TestCase):
         self.assertIn(f"{phys.BUILD_ID}", notes)
         self.assertIn("Previous Release Notes — 1.4.0", notes)
 
+
+
+class TestSinglePanelHorizonDemo(unittest.TestCase):
+    def test_primary_only_skips_every_forward_integration(self):
+        import driver_bh
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                phys, '_integrate_null_geodesic', side_effect=AssertionError('forward called')):
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = driver_bh.run(mode='horizons', no_plot=True, csvdir=tmp, n_steps=200)
+        self.assertEqual(result['family'], [])
+        self.assertNotIn('residual_rs0', result['summary'])
+        self.assertFalse(any(k.startswith('shooting') for k in result['summary']))
+
+    def test_primary_horizon_is_identical_with_legacy_diagnostics(self):
+        for masses in ((5., 10.), (10., 10.5), (8., 8.)):
+            with self.subTest(masses=masses):
+                args=dict(m0_msun=masses[0], m1_msun=masses[1], n_steps=200,
+                          bisect_iters=10, n_family=1)
+                primary=phys.vaidya_horizons(**args, forward_diagnostics=False)
+                legacy=phys.vaidya_horizons(**args)
+                for key in ('v', 'r_AH', 'r_EH', 'v_eh_raw', 'r_eh_raw'):
+                    np.testing.assert_array_equal(primary[key], legacy[key])
+
+    def test_plot_has_one_axis_and_only_the_primary_horizon_curves(self):
+        import plot_bh
+        import matplotlib.pyplot as plt
+        result=phys.vaidya_horizons(n_steps=200, forward_diagnostics=False)
+        before=set(plt.get_fignums())
+        try:
+            with mock.patch.object(plot_bh, '_finish') as finish:
+                plot_bh.plot_horizons(result)
+            fig=finish.call_args.args[0]
+            self.assertEqual(len(fig.axes), 1)
+            ax=fig.axes[0]
+            for line,key in zip(ax.lines[:2], ('r_AH','r_EH')):
+                np.testing.assert_array_equal(line.get_ydata(), result[key]/result['summary']['rs0_m'])
+            text=' '.join(t.get_text() for t in ax.texts)
+            self.assertNotIn('residual', text)
+            self.assertNotIn('shooting', text)
+        finally:
+            for number in set(plt.get_fignums())-before:plt.close(number)
+
+    def test_student_help_and_cli_do_not_advertise_retired_controls(self):
+        proc=run_cli(['--help'])
+        self.assertEqual(proc.returncode, 0)
+        for name in ('--bisect_iters','--n_family'):
+            self.assertNotIn(name, proc.stdout)
+        page=TestCanonicalHelpFile.DOCS/'BlackHoleSpacetimeVisualizer.html'
+        text=page.read_text(encoding='utf-8')
+        self.assertNotIn('shooting', text.lower())
+        self.assertEqual(text.count(r'('), text.count(r')'))
+        self.assertEqual(text.count(r'['), text.count(r']'))
+        self.assertLess(text.index('MathJax ='), text.index('id="MathJax-script"'))
+        for code in re.findall(r'<code>(.*?)</code>', text, re.S):
+            self.assertNotRegex(code, r'[τδηℓ×∝⁰¹²³⁴⁵⁶⁷⁸⁹]')
+            self.assertNotIn('sqrt', code)
+
+
+class TestTidalRatioSummary(unittest.TestCase):
+    def test_ratio_printed_below_and_above_warning_threshold(self):
+        for mass, compare in ((10., None), (0.1, None), (10., "10,4.31e6")):
+            with self.subTest(mass=mass, compare=compare), tempfile.TemporaryDirectory() as tmp:
+                args=["--mode", "tidal", "--M", str(mass), "--n_r", "20",
+                      "--no_plot", "--csvdir", tmp]
+                if compare:args += ["--compare_masses", compare]
+                proc=run_cli(args)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines=[line for line in proc.stdout.splitlines() if "linearization_ratio" in line]
+                self.assertEqual(len(lines), 1)
+                value=float(lines[0].split(":", 1)[1].split()[0])
+                expected=1.8/(1.01*phys.schwarzschild_radius(mass))
+                self.assertAlmostEqual(value/expected, 1., delta=5e-6)
+                self.assertIn("warning if > 0.001", lines[0])
+                self.assertEqual("is not reliable in this regime" in proc.stdout,
+                                 expected > phys.TIDAL_LINEARIZATION_RATIO_WARN)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

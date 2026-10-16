@@ -96,7 +96,7 @@ PARAMS_BY_MODE = {
                  "compare_masses"),
     "infall":   ("M", "r0_rs", "n_points", "r_stop_rs", "step_frac"),
     "horizons": ("M0", "M1", "v1_rs0", "duration_rs0", "v_start_margin_rs0",
-                 "v_end_margin_rs0", "n_steps", "bisect_iters", "n_family"),
+                 "v_end_margin_rs0", "n_steps"),
 }
 
 
@@ -210,6 +210,8 @@ def _print_tidal_summary(s):
     print(f"  Mass                : {s['m_msun']:.4g}  Msun")
     print(f"  Schwarzschild radius: {s['rs_km']:.4g}  km")
     print(f"  Test separation     : {s['separation_m']:.3g}  m")
+    print(f"  linearization_ratio : {s['linearization_ratio']:.6g}"
+          f"  (warning if > {phys.TIDAL_LINEARIZATION_RATIO_WARN:g})")
     print(f"  Range plotted       : {s['r_min_rs']:.3g} - {s['r_max_rs']:.3g}  r_s"
           f"  ({s['n_points']:,} points)")
     print(SEP)
@@ -279,25 +281,6 @@ def _print_horizons_summary(s):
     print("      (the PHYSICAL early-time displacement of the event horizon")
     print("       above r_s0 at this v_start -- not a truncation error; see")
     print("       the help file and EXP-10)")
-    print(f"  Diagnostic only -- forward bisection search (not used for the")
-    print(f"  reported curve): r/r_s0 = {s['r_crit_shooting_over_rs0']:.8f}"
-          f"  (bracket width {s['residual_rs0']:.3e} r_s0,"
-          f" {s['bisect_iters']} iterations)")
-    print(f"      differs from the reported (backward) result's STARTING "
-          f"radius only by {s['shooting_vs_backward_rs0']:.3e} r_s0 -- this")
-    print("       can look small even when the forward trial has gone badly")
-    print("       wrong further along its own track; see the three fields")
-    print("       below for the actual curve-wise comparison, and EXP-13.")
-    reached = s["shooting_reached_v2"]
-    print(f"      shooting_reached_v2 = {reached}"
-          + ("" if reached else "  (trial plunged/escaped before v2)"))
-    if reached:
-        print(f"      shooting_v2_boundary_residual_rs0 = "
-              f"{s['shooting_v2_boundary_residual_rs0']:.3e} r_s0")
-    print(f"      shooting_vs_backward_curve_max_rs0 = "
-          f"{s['shooting_vs_backward_curve_max_rs0']:.3e} r_s0  (the actual")
-    print("       curve-wise diagnostic -- not the starting-radius one above)")
-    print(SEP)
     no_accretion = (s["m0_msun"] == s["m1_msun"])
     if no_accretion:
         print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
@@ -316,6 +299,7 @@ def _print_horizons_summary(s):
         print("  stopped growing (v > v2), and the event horizon starts rising")
         print("  measurably *before* the accretion begins (v < v1) -- it")
         print("  anticipates mass that has not arrived yet.")
+    print("  Static-limit check: set M0 = M1; see EXP-13.")
     print(SEP)
     _print_warnings(s)
 
@@ -337,14 +321,17 @@ def _run_embed(kw, outdir, csvdir, dpi, lw):
                 for r, z, d, k in zip(result["r"], result["z"],
                                        result["proper_radial_distance"], result["K"])]
         _write_csv(csvdir, f"bh_embed_{s['m_msun']:.2f}Msun",
-                   ["r_over_rs", "r_m", "z_m", "proper_radial_distance_m",
+                   ["r_over_rs", "r", "z", "proper_radial_distance",
                     "gaussian_curvature_K_per_m2"],
                    rows,
                    # K(r), the intrinsic Gaussian curvature of the slice, is
                    # now a genuine program output (see physics_bh.
                    # gaussian_curvature), not only discussed in prose --
                    # Reviewer Audit round 1, Codex/Copilot EXP-18.
-                   comments=["Flamm's paraboloid embedding profile "
+                   comments=["Units: r, z and proper_radial_distance are in meters; "
+                             "r_over_rs is dimensionless; gaussian_curvature_K_per_m2 "
+                             "is in inverse square meters. Flamm's paraboloid "
+                             "embedding profile "
                              "(K = intrinsic Gaussian curvature, negative "
                              "everywhere; K(r_s) = -1/(2 r_s^2))"]
                    + _provenance("embed", kw))
@@ -449,8 +436,7 @@ def _run_horizons(kw, outdir, csvdir, dpi, lw):
         duration_rs0=kw["duration_rs0"],
         v_start_margin_rs0=kw["v_start_margin_rs0"],
         v_end_margin_rs0=kw["v_end_margin_rs0"],
-        n_steps=kw["n_steps"], bisect_iters=kw["bisect_iters"],
-        n_family=kw["n_family"],
+        n_steps=kw["n_steps"], forward_diagnostics=False,
     )
     _print_horizons_summary(result["summary"])
     if csvdir is not None:
@@ -464,68 +450,9 @@ def _run_horizons(kw, outdir, csvdir, dpi, lw):
         _write_csv(csvdir, f"bh_horizons_{s['m0_msun']:.2f}to{s['m1_msun']:.2f}Msun",
                    ["v_over_rs0", "v_m", "r_AH_over_rs0", "r_EH_over_rs0",
                     "r_AH_m", "r_EH_m"], rows,
-                   # r_EH(v) here is constructed by backward-integrating the
-                   # outgoing null geodesic from the exact future boundary
-                   # condition r(v2) = 2*M1, not by forward shooting/bisection
-                   # (MODEL_VERSION 1.2.0; Reviewer Audit round 1, Copilot
-                   # P1-2 and Codex). The forward-shooting bracket, retained
-                   # only as a secondary diagnostic, is reported separately
-                   # in the run summary as r_crit_shooting_over_rs0 /
-                   # shooting_vs_backward_rs0, not in this CSV.
                    comments=["apparent horizon r_AH(v) = 2M(v) vs. the "
                              "event horizon r_EH(v), constructed by backward "
                              "integration from r(v2)=2*M1"]
-                   + _provenance("horizons", kw)
-                   + [f"forward-shooting bracket residual (diagnostic only, "
-                      f"not the event-horizon error) = "
-                      f"{s['residual_rs0']:.3e} r_s0",
-                      # Audit Round 3, Copilot CP3-6: the three curve-wise
-                      # shooting-vs-backward diagnostic fields (see the
-                      # vaidya_horizons docstring and EXP-13) were already
-                      # in the printed run summary and the Python return
-                      # dict, and documented in the HTML, but were missing
-                      # from this CSV's own metadata comments -- recorded
-                      # here too, with identical field names, so the CSV
-                      # alone carries the same diagnostic provenance as
-                      # the console output.
-                      f"shooting_reached_v2 = {s['shooting_reached_v2']}",
-                      f"shooting_v2_boundary_residual_rs0 = "
-                      f"{s['shooting_v2_boundary_residual_rs0']:.3e} r_s0 "
-                      "(nan if shooting_reached_v2 is False)",
-                      f"shooting_vs_backward_curve_max_rs0 = "
-                      f"{s['shooting_vs_backward_curve_max_rs0']:.3e} r_s0"])
-        frows = []
-        for j, fam in enumerate(result["family"]):
-            # A family member flagged is_primary_backward_curve is the
-            # exact backward-integrated event-horizon curve itself, not a
-            # forward-integrated trial ray -- "escapes" (yes/no) does not
-            # apply to it. Rather than folding that explanation into the
-            # escapes column's own value (which then reads oddly next to
-            # plain yes/no rows), escapes stays a short, stable "n/a" and
-            # the explanation lives in its own trajectory_kind column: this
-            # happens for every --n_family 1 run (the family's sole member
-            # is the primary curve) and, for odd --n_family >= 3, exactly
-            # one member alongside its n_family-1 ordinary forward trials.
-            is_primary = bool(fam.get("is_primary_backward_curve"))
-            fate = "n/a" if is_primary else ("yes" if fam["escapes"] else "no")
-            kind = "primary_backward" if is_primary else "forward_trial"
-            for v, r in zip(fam["v"], fam["r"]):
-                frows.append([j, f"{fam['r_i_over_rs0']:.17g}", fate, kind,
-                              f"{v/s['rs0_m']:.17g}", f"{r/s['rs0_m']:.17g}"])
-        _write_csv(csvdir, "bh_horizons_family",
-                   ["trajectory_id", "r_i_over_rs0", "escapes",
-                    "trajectory_kind", "v_over_rs0", "r_over_rs0"], frows,
-                   comments=["family of outgoing null geodesics bracketing "
-                             "the event-horizon generator (diagnostic/"
-                             "visualization only; not the reported r_EH(v)); "
-                             "trajectory_kind = primary_backward identifies "
-                             "the exact backward-integrated event-horizon "
-                             "curve itself (escapes = n/a, not a forward "
-                             "trial: this is always true for --n_family 1, "
-                             "and true of exactly one member for odd "
-                             "--n_family >= 3), and forward_trial identifies "
-                             "an ordinary bracketing geodesic (escapes = "
-                             "yes/no)"]
                    + _provenance("horizons", kw))
     if not kw["no_plot"]:
         viz.plot_horizons(result, outdir=outdir, dpi=dpi, lw=lw)
@@ -545,7 +472,7 @@ def run(mode="embed",
         # --- horizons ---
         M0=5.0, M1=10.0, v1_rs0=5.0, duration_rs0=10.0,
         v_start_margin_rs0=25.0, v_end_margin_rs0=15.0,
-        n_steps=6000, bisect_iters=60, n_family=9,
+        n_steps=6000,
         # --- output ---
         outdir=None, csvdir=None, dpi=150, lw=1.6, no_plot=False):
     """
@@ -583,7 +510,7 @@ def run(mode="embed",
         r0_rs=r0_rs, n_points=n_points, r_stop_rs=r_stop_rs, step_frac=step_frac,
         M0=M0, M1=M1, v1_rs0=v1_rs0, duration_rs0=duration_rs0,
         v_start_margin_rs0=v_start_margin_rs0, v_end_margin_rs0=v_end_margin_rs0,
-        n_steps=n_steps, bisect_iters=bisect_iters, n_family=n_family,
+        n_steps=n_steps,
         no_plot=no_plot,
     )
 

@@ -12,7 +12,7 @@ One routine per mode:
     plot_infall       proper time, coordinate time, local speed and
                       redshift for a radially infalling test particle
     plot_horizons     apparent horizon vs. event horizon in a Vaidya
-                      spacetime, with the shooting-method geodesic family
+                      spacetime, using the stable backward construction
 
 Each routine always displays the figure on screen; if the student also
 supplies --outdir, it additionally writes a timestamped PNG into that
@@ -342,16 +342,15 @@ def plot_infall(result, outdir=None, dpi=150, lw=1.7, figsize=(12.5, 9.2)):
 # ----------------------------------------------------------------------
 # Mode: horizons
 # ----------------------------------------------------------------------
-def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(13.5, 5.6)):
-    """Apparent vs. event horizon in the Vaidya spacetime, and the geodesic
-    family used to locate the event horizon."""
+def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(9.0, 5.8)):
+    """Compare the apparent and backward-integrated event horizons."""
     s = result["summary"]
     rs0 = s["rs0_m"]
     v = result["v"] / rs0
     r_ah = result["r_AH"] / rs0
     r_eh = result["r_EH"] / rs0
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, constrained_layout=True)
+    fig, ax1 = plt.subplots(figsize=figsize, constrained_layout=True)
 
     fig.suptitle(
         f"Vaidya spacetime — accreting from "
@@ -386,67 +385,5 @@ def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(13.5, 5.6)):
                  transform=ax1.transAxes, ha="right", va="bottom", fontsize=7.7,
                  bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray",
                            alpha=0.9))
-
-    # --- Panel 2: geodesic family -----------------------------------------
-    # A single trajectory (--n_family 1) is not a bracketing family at all
-    # -- it is just the horizon generator itself, plotted once more -- and
-    # is given its own presentation rather than the escape/plunge legend,
-    # which would otherwise describe colours that are not actually shown
-    # (n_family=2 is rejected outright by vaidya_horizons for the same
-    # reason, so it cannot reach this function). For odd n_family >= 3 the
-    # family also contains one explicit primary-backward-curve member
-    # (escapes=None) alongside its n_family-1 ordinary forward trials: that
-    # member is excluded from the escape/plunge coloring loop below (its
-    # "escapes" is not a yes/no fate to color, and the black event-horizon
-    # generator line plotted a few lines down already draws it) rather than
-    # naively colored via `if fam["escapes"]`, which would silently plot it
-    # as a plunging (falsy-None) trial.
-    trial_members = [fam for fam in result["family"]
-                     if not fam.get("is_primary_backward_curve")]
-    single_trajectory = (len(trial_members) == 0)
-    if not single_trajectory:
-        for fam in trial_members:
-            col = C_ESCAPE if fam["escapes"] else C_PLUNGE
-            ax2.plot(fam["v"] / rs0, fam["r"] / rs0, color=col, lw=1.1, alpha=0.85)
-    ax2.plot(v, r_eh, color=C_EH, lw=lw, label="event-horizon generator")
-    if not no_accretion:
-        ax2.axvspan(s["v1_rs0"], s["v2_rs0"], color="#fdecd8", zorder=0)
-    ax2.set_xlim(v.min(), v.max())
-    # Escaping family members are integrated well past r_s1 (out to an
-    # unambiguous-escape cutoff), so cap the axis at a fixed multiple of the
-    # *final* horizon size rather than at the trajectories' own maxima.
-    rs1_over_rs0 = s["rs1_m"] / rs0
-    y_hi = max(2.2 * rs1_over_rs0, r_eh.max() * 1.15)
-    ax2.set_ylim(0, y_hi)
-    ax2.set_xlabel(r"advanced time $v / r_{s0}$")
-    ax2.set_ylabel(r"$r / r_{s0}$")
-    if single_trajectory:
-        ax2.set_title("Event-horizon generator (--n_family 1: no bracketing family)")
-        black_patch = plt.Line2D([0], [0], color=C_EH, lw=lw, label="event horizon")
-        ax2.legend(handles=[black_patch], fontsize=8, loc="upper left", framealpha=0.9)
-        ax2.text(0.5, 0.5,
-                 "--n_family 1 requested: showing only the located\n"
-                 "event-horizon generator itself, not a bracketing\n"
-                 "family. Use --n_family 3 or more to see nearby\n"
-                 "escaping/plunging trajectories on either side.",
-                 transform=ax2.transAxes, ha="center", va="center", fontsize=8,
-                 bbox=dict(boxstyle="round,pad=0.4", fc="lightyellow", ec="gray",
-                           alpha=0.9))
-    else:
-        ax2.set_title("How the shooting method finds it")
-        green_patch = plt.Line2D([0], [0], color=C_ESCAPE, lw=2, label="escapes to infinity")
-        red_patch = plt.Line2D([0], [0], color=C_PLUNGE, lw=2, label="plunges to $r=0$")
-        black_patch = plt.Line2D([0], [0], color=C_EH, lw=lw, label="event horizon")
-        ax2.legend(handles=[green_patch, red_patch, black_patch], fontsize=8,
-                  loc="upper left", framealpha=0.9)
-    ax2.grid(True, lw=0.3, alpha=0.5)
-
-    note = "\n".join([
-        fr"$r_{{\rm crit}}/r_{{s0}} = {s['r_crit_over_rs0']:.6f}$ at $v_{{\rm start}}$",
-        fr"bisection residual $\approx {s['residual_rs0']:.2e}\,r_{{s0}}$",
-    ])
-    ax1.text(0.02, 0.34, note, transform=ax1.transAxes, ha="left", va="top",
-             fontsize=7.7, bbox=dict(boxstyle="round,pad=0.3", fc="white",
-                                     ec="gray", alpha=0.85))
 
     _finish(fig, outdir, f"bh_horizons_{s['m0_msun']:.2f}to{s['m1_msun']:.2f}Msun", dpi)

@@ -162,19 +162,6 @@ def parse_args():
                         "plot resolution only; does not affect the accuracy "
                         "of the underlying geodesic integration, which uses "
                         "its own internal adaptive step size)")
-    g.add_argument("--bisect_iters", type=_positive_int, default=60, metavar="N",
-                   help="bisection iterations for the SECONDARY, diagnostic "
-                        "forward-shooting search only; the reported event "
-                        "horizon itself is located by backward integration "
-                        "from the exact post-accretion boundary condition "
-                        "and does not depend on this setting")
-    g.add_argument("--n_family", type=_positive_int, default=9, metavar="N",
-                   help="number of nearby geodesics drawn around the "
-                        "event-horizon generator for the family-of-"
-                        "trajectories panel; use 1 for no bracketing family "
-                        "(just the generator itself) or 3 or more for a "
-                        "genuine bracketing family (2 is rejected)")
-
     g = p.add_argument_group("Output")
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",
                    help="also save a timestamped PNG in PATH, IN ADDITION to "
@@ -211,8 +198,7 @@ def main():
             duration_rs0=args.duration_rs0,
             v_start_margin_rs0=args.v_start_margin_rs0,
             v_end_margin_rs0=args.v_end_margin_rs0,
-            n_steps=args.n_steps, bisect_iters=args.bisect_iters,
-            n_family=args.n_family,
+            n_steps=args.n_steps,
             outdir=args.outdir, csvdir=args.csvdir, no_plot=args.no_plot,
             dpi=args.dpi, lw=args.lw,
         )
