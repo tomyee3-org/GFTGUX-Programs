@@ -2448,18 +2448,19 @@ class TestCanonicalHelpFile(unittest.TestCase):
         for token in ("29.53 km", "1.8914e7 g", "2.2048475 ms", "1.00000145"):
             self.assertIn(token, body)
 
-    def test_printed_exercise_references_exist_in_current_help(self):
-        # Old program summaries refer to exercise IDs; the new tutorials
-        # must continue to supply those exercises with their old meanings.
-        code = (Path(PROJECT_DIR) / "driver_bh.py").read_text(encoding="utf-8")
-        code += (Path(PROJECT_DIR) / "main.py").read_text(encoding="utf-8")
-        ids = set(re.findall(r"EXP-\d+", code))
-        self.assertEqual(ids, {"EXP-5", "EXP-8", "EXP-10", "EXP-11", "EXP-13", "EXP-18"})
-        for page in self.pages:
-            body = page.read_text(encoding="utf-8")
-            with self.subTest(page=page.name):
-                for ref in ids:
-                    self.assertRegex(body, re.escape(ref) + r"[:,]")
+    def test_program_does_not_reference_numbered_help_exercises(self):
+        # Help exercises may be renumbered without changing the public CLI.
+        for mode in (None, "infall", "horizons"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                args = (["--help"] if mode is None else
+                        ["--mode", mode, "--no_plot", "--csvdir", folder])
+                result = run_cli(args)
+                self.assertEqual(result.returncode, 0, msg=result.stderr)
+                self.assertNotRegex(result.stdout, r"EXP-\d+")
+                self.assertNotRegex(result.stderr, r"EXP-\d+")
+        for name, function in inspect.getmembers(phys, inspect.isfunction):
+            if not name.startswith("_"):
+                self.assertNotRegex(inspect.getdoc(function) or "", r"EXP-\d+", msg=name)
 
     def test_closed_form_infall_checkpoint_uses_nominal_gm(self):
         rs = phys.schwarzschild_radius(10)
@@ -2552,6 +2553,24 @@ class TestTidalRatioSummary(unittest.TestCase):
                 self.assertIn("warning if > 0.001", lines[0])
                 self.assertEqual("is not reliable in this regime" in proc.stdout,
                                  expected > phys.TIDAL_LINEARIZATION_RATIO_WARN)
+
+class TestInfallConsolePrecision(unittest.TestCase):
+    def test_elapsed_times_preserve_computed_binary64_values(self):
+        import driver_bh
+        for fraction in (0.02, 0.005, 0.001):
+            with self.subTest(step_frac=fraction):
+                summary = phys.infall_radial(step_frac=fraction)["summary"]
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    driver_bh._print_infall_summary(summary)
+                text = output.getvalue()
+                for label, key in (("tau", "tau_total_ms"), ("t", "t_total_ms")):
+                    match = re.search(r"^\s*" + label + r"\s*=\s*(\S+)\s+ms", text, re.M)
+                    self.assertIsNotNone(match, msg=text)
+                    # Reading the console must recover the original stored
+                    # value, rather than a rounded value hiding convergence.
+                    self.assertEqual(float(match.group(1)), summary[key])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

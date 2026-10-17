@@ -49,7 +49,7 @@ gravity g.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.5.1"
+MODEL_VERSION = "1.5.2"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -900,9 +900,7 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     --step_frac interval the relative error never exceeds its coarsest-
     step-size value (about 1.56e-6, comfortably inside the documented
     ~1e-5 tolerance): the non-monotonic tail at small step_frac is real,
-    but small relative to the coarse end, not a runaway (see EXP-11,
-    which documents this measured, non-monotonic behaviour explicitly
-    rather than claiming an unconditional floor).
+    but small relative to the coarse end.
 
     r_stop_rs must exceed 1: the Schwarzschild t coordinate, and this
     integrator's use of it, both break down at the horizon itself, which is

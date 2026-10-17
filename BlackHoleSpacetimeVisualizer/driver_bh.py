@@ -250,12 +250,9 @@ def _print_infall_summary(s):
     print(f"  Integration stopped at r = {s['r_stop_rs']:.5g}  r_s")
     print(SEP)
     print(f"  Proper time elapsed (falling observer's own clock):")
-    print(f"      tau = {s['tau_total_ms']:.8g}  ms")
+    print(f"      tau = {s['tau_total_ms']:.17g}  ms")
     print(f"  Schwarzschild coordinate time elapsed (distant observer's clock):")
-    print(f"      t   = {s['t_total_ms']:.8g}  ms   (t/tau = {s['t_total_ms']/s['tau_total_ms']:.4g})")
-    print("      (printed to 8 figures so EXP-11's 1e-5-level closed-form"
-          " comparison can be read off directly; the CSV file carries the"
-          " same precision internally either way)")
+    print(f"      t   = {s['t_total_ms']:.17g}  ms   (t/tau = {s['t_total_ms']/s['tau_total_ms']:.4g})")
     print(f"  Local infall speed at the last recorded point : {s['v_local_final']:.6f}  c")
     print(f"  Redshift factor (nu_obs/nu_emit) at that point: {s['redshift_final']:.4e}")
     print(SEP)
@@ -278,9 +275,6 @@ def _print_horizons_summary(s):
     print(f"  r_s0/c              : {s['light_crossing_time_rs0_s']*1e6:.4g}  microseconds")
     print(SEP)
     print(f"  Event horizon at v_start: r/r_s0 = {s['r_crit_over_rs0']:.8f}")
-    print("      (the PHYSICAL early-time displacement of the event horizon")
-    print("       above r_s0 at this v_start -- not a truncation error; see")
-    print("       the help file and EXP-10)")
     no_accretion = (s["m0_msun"] == s["m1_msun"])
     if no_accretion:
         print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
@@ -299,7 +293,7 @@ def _print_horizons_summary(s):
         print("  stopped growing (v > v2), and the event horizon starts rising")
         print("  measurably *before* the accretion begins (v < v1) -- it")
         print("  anticipates mass that has not arrived yet.")
-    print("  Static-limit check: set M0 = M1; see EXP-13.")
+    print("  Static-limit check: set M0 = M1.")
     print(SEP)
     _print_warnings(s)
 

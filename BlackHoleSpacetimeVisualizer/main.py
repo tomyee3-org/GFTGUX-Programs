@@ -95,7 +95,7 @@ def parse_args():
                         "bounds for each: embed's picture is specifically "
                         "about the near-horizon throat, so it is capped at "
                         "1000; tidal is also used to verify the far-field "
-                        "1/r^3 power law (see EXP-8) and so is allowed up "
+                        "1/r^3 power law and so is allowed up "
                         "to 1e8")
     g.add_argument("--n_r", type=_positive_int, default=400, metavar="N",
                    help="radial points for embed or tidal")
