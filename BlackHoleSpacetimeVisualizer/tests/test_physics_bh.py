@@ -2354,10 +2354,39 @@ class TestCanonicalHelpFile(unittest.TestCase):
 
     @staticmethod
     def _beat_commands(page):
-        # One displayed command per Beat; inline exercise commands are checked
-        # separately by the parser below when they start with python main.py.
-        return [html.unescape(x).strip() for x in
-                re.findall(r'<pre><code>(.*?)</code></pre>', page, re.S)]
+        # Accept valid attributes and nested inline markup in pre/code blocks.
+        from html.parser import HTMLParser
+
+        class PreCodeParser(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.in_pre = False
+                self.in_code = False
+                self.parts = []
+                self.commands = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "pre":
+                    self.in_pre = True
+                elif tag == "code" and self.in_pre:
+                    self.in_code = True
+                    self.parts = []
+
+            def handle_data(self, data):
+                if self.in_code:
+                    self.parts.append(data)
+
+            def handle_endtag(self, tag):
+                if tag == "code" and self.in_code:
+                    self.commands.append("".join(self.parts).strip())
+                    self.in_code = False
+                elif tag == "pre":
+                    self.in_pre = False
+
+        parser = PreCodeParser()
+        parser.feed(page)
+        parser.close()
+        return parser.commands
 
     def test_canonical_help_is_required_without_archive_files(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -2412,6 +2441,7 @@ class TestCanonicalHelpFile(unittest.TestCase):
         # One source of truth for the actual teaching runs; this also
         # distinguishes the real CLI from a page that merely parses.
         commands = self._beat_commands(self.pages[0].read_text(encoding="utf-8"))
+        self.assertEqual(len(commands), len(self.MODES), "missing Beat commands")
         signature = ("-5.7328e-10", "1.8914e+07", "2.2048475", "1.00000145")
         for mode, command, expected in zip(self.MODES, commands, signature):
             with tempfile.TemporaryDirectory() as folder:
@@ -2528,8 +2558,12 @@ class TestSinglePanelHorizonDemo(unittest.TestCase):
         page=TestCanonicalHelpFile.DOCS/'BlackHoleSpacetimeVisualizer.html'
         text=page.read_text(encoding='utf-8')
         self.assertNotIn('shooting', text.lower())
-        self.assertEqual(text.count(r'('), text.count(r')'))
-        self.assertEqual(text.count(r'['), text.count(r']'))
+        # Compare TeX delimiters, not ordinary punctuation: a valid interval
+        # such as (10^-5, 0.2] deliberately uses mixed brackets.
+        for opening, closing in ((r'\(', r'\)'), (r'\[', r'\]')):
+            self.assertEqual(text.count(opening), text.count(closing))
+        for name in ('--bisect_iters', '--n_family'):
+            self.assertNotIn(name, text)
         self.assertLess(text.index('MathJax ='), text.index('id="MathJax-script"'))
         for code in re.findall(r'<code>(.*?)</code>', text, re.S):
             self.assertNotRegex(code, r'[τδηℓ×∝⁰¹²³⁴⁵⁶⁷⁸⁹]')
