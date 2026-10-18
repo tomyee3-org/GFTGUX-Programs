@@ -49,7 +49,7 @@ gravity g.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.5.2"
+MODEL_VERSION = "1.5.3"
 
 
 #: The exact source files this build identifier covers: a documentation-only
@@ -880,13 +880,13 @@ def infall_radial(m_msun=10.0, r0_rs=6.0, n_points=4000, r_stop_rs=1.0005,
     there too, the integrator silently drops to first-order accuracy for
     the whole run, however small --step_frac is made elsewhere. Capping the
     step by the (shrinking) distance to r0, exactly as is already done for
-    the distance to r_stop, restores full fourth-order behaviour: with this
+    the distance to r_stop, restores rapid convergence: with this
     version of the integrator, --step_frac 0.2 (the coarsest value allowed)
     already agrees with an exact closed-form (cycloid-parametrised) benchmark
     solution to a few parts in 10^6 for the default parameters (measured:
     about 1.56e-6 relative error at the coarsest allowed --step_frac of
     0.2). Refining --step_frac from there improves the agreement roughly as
-    step_frac^3-4 down to about 0.005, where the shrinking RK4 truncation
+    step_frac^3 down to about 0.01, where the shrinking RK4 truncation
     error and the accumulated floating-point round-off from many more,
     individually tinier steps become comparable; below that the relative
     error does NOT settle into a monotonically non-increasing floor. It
@@ -1513,7 +1513,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     recover it directly, without needing a special case, if asked to.
 
     `residual_rs0` (the forward bisection bracket's width) and
-    `r_crit_shooting_over_rs0` (the forward-located critical radius
+    `r_eh_vstart_shooting_over_rs0` (the forward-located critical radius
     itself) are still computed and reported, but strictly as what they
     are: `residual_rs0` measures only how many times a bracket was
     halved, not the accuracy of the geodesic inside it, and it is driven
@@ -1546,7 +1546,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     convert it (e.g. to `null`) explicitly rather than relying on a
     JSON encoder's non-standard NaN extension.
 
-    `r_crit_over_rs0 - 1` (from the primary backward construction) is the
+    `r_eh_vstart_over_rs0 - 1` (from the primary backward construction) is the
     physical, not merely numerical, displacement of the true event
     horizon above the static value r = 2 m0 at the chosen v_start: because
     the exact event horizon only equals 2 m0 in the strict v_start ->
@@ -1593,8 +1593,8 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         # n_family=1 (just the horizon generator itself, no bracketing
         # family -- given a dedicated, differently-labelled presentation
         # by plot_bh.plot_horizons) and n_family>=3 (a genuine bracketing
-        # family, symmetric about r_crit) are both meaningful; n_family=2
-        # is neither -- two trajectories cannot straddle r_crit
+        # family, symmetric about r_eh_vstart) are both meaningful; n_family=2
+        # is neither -- two trajectories cannot straddle r_eh_vstart
         # symmetrically the way np.linspace(-spread, spread, 2) actually
         # produces (both endpoints, no centre point), and it is not the
         # single-trajectory case either (Reviewer Audit round 1, Codex
@@ -1707,12 +1707,12 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         # integrator would (correctly, but needlessly slowly) rediscover
         # exactly this by finding the derivative is bit-for-bit zero at
         # r = r_s0 for the whole run.
-        r_crit = rs0
+        r_eh_vstart = rs0
         v_eh_back, r_eh_back = np.array([v_start, v2]), np.array([rs0, rs0])
     else:
         v_eh_back, r_eh_back = _integrate_event_horizon_backward(
             v2, rs1, v_start, m0, m1, v1, v2)
-        r_crit = float(r_eh_back[0])
+        r_eh_vstart = float(r_eh_back[0])
 
     v_grid = np.linspace(v_start, v_end, n_steps + 1)
     r_ah = vaidya_mass_of_v(v_grid, m0, m1, v1, v2) * 2.0
@@ -1791,7 +1791,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
                 v1_rs0=v1_rs0_summary, v2_rs0=v2_rs0_summary,
                 duration_rs0=duration_rs0,
                 v_start_rs0=v_start_rs0_summary, v_end_rs0=v_end_rs0_summary,
-                r_crit_over_rs0=r_crit/rs0, n_steps=n_steps,
+                r_eh_vstart_over_rs0=r_eh_vstart/rs0, n_steps=n_steps,
                 light_crossing_time_rs0_s=rs0/c, n_points=v_grid.size,
                 warnings=warnings, model_version=MODEL_VERSION, build_id=BUILD_ID,
             ),
@@ -1801,7 +1801,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     # geodesic-family visualisation panel and as an accuracy diagnostic
     # against the (now primary) backward result -- see the docstring.
     if no_accretion:
-        r_crit_shooting = rs0
+        r_eh_vstart_shooting = rs0
         residual_rs0 = 0.0
     else:
         lo = 0.5 * rs0
@@ -1835,10 +1835,10 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
                 hi = mid
             else:
                 lo = mid
-        r_crit_shooting = 0.5 * (lo + hi)
+        r_eh_vstart_shooting = 0.5 * (lo + hi)
         residual_rs0 = (hi - lo) / rs0
 
-    shooting_vs_backward_rs0 = abs(r_crit_shooting - r_crit) / rs0
+    shooting_vs_backward_rs0 = abs(r_eh_vstart_shooting - r_eh_vstart) / rs0
 
     # shooting_vs_backward_rs0 above compares ONLY the two constructions'
     # STARTING radius at v_start. That is a legitimate comparison as far as
@@ -1863,7 +1863,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         shooting_vs_backward_curve_max_rs0 = 0.0
     else:
         v_shoot, r_shoot = _integrate_null_geodesic(
-            v_start, r_crit_shooting, v_end, m0, m1, v1, v2)
+            v_start, r_eh_vstart_shooting, v_end, m0, m1, v1, v2)
         shooting_reached_v2 = bool(v_shoot[-1] >= v2 - 1.0e-9 * rs0)
         if shooting_reached_v2:
             r_shoot_at_v2 = float(np.interp(v2, v_shoot, r_shoot))
@@ -1899,7 +1899,7 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
     # --- a family of nearby geodesics, for the "how the horizon is found"
     # panel: some inside the critical radius (fall in), some outside
     # (escape), forward-integrated and centred on the primary (backward-
-    # derived) r_crit -- so the panel is correct even in the parameter
+    # derived) r_eh_vstart -- so the panel is correct even in the parameter
     # regimes where the forward-shooting search itself (above) is not.
     # The offset needed to reach a *visibly* distinct fate by v_end
     # depends on the local expansion rate of the geometry near the
@@ -1938,15 +1938,15 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         # curve, and plot_bh.plot_horizons never reads `escapes` for a
         # member flagged is_primary_backward_curve for exactly this
         # reason.
-        family.append(dict(r_i_over_rs0=r_crit / rs0, v=v_eh_back_full.copy(),
+        family.append(dict(r_i_over_rs0=r_eh_vstart / rs0, v=v_eh_back_full.copy(),
                            r=r_eh_back_full.copy(), escapes=None,
                            is_primary_backward_curve=True))
     else:
         spread = max(20.0 * residual_rs0 * rs0, 1.0e-6 * rs0)
         for _ in range(60):
-            _, r_hi = _integrate_null_geodesic(v_start, r_crit + spread, v_end,
+            _, r_hi = _integrate_null_geodesic(v_start, r_eh_vstart + spread, v_end,
                                                m0, m1, v1, v2)
-            _, r_lo = _integrate_null_geodesic(v_start, max(r_crit - spread,
+            _, r_lo = _integrate_null_geodesic(v_start, max(r_eh_vstart - spread,
                                                              1.0e-6 * rs0),
                                                v_end, m0, m1, v1, v2)
             if r_hi[-1] > 2.0 * rs1 and r_lo[-1] < 0.5 * rs0:
@@ -1959,10 +1959,10 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             # The middle entry of an odd-count linspace lands exactly on
             # offset zero (the CLI default, --n_family 9, is odd) -- i.e.
             # it would be a forward-integrated trial starting from exactly
-            # r_crit, subject to the very forward-shooting instability the
+            # r_eh_vstart, subject to the very forward-shooting instability the
             # backward construction exists to avoid. Rather than nudging
             # it to a small nonzero offset (which broke the family's own
-            # "symmetric about r_crit" invariant: an odd count of
+            # "symmetric about r_eh_vstart" invariant: an odd count of
             # forward-trial offsets straddling a nudged, off-centre point
             # is not symmetric), the exact-zero entry is dropped outright,
             # and the stable, exact primary backward curve is appended
@@ -1971,18 +1971,18 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             # pairwise symmetry among the remaining forward trials
             # (dropping linspace's own middle sample leaves the rest
             # symmetric by construction), and never forward-integrating
-            # from exactly r_crit at all.
+            # from exactly r_eh_vstart at all.
             mid = n_family // 2
             offsets = np.delete(offsets, mid)
         for off in offsets:
-            r_i = r_crit + off
+            r_i = r_eh_vstart + off
             v_f, r_f = _integrate_null_geodesic(v_start, max(r_i, 1.0e-3 * rs0),
                                                 v_end, m0, m1, v1, v2)
             family.append(dict(r_i_over_rs0=r_i / rs0, v=v_f, r=r_f,
                                escapes=bool(r_f[-1] > rs1),
                                is_primary_backward_curve=False))
         if n_family % 2 == 1:
-            family.append(dict(r_i_over_rs0=r_crit / rs0,
+            family.append(dict(r_i_over_rs0=r_eh_vstart / rs0,
                                v=v_eh_back_full.copy(), r=r_eh_back_full.copy(),
                                escapes=None, is_primary_backward_curve=True))
 
@@ -1999,12 +1999,12 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
         warnings.append(
             f"primary result: backward integration from the exact "
             f"r(v2)=r_s1 boundary condition, giving "
-            f"r_crit/r_s0 = {r_crit/rs0:.8f} at v_start -- the physical "
+            f"r_eh_vstart/r_s0 = {r_eh_vstart/rs0:.8f} at v_start -- the physical "
             "early-time displacement of the event horizon above r_s0, "
             "not a truncation error (see the docstring / help file). "
             f"diagnostic only: a forward bisection search (unused for "
-            f"the reported curve) located r_crit_shooting/r_s0 = "
-            f"{r_crit_shooting/rs0:.8f} with bracket width residual_rs0 "
+            f"the reported curve) located r_eh_vstart_shooting/r_s0 = "
+            f"{r_eh_vstart_shooting/rs0:.8f} with bracket width residual_rs0 "
             f"= {residual_rs0:.2e} r_s0 ({bisect_iters} iterations) -- "
             f"the two constructions' STARTING radii differ by "
             f"{shooting_vs_backward_rs0:.2e} r_s0 here; see "
@@ -2045,8 +2045,8 @@ def vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=5.0, duration_rs0=10.0,
             v1_rs0=v1_rs0_summary, v2_rs0=v2_rs0_summary,
             duration_rs0=duration_rs0,
             v_start_rs0=v_start_rs0_summary, v_end_rs0=v_end_rs0_summary,
-            r_crit_over_rs0=r_crit / rs0,
-            r_crit_shooting_over_rs0=r_crit_shooting / rs0,
+            r_eh_vstart_over_rs0=r_eh_vstart / rs0,
+            r_eh_vstart_shooting_over_rs0=r_eh_vstart_shooting / rs0,
             shooting_vs_backward_rs0=shooting_vs_backward_rs0,
             shooting_reached_v2=shooting_reached_v2,
             shooting_v2_boundary_residual_rs0=shooting_v2_boundary_residual_rs0,

@@ -1250,7 +1250,7 @@ class TestHorizons(unittest.TestCase):
         s = result["summary"]
         np.testing.assert_allclose(result["r_AH"], s["rs0_m"], rtol=1e-12)
         np.testing.assert_allclose(result["r_EH"], s["rs0_m"], rtol=1e-12)
-        self.assertAlmostEqual(s["r_crit_over_rs0"], 1.0, delta=1e-12)
+        self.assertAlmostEqual(s["r_eh_vstart_over_rs0"], 1.0, delta=1e-12)
 
     def test_event_horizon_at_or_above_apparent_horizon(self):
         result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
@@ -1322,14 +1322,14 @@ class TestHorizons(unittest.TestCase):
             min_diff_rs0 = float(np.min((result["r_EH"] - result["r_AH"]) / s["rs0_m"]))
             self.assertGreaterEqual(min_diff_rs0, -1.0e-9,
                                      msg=f"bisect_iters={iters}")
-            curves[iters] = result["summary"]["r_crit_over_rs0"]
+            curves[iters] = result["summary"]["r_eh_vstart_over_rs0"]
         r_crit_values = list(curves.values())
         for v in r_crit_values[1:]:
             self.assertAlmostEqual(v, r_crit_values[0], delta=1e-9)
 
     def test_shooting_vs_backward_diagnostic_fields_are_reported(self):
         # The new secondary diagnostics introduced by the backward-
-        # integration architecture change: r_crit_shooting_over_rs0 (the
+        # integration architecture change: r_eh_vstart_shooting_over_rs0 (the
         # old forward-shooting answer, kept only as a diagnostic) and
         # shooting_vs_backward_rs0 (their actual difference), which is the
         # genuinely meaningful accuracy comparison -- unlike residual_rs0,
@@ -1337,13 +1337,13 @@ class TestHorizons(unittest.TestCase):
         # Audit round 1, Codex P1-1/P2-1, Copilot P1-5).
         result = phys.vaidya_horizons(m0_msun=10.0, m1_msun=10.5, bisect_iters=15)
         s = result["summary"]
-        for key in ("r_crit_shooting_over_rs0", "shooting_vs_backward_rs0",
-                    "r_crit_over_rs0", "residual_rs0"):
+        for key in ("r_eh_vstart_shooting_over_rs0", "shooting_vs_backward_rs0",
+                    "r_eh_vstart_over_rs0", "residual_rs0"):
             self.assertIn(key, s)
             self.assertTrue(math.isfinite(s[key]))
         self.assertAlmostEqual(
             s["shooting_vs_backward_rs0"],
-            abs(s["r_crit_shooting_over_rs0"] - s["r_crit_over_rs0"]),
+            abs(s["r_eh_vstart_shooting_over_rs0"] - s["r_eh_vstart_over_rs0"]),
             delta=1e-12)
         # At only 15 bisect_iters the forward-shooting bracket is coarse
         # (see test_low_bisect_iters_does_not_produce_false_event_horizon
@@ -1417,8 +1417,8 @@ class TestHorizons(unittest.TestCase):
         finally:
             phys._integrate_event_horizon_backward = original
 
-    def test_summary_r_crit_matches_exported_curve_first_point(self):
-        # Reviewer Audit round 2, Gemini finding 1: r_crit_over_rs0 in the
+    def test_summary_event_horizon_start_matches_exported_curve_first_point(self):
+        # Reviewer Audit round 2, Gemini finding 1: r_eh_vstart_over_rs0 in the
         # summary is read directly from r_eh_back[0] (the raw backward
         # integrator's first array element), while the exported r_EH grid
         # is built by np.interp(v_grid, v_eh_back, r_eh_back, ...)
@@ -1429,7 +1429,7 @@ class TestHorizons(unittest.TestCase):
         result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, n_steps=300,
                                        bisect_iters=40)
         s = result["summary"]
-        self.assertEqual(s["r_crit_over_rs0"], result["r_EH"][0] / s["rs0_m"])
+        self.assertEqual(s["r_eh_vstart_over_rs0"], result["r_EH"][0] / s["rs0_m"])
 
     def test_bisection_residual_shrinks_with_more_iterations(self):
         residuals = []
@@ -1451,15 +1451,15 @@ class TestHorizons(unittest.TestCase):
         result_near = phys.vaidya_horizons(m0_msun=8.0, m1_msun=8.0 * (1 + 1e-6),
                                             n_steps=200, bisect_iters=60,
                                             duration_rs0=0.5, v1_rs0=5.0)
-        self.assertAlmostEqual(result_exact["summary"]["r_crit_over_rs0"],
-                                result_near["summary"]["r_crit_over_rs0"], delta=1e-4)
+        self.assertAlmostEqual(result_exact["summary"]["r_eh_vstart_over_rs0"],
+                                result_near["summary"]["r_eh_vstart_over_rs0"], delta=1e-4)
 
     def test_larger_mass_ratio_needs_bracket_search_but_still_converges(self):
         result = phys.vaidya_horizons(m0_msun=2.0, m1_msun=1000.0, n_steps=400,
                                        bisect_iters=50, v_end_margin_rs0=30.0)
         s = result["summary"]
-        self.assertGreater(s["r_crit_over_rs0"], 0.9)
-        self.assertTrue(math.isfinite(s["r_crit_over_rs0"]))
+        self.assertGreater(s["r_eh_vstart_over_rs0"], 0.9)
+        self.assertTrue(math.isfinite(s["r_eh_vstart_over_rs0"]))
 
     def test_brief_vs_long_accretion_both_finite_and_ordered(self):
         for duration in (0.5, 50.0):
@@ -1542,7 +1542,7 @@ class TestHorizons(unittest.TestCase):
         self.assertTrue(f0["is_primary_backward_curve"])
         self.assertIsNone(f0["escapes"])
         self.assertAlmostEqual(f0["r_i_over_rs0"],
-                                result["summary"]["r_crit_over_rs0"], delta=1e-15)
+                                result["summary"]["r_eh_vstart_over_rs0"], delta=1e-15)
         self.assertTrue(np.all(np.isfinite(f0["r"])))
         self.assertTrue(np.all(np.isfinite(f0["v"])))
 
@@ -1573,7 +1573,7 @@ class TestHorizons(unittest.TestCase):
                                            bisect_iters=40, n_family=n_family)
             fam = result["family"]
             self.assertEqual(len(fam), n_family)
-            r_crit_rs0 = result["summary"]["r_crit_over_rs0"]
+            r_crit_rs0 = result["summary"]["r_eh_vstart_over_rs0"]
             primaries = [f for f in fam if f["is_primary_backward_curve"]]
             trials = [f for f in fam if not f["is_primary_backward_curve"]]
             self.assertEqual(len(primaries), 1, msg=f"n_family={n_family}")
@@ -1697,7 +1697,7 @@ class TestHorizons(unittest.TestCase):
         # an rs0-scale RK4 step from an absolute v of order 1e16*rs0 lost
         # or badly quantized the step in float64 arithmetic. Integrating
         # in a v1-shifted coordinate instead (see the docstring) makes
-        # r_crit_over_rs0 -- a v1-independent physical quantity -- exactly
+        # r_eh_vstart_over_rs0 -- a v1-independent physical quantity -- exactly
         # (bit-for-bit) unaffected by v1_rs0's magnitude, across positive
         # and negative offsets spanning 22 orders of magnitude, and every
         # case completes promptly instead of hitting the step cap.
@@ -1705,10 +1705,10 @@ class TestHorizons(unittest.TestCase):
                       v_start_margin_rs0=25.0, v_end_margin_rs0=15.0,
                       n_steps=300, bisect_iters=40)
         baseline = phys.vaidya_horizons(v1_rs0=0.0, **common)
-        r_crit_baseline = baseline["summary"]["r_crit_over_rs0"]
+        r_crit_baseline = baseline["summary"]["r_eh_vstart_over_rs0"]
         for v1_rs0 in (5.0, -5.0, 1.0e6, -1.0e6, 1.0e12, -1.0e12, 1.0e16):
             result = phys.vaidya_horizons(v1_rs0=v1_rs0, **common)
-            self.assertEqual(result["summary"]["r_crit_over_rs0"],
+            self.assertEqual(result["summary"]["r_eh_vstart_over_rs0"],
                               r_crit_baseline, msg=f"v1_rs0={v1_rs0:g}")
             # The exported v grid must still reflect the absolute origin
             # (v/rs0 at v_start equals v1_rs0 - v_start_margin_rs0, up to
@@ -1729,7 +1729,7 @@ class TestHorizons(unittest.TestCase):
         # 300,000-step backward-integration cap.
         result = phys.vaidya_horizons(m0_msun=5.0, m1_msun=10.0, v1_rs0=1.0e16,
                                        n_steps=200, bisect_iters=10, n_family=1)
-        self.assertTrue(math.isfinite(result["summary"]["r_crit_over_rs0"]))
+        self.assertTrue(math.isfinite(result["summary"]["r_eh_vstart_over_rs0"]))
 
     def test_v_eh_raw_fields_are_true_raw_integrator_nodes(self):
         # Audit Round 3, Codex P2-6 reproducer: vaidya_horizons previously
@@ -1828,7 +1828,7 @@ class TestHorizons(unittest.TestCase):
         # Shifting v1_rs0 (with v_start/v_end following along, since they
         # are defined relative to v1/v2) should shift the whole solution
         # rigidly and leave every v-independent physical quantity (here,
-        # the horizon displacement r_crit_over_rs0) unchanged.
+        # the horizon displacement r_eh_vstart_over_rs0) unchanged.
         common = dict(m0_msun=5.0, m1_msun=10.0, duration_rs0=10.0,
                       v_start_margin_rs0=25.0, v_end_margin_rs0=15.0,
                       n_steps=300, bisect_iters=40)
@@ -1837,10 +1837,10 @@ class TestHorizons(unittest.TestCase):
         r_neg = phys.vaidya_horizons(v1_rs0=-5.0, **common)
         for r in (r_pos, r_zero, r_neg):
             self.assertIsInstance(r, dict)
-        self.assertAlmostEqual(r_zero["summary"]["r_crit_over_rs0"],
-                                r_pos["summary"]["r_crit_over_rs0"], delta=1e-9)
-        self.assertAlmostEqual(r_neg["summary"]["r_crit_over_rs0"],
-                                r_pos["summary"]["r_crit_over_rs0"], delta=1e-9)
+        self.assertAlmostEqual(r_zero["summary"]["r_eh_vstart_over_rs0"],
+                                r_pos["summary"]["r_eh_vstart_over_rs0"], delta=1e-9)
+        self.assertAlmostEqual(r_neg["summary"]["r_eh_vstart_over_rs0"],
+                                r_pos["summary"]["r_eh_vstart_over_rs0"], delta=1e-9)
 
     def test_n_steps_bisect_iters_n_family_bounds(self):
         with self.assertRaises(ValueError):
@@ -1888,7 +1888,7 @@ class TestNoAccretionShootingRegression(unittest.TestCase):
             result = phys.vaidya_horizons(m0_msun=8.0, m1_msun=8.0, n_steps=200,
                                            bisect_iters=iters)
             s = result["summary"]
-            self.assertAlmostEqual(s["r_crit_over_rs0"], 1.0, delta=1e-12,
+            self.assertAlmostEqual(s["r_eh_vstart_over_rs0"], 1.0, delta=1e-12,
                                     msg=f"bisect_iters={iters}")
             max_rel_dev = float(np.max(np.abs(result["r_EH"] - s["rs0_m"]))) / s["rs0_m"]
             self.assertLess(max_rel_dev, 1e-9, msg=f"bisect_iters={iters}")
@@ -2442,7 +2442,7 @@ class TestCanonicalHelpFile(unittest.TestCase):
         # distinguishes the real CLI from a page that merely parses.
         commands = self._beat_commands(self.pages[0].read_text(encoding="utf-8"))
         self.assertEqual(len(commands), len(self.MODES), "missing Beat commands")
-        signature = ("-5.7328e-10", "1.8914e+07", "2.2048475", "1.00000145")
+        signature = ("-5.7328e-10", "1.8914e+07", "2.2048475", "1.00000144")
         for mode, command, expected in zip(self.MODES, commands, signature):
             with tempfile.TemporaryDirectory() as folder:
                 parts = shlex.split(command)
@@ -2475,7 +2475,7 @@ class TestCanonicalHelpFile(unittest.TestCase):
             png = base64.b64decode(image, validate=True)
             self.assertTrue(png.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertEqual(png[25], 3, "sample PNG must be 256-color indexed")
-        for token in ("29.53 km", "1.8914e7 g", "2.2048475 ms", "1.00000145"):
+        for token in ("29.53 km", "1.8914e7 g", "2.2048475071338873 ms", "1.0000014475870587"):
             self.assertIn(token, body)
 
     def test_program_does_not_reference_numbered_help_exercises(self):
@@ -2504,9 +2504,18 @@ class TestCanonicalHelpFile(unittest.TestCase):
 
     def test_release_notes_preserve_history_and_build(self):
         notes = (self.DOCS / "BlackHoleSpacetimeVisualizer-ReleaseNotes.html").read_text(encoding="utf-8")
-        self.assertIn(f"{phys.MODEL_VERSION}", notes)
-        self.assertIn(f"{phys.BUILD_ID}", notes)
-        self.assertIn("Previous Release Notes — 1.4.0", notes)
+        current, history = notes.split('<h2>Preserved Release History</h2>', 1)
+        self.assertIn(phys.MODEL_VERSION, current)
+        self.assertIn(phys.BUILD_ID, current)
+        expected = ["Release Status", "Open Bugs", "Major Improvements in This Release",
+                    "Test Suite Growth", "Known Limitations", "Known Minor Maintenance Items",
+                    "Version Identification"]
+        self.assertEqual(re.findall(r"<h2>(.*?)</h2>", current), expected)
+        for tag in ("style", "script", "table"):
+            self.assertNotRegex(notes.lower(), r"<" + tag + r"\b")
+        self.assertEqual(len(re.findall(r"<h1\b", notes)), 1)
+        self.assertIn("Previous Release Notes — 1.4.0", history)
+
 
 
 
@@ -2604,6 +2613,64 @@ class TestInfallConsolePrecision(unittest.TestCase):
                     # Reading the console must recover the original stored
                     # value, rather than a rounded value hiding convergence.
                     self.assertEqual(float(match.group(1)), summary[key])
+
+
+class TestAudit51OutputCorrections(unittest.TestCase):
+    def test_tidal_csv_retains_ratio_and_warnings(self):
+        import driver_bh
+        for mass in (10., 1e-6):
+            with self.subTest(mass=mass), tempfile.TemporaryDirectory() as folder:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = driver_bh.run(mode="tidal", M=mass, n_r=20,
+                                           no_plot=True, csvdir=folder)
+                path = next(Path(folder).glob("bh_tidal_*.csv"))
+                comments, header, rows = read_csv_rows(path)
+                metadata = "".join(comments)
+                match = re.search(r"linearization_ratio = (\S+)", metadata)
+                self.assertIsNotNone(match)
+                expected = 1.8 / (1.01 * phys.schwarzschild_radius(mass))
+                self.assertEqual(float(match.group(1)), expected)
+                self.assertIn("linearization_warning_threshold = 0.001", metadata)
+                for warning in result["summary"]["warnings"]:
+                    self.assertIn("Warning: " + warning, metadata)
+                self.assertEqual("Linearization warning:" in output.getvalue(),
+                                 expected > phys.TIDAL_LINEARIZATION_RATIO_WARN)
+                self.assertEqual(header, ["r_over_rs", "r_m", "a_radial_m_s2", "a_radial_g",
+                                          "a_tangential_m_s2", "a_tangential_g"])
+                self.assertEqual(len(rows), 20)
+
+    def test_horizon_start_radius_has_unambiguous_name_and_full_precision(self):
+        import driver_bh
+        for margin in (5., 30.):
+            with self.subTest(margin=margin), tempfile.TemporaryDirectory() as folder:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    result = driver_bh.run(mode="horizons", v_start_margin_rs0=margin,
+                                           n_steps=200, no_plot=True, csvdir=folder)
+                summary = result["summary"]
+                self.assertNotIn("r_crit_over_rs0", summary)
+                expected = result["r_EH"][0] / summary["rs0_m"]
+                self.assertEqual(summary["r_eh_vstart_over_rs0"], expected)
+                value = re.search(r"Event horizon at v_start: r/r_s0 = (\S+)",
+                                  output.getvalue())
+                self.assertIsNotNone(value)
+                self.assertEqual(float(value.group(1)), expected)
+
+    def test_small_mass_is_identifiable_in_each_mode_csv_filename(self):
+        import driver_bh
+        for mode in phys.MODES:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as folder:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    driver_bh.run(mode=mode, M=1e-6, M0=1e-6, M1=2e-6,
+                                  n_r=10, n_points=20, n_steps=200,
+                                  no_plot=True, csvdir=folder)
+                paths = list(Path(folder).glob("*.csv"))
+                self.assertEqual(len(paths), 1)
+                self.assertIn("1e-06", paths[0].name)
+                self.assertNotIn("0.00Msun", paths[0].name)
+                if mode == "horizons":
+                    self.assertIn("to2e-06Msun", paths[0].name)
 
 
 if __name__ == "__main__":

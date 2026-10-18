@@ -111,10 +111,10 @@ def plot_embedding(result, outdir=None, dpi=150, lw=1.6, figsize=(13.0, 6.2)):
     ax1.set_ylabel(r"$z / r_s$")
     ax1.set_title("Radial profile")
     ax1.grid(True, lw=0.3, alpha=0.5)
-    ax1.legend(fontsize=8, loc="lower right", framealpha=0.9)
-    ax1.text(0.98, 0.97,
+    ax1.legend(fontsize=8, loc="center right", framealpha=0.9)
+    ax1.text(0.30, 0.42,
              "vertical tangent at $r=r_s$: the throat,\nnot a numerical artefact",
-             transform=ax1.transAxes, ha="right", va="top", fontsize=8,
+             transform=ax1.transAxes, ha="left", va="top", fontsize=8,
              bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray",
                        alpha=0.9))
 
@@ -173,7 +173,7 @@ def plot_embedding(result, outdir=None, dpi=150, lw=1.6, figsize=(13.0, 6.2)):
              fontsize=8, bbox=dict(boxstyle="round,pad=0.3", fc="white",
                                    ec="gray", alpha=0.85))
 
-    _finish(fig, outdir, f"bh_embed_{s['m_msun']:.2f}Msun", dpi)
+    _finish(fig, outdir, f"bh_embed_{s['m_msun']:.6g}Msun", dpi)
 
 
 # ----------------------------------------------------------------------
@@ -263,7 +263,7 @@ def plot_tidal(result, compare_rows, separation_m, limit_g,
                            alpha=0.9))
         ax4.legend(fontsize=8, loc="upper right", framealpha=0.85)
 
-    _finish(fig, outdir, f"bh_tidal_{s['m_msun']:.2f}Msun", dpi)
+    _finish(fig, outdir, f"bh_tidal_{s['m_msun']:.6g}Msun", dpi)
 
 
 # ----------------------------------------------------------------------
@@ -336,7 +336,7 @@ def plot_infall(result, outdir=None, dpi=150, lw=1.7, figsize=(12.5, 9.2)):
     ax4.grid(True, which="both", lw=0.3, alpha=0.5)
     ax4.legend(fontsize=8, loc="upper right", framealpha=0.85)
 
-    _finish(fig, outdir, f"bh_infall_{s['m_msun']:.2f}Msun", dpi)
+    _finish(fig, outdir, f"bh_infall_{s['m_msun']:.6g}Msun", dpi)
 
 
 # ----------------------------------------------------------------------
@@ -386,4 +386,4 @@ def plot_horizons(result, outdir=None, dpi=150, lw=2.0, figsize=(9.0, 5.8)):
                  bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow", ec="gray",
                            alpha=0.9))
 
-    _finish(fig, outdir, f"bh_horizons_{s['m0_msun']:.2f}to{s['m1_msun']:.2f}Msun", dpi)
+    _finish(fig, outdir, f"bh_horizons_{s['m0_msun']:.6g}to{s['m1_msun']:.6g}Msun", dpi)

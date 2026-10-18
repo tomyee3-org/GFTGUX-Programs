@@ -212,6 +212,8 @@ def _print_tidal_summary(s):
     print(f"  Test separation     : {s['separation_m']:.3g}  m")
     print(f"  linearization_ratio : {s['linearization_ratio']:.6g}"
           f"  (warning if > {phys.TIDAL_LINEARIZATION_RATIO_WARN:g})")
+    if s['linearization_ratio'] > phys.TIDAL_LINEARIZATION_RATIO_WARN:
+        print("  Linearization warning: separation is not small compared with the sampled radius.")
     print(f"  Range plotted       : {s['r_min_rs']:.3g} - {s['r_max_rs']:.3g}  r_s"
           f"  ({s['n_points']:,} points)")
     print(SEP)
@@ -274,7 +276,7 @@ def _print_horizons_summary(s):
     print(f"  v range integrated  : {s['v_start_rs0']:.3g}  to  {s['v_end_rs0']:.3g}  r_s0")
     print(f"  r_s0/c              : {s['light_crossing_time_rs0_s']*1e6:.4g}  microseconds")
     print(SEP)
-    print(f"  Event horizon at v_start: r/r_s0 = {s['r_crit_over_rs0']:.8f}")
+    print(f"  Event horizon at v_start: r/r_s0 = {s['r_eh_vstart_over_rs0']:.17g}")
     no_accretion = (s["m0_msun"] == s["m1_msun"])
     if no_accretion:
         print("  Apparent horizon r_AH(v) = 2M(v): local, reads the mass function")
@@ -314,7 +316,7 @@ def _run_embed(kw, outdir, csvdir, dpi, lw):
         rows = [[f"{r/s['rs_m']:.17g}", f"{r:.17g}", f"{z:.17g}", f"{d:.17g}", f"{k:.17g}"]
                 for r, z, d, k in zip(result["r"], result["z"],
                                        result["proper_radial_distance"], result["K"])]
-        _write_csv(csvdir, f"bh_embed_{s['m_msun']:.2f}Msun",
+        _write_csv(csvdir, f"bh_embed_{s['m_msun']:.6g}Msun",
                    ["r_over_rs", "r", "z", "proper_radial_distance",
                     "gaussian_curvature_K_per_m2"],
                    rows,
@@ -371,12 +373,15 @@ def _run_tidal(kw, outdir, csvdir, dpi, lw):
                  f"{at:.17g}", f"{at/phys.g0:.17g}"]
                 for r, ar, at in zip(result["r"], result["a_radial"],
                                      result["a_tangential"])]
-        _write_csv(csvdir, f"bh_tidal_{s['m_msun']:.2f}Msun",
+        _write_csv(csvdir, f"bh_tidal_{s['m_msun']:.6g}Msun",
                    ["r_over_rs", "r_m", "a_radial_m_s2", "a_radial_g",
                     "a_tangential_m_s2", "a_tangential_g"], rows,
                    comments=["radial (stretching) and tangential (compressing) "
                              "tidal acceleration vs. radius"]
-                   + _provenance("tidal", kw))
+                   + _provenance("tidal", kw)
+                   + [f"linearization_ratio = {s['linearization_ratio']:.17g}",
+                      f"linearization_warning_threshold = {phys.TIDAL_LINEARIZATION_RATIO_WARN:.17g}"]
+                   + [f"Warning: {note}" for note in s["warnings"]])
         if compare_rows:
             crows = [[f"{r['m_msun']:.17g}", f"{r['rs_km']:.17g}",
                       f"{r['a_radial_horizon_g']:.17g}", f"{r['r_crit_over_rs']:.17g}",
@@ -413,7 +418,7 @@ def _run_infall(kw, outdir, csvdir, dpi, lw):
                 for tau, t, r, v, z, d in zip(
                     result["tau"], result["t"], result["r"],
                     result["v_local"], result["redshift"], result["dtau_dt"])]
-        _write_csv(csvdir, f"bh_infall_{s['m_msun']:.2f}Msun",
+        _write_csv(csvdir, f"bh_infall_{s['m_msun']:.6g}Msun",
                    ["tau_ms", "t_coord_ms", "r_over_rs", "v_local_over_c",
                     "redshift_ratio", "dtau_dt"], rows,
                    comments=["radial free fall from rest: proper time, "
@@ -441,7 +446,7 @@ def _run_horizons(kw, outdir, csvdir, dpi, lw):
                  f"{rah/s['rs0_m']:.17g}", f"{reh/s['rs0_m']:.17g}",
                  f"{rah:.17g}", f"{reh:.17g}"]
                 for v, rah, reh in zip(result["v"], result["r_AH"], result["r_EH"])]
-        _write_csv(csvdir, f"bh_horizons_{s['m0_msun']:.2f}to{s['m1_msun']:.2f}Msun",
+        _write_csv(csvdir, f"bh_horizons_{s['m0_msun']:.6g}to{s['m1_msun']:.6g}Msun",
                    ["v_over_rs0", "v_m", "r_AH_over_rs0", "r_EH_over_rs0",
                     "r_AH_m", "r_EH_m"], rows,
                    comments=["apparent horizon r_AH(v) = 2M(v) vs. the "
