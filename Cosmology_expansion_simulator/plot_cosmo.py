@@ -42,10 +42,103 @@ def _save_and_show(fig, outdir, prefix, dpi):
 # ======================================================================
 # Mode: evolve
 # ======================================================================
-def plot_evolve(result, outdir=None, dpi=150, lw=1.6, figsize=(13, 10)):
+def _big_rip_continuation(result):
+    """Plot-only future of a certified constant-w phantom expanding branch.
+
+    No infinity is integrated by RK4 and no returned trajectory is modified.
+    Put m=-3(1+w)/2>0 and x=(a_end/a)**m. Then the remaining cosmic time is
+    a regular integral over 0<=x<=1, with x=0 representing a=infinity:
+
+      dt/(-dx) = a_end**(-m)/(m H0 sqrt(Ode)) /
+        sqrt(1 + cm*x**(2+3/m) + cr*x**(2+4/m) + ck*x**(2+2/m)).
+
+    ci=(Oi/Ode)*a_end**(-ni-2m), ni=3,4,2. Thus matter, radiation and
+    curvature are retained, unlike the summary's DE-only time estimate.
+    The absolute time inherits the existing trajectory's numerical error.
+    Only an a_max stop at/after today is extended; a genuine time stop,
+    recollapse, unresolved fate or evolving CPL equation of state is not.
+    """
+    s = result["summary"]
+    if (s.get("fate_status") != "big_rip" or s.get("stop_reason") != "a_max"
+            or s["wa"] != 0.0 or s["w0"] >= -1.0 or s["omega_de"] <= 0.0):
+        return None
+    a_end, t_end = float(result["a"][-1]), float(result["t_gyr"][-1])
+    if not np.isfinite(a_end) or a_end < 1.0 or not np.isfinite(t_end):
+        return None
+    m = -1.5 * (1.0 + s["w0"])
+    log_a = np.log(a_end)
+    # Show at least six further decades when possible, approaching within
+    # ~0.1% of the remaining lifetime for ordinary phantom parameters.
+    # Stay within float64 and the engine's |ln rho_DE/rho_DE0|<300 policy.
+    log_span = min(max(6.0 * np.log(10.0), np.log(1000.0) / m),
+                   680.0 - log_a, 149.0 / m - log_a)
+    if log_span <= 0.0:
+        return None
+    x = np.exp(-m * np.linspace(0.0, log_span, 241))
+    powers = 2.0 + np.array([3.0, 4.0, 2.0]) / m
+    densities = np.array([s["omega_m"], s["omega_r"], s["omega_k"]])
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        coeff = np.sign(densities) * np.exp(
+            np.log(np.abs(densities)) - np.log(s["omega_de"])
+            - (np.array([3.0, 4.0, 2.0]) + 2.0 * m) * log_a)
+        time_scale = (s["H0_inv_gyr"] * np.exp(-m * log_a)
+                      / (m * np.sqrt(s["omega_de"])))
+    if not np.all(np.isfinite(coeff)) or not np.isfinite(time_scale):
+        return None
+
+    # Integrate on short log-spaced intervals; include the final interval
+    # down to x=0 for the finite asymptote, never for a plotted data point.
+    edges = np.r_[x, 0.0]
+    lo, hi = edges[1:], edges[:-1]
+
+    def quadrature(order):
+        nodes, weights = np.polynomial.legendre.leggauss(order)
+        xx = lo[:, None] + 0.5 * (hi - lo)[:, None] * (nodes + 1.0)
+        terms = coeff[:, None, None] * xx[None, :, :] ** powers[:, None, None]
+        factor = 1.0 + np.sum(terms, axis=0)
+        if np.any(~np.isfinite(factor)) or np.any(factor <= 0.0):
+            return None
+        return time_scale * 0.5 * (hi - lo) * (1.0 / np.sqrt(factor) @ weights)
+
+    intervals = quadrature(64)
+    check = quadrature(32)
+    if intervals is None or check is None:
+        return None
+    # An extreme near-loitering model may need adaptive quadrature. Keep
+    # its ordinary plot rather than draw an uncertified extrapolation.
+    if (not np.all(np.isfinite(intervals)) or
+            not np.allclose(intervals, check, rtol=1e-7, atol=0.0)):
+        return None
+    remaining = float(np.sum(intervals))
+    t_rip = t_end + remaining
+    if not np.isfinite(t_rip) or t_rip <= t_end:
+        return None  # remaining lifetime is below this clock's resolution
+    tt = t_end + np.r_[0.0, np.cumsum(intervals[:-1])]
+    aa = np.exp(log_a - np.log(x) / m)
+    terms = coeff[:, None] * x[None, :] ** powers[:, None]
+    factor = 1.0 + np.sum(terms, axis=0)
+    hh = s["H0_kms_mpc"] * np.sqrt(s["omega_de"] * factor) * np.exp(
+        m * np.log(aa))
+    qq = 0.5 * (terms[0] + 2.0 * terms[1] + 1.0 + 3.0 * s["w0"]) / factor
+    # Joining at the actual last sample avoids a one-ULP gap in the curve.
+    aa[0] = a_end
+    hh[0] = result["H_kms_mpc"][-1]
+    qq[0] = result["q"][-1]
+    if not np.all(np.isfinite(hh)):
+        return None
+    visible = tt < t_rip
+    if np.count_nonzero(visible) < 2:
+        return None
+    return dict(t_gyr=tt[visible], a=aa[visible], H_kms_mpc=hh[visible],
+                q=qq[visible], t_rip_gyr=t_rip)
+
+
+def plot_evolve(result, outdir=None, dpi=150, lw=1.6, figsize=(13, 10),
+                extend_big_rip=True):
     s = result["summary"]
     t, a, H, q = result["t_gyr"], result["a"], result["H_kms_mpc"], result["q"]
     Om, Or, Ok, Ode = result["Om"], result["Or"], result["Ok"], result["Ode"]
+    future = _big_rip_continuation(result) if extend_big_rip else None
 
     fig, axes = plt.subplots(2, 2, figsize=figsize, constrained_layout=True)
     (ax1, ax2), (ax3, ax4) = axes
@@ -180,8 +273,40 @@ def plot_evolve(result, outdir=None, dpi=150, lw=1.6, figsize=(13, 10)):
         ann.append(f"accel. transition at z={s['z_accel']:.3g}")
     if s["turnaround"] is not None:
         ann.append(f"recollapses at a={s['turnaround']['a_turn']:.3g}")
-    if s["big_rip_gyr"] is not None:
-        ann.append(f"Big Rip at t={s['big_rip_gyr']:.3g} Gyr")
+    if future is not None:
+        tr = future["t_rip_gyr"]
+        for ax, values, color in ((ax1, future["a"], C_A),
+                                  (ax2, future["H_kms_mpc"], C_H),
+                                  (ax4, future["q"], C_Q)):
+            ax.plot(future["t_gyr"], values, color=color, lw=lw, ls="--",
+                    label="future continuation (plot only)")
+            ax.axvline(tr, color="crimson", lw=1.0, ls=":",
+                       label="Big Rip" if ax is ax1 else None)
+            span = tr - float(t[0])
+            ax.set_xlim(float(t[0]) - 0.03 * span, tr + 0.05 * span)
+        ax1.plot(t[-1], a[-1], "o", color=C_A, ms=4)
+        ax1.annotate(r"$a\to\infty$", xy=(tr, 0.99),
+                     xytext=(0.76, 0.80), xycoords=("data", "axes fraction"),
+                     textcoords="axes fraction", ha="center", fontsize=10,
+                     arrowprops=dict(arrowstyle="->", color=C_A))
+        ax1.legend(fontsize=7, loc="lower right")
+        ax2.legend(fontsize=7, loc="upper right")
+        ax4.legend(fontsize=7, loc="upper right")
+        clock = "t" if s["age_today_gyr"] is not None else "run time"
+        ann.append(f"Big Rip (full model): {clock} ~ {tr:.4g} Gyr")
+        fig.supxlabel(
+            f"Solid curves: numerical run to a={a[-1]:g} (dot). "
+            "Dashed: same-model future, plotted only.\n"
+            "Dotted red line: finite-time limit as a tends to infinity; "
+            "not a simulated point.", fontsize=8)
+        if s["age_today_gyr"] is None:
+            for ax in (ax1, ax2, ax4):
+                ax.set_xlabel(r"Time since $a_i$ [Gyr]")
+        print(f"[plot_cosmo] Big Rip (full Friedmann continuation): "
+              f"{clock} ~ {tr:.6g} Gyr; "
+              "dashed future is plot-only, not additional CSV data.")
+    elif s["big_rip_gyr"] is not None:
+        ann.append(f"DE-only Big Rip estimate: t ~ {s['big_rip_gyr']:.3g} Gyr")
     ax1.text(0.03, 0.97, "\n".join(ann), transform=ax1.transAxes, ha="left", va="top",
              fontsize=7.5, bbox=dict(boxstyle="round,pad=0.3", fc="lightyellow",
                                       ec="gray", alpha=0.9))
@@ -197,7 +322,7 @@ def plot_compare(names, results, outdir=None, dpi=150, lw=1.4, figsize=(13, 10))
     (ax1, ax2), (ax3, ax4) = axes
     colors = plt.cm.tab10(np.linspace(0, 1, max(len(names), 2)))
 
-    ages, age_labels, age_colors = [], [], []
+    ages, age_labels, age_colors, missing_ages = [], [], [], []
     for name, r, col in zip(names, results, colors):
         s = r["summary"]
         label = f"{name}"
@@ -208,8 +333,16 @@ def plot_compare(names, results, outdir=None, dpi=150, lw=1.4, figsize=(13, 10))
         ax4.plot(r["a"], r["Ode"], color=col, lw=lw, label=label)
 
         ages.append(s["age_today_gyr"] if s["age_today_gyr"] is not None else 0.0)
-        age_labels.append(name if s["age_today_gyr"] is not None else f"{name}*")
+        age_labels.append(name)
         age_colors.append(col)
+        if s["age_today_gyr"] is None:
+            if s.get("past_status") == "past_eternal":
+                reason = "past-eternal\n(no finite age)"
+            elif s.get("elapsed_ai_to_today_gyr") is None:
+                reason = "$a=1$ not reached"
+            else:
+                reason = "age unavailable"
+            missing_ages.append((len(ages) - 1, reason))
 
     ax1.axhline(1.0, color="k", lw=0.5, ls=":")
     ax1.set_yscale("log")
@@ -230,12 +363,14 @@ def plot_compare(names, results, outdir=None, dpi=150, lw=1.4, figsize=(13, 10))
     ax2.legend(fontsize=7.5, loc="upper left")
     ax2.grid(True, lw=0.3, alpha=0.5)
 
-    bars = ax3.bar(age_labels, ages, color=age_colors)
-    for lab, age in zip(age_labels, ages):
-        if lab.endswith("*"):
-            i = age_labels.index(lab)
-            bars[i].set_hatch("//")
-    ax3.set_ylabel("Age today [Gyr]  (* = never reaches $a=1$)")
+    ax3.bar(age_labels, ages, color=age_colors)
+    for i, reason in missing_ages:
+        # A cross and a reason replace a numeric age; zero is only the
+        # plotting baseline and must not look like a measured zero age.
+        ax3.plot(i, 0, "x", color=age_colors[i], ms=7, clip_on=False)
+        ax3.text(i, 0.04, reason, transform=ax3.get_xaxis_transform(),
+                 ha="center", va="bottom", fontsize=7)
+    ax3.set_ylabel("Age today [Gyr]")
     ax3.set_title("Age of the universe by cosmology")
     ax3.tick_params(axis="x", labelrotation=30)
     ax3.grid(True, lw=0.3, alpha=0.5, axis="y")

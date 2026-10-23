@@ -1980,15 +1980,30 @@ class TestCanonicalHelpFile(unittest.TestCase):
                        (p / f"{title}.html").exists() or
                        (p != cls.module_dir and p.is_dir())), None)
         if folder is None:
-            raise unittest.SkipTest("Neither current tutorial Help is present")
+            raise unittest.SkipTest("The canonical Help is not present")
         cls.docs = folder
         cls.help_paths = [folder / f"{title}.html"]
         cls.guide = folder / "SampleOutputs" / f"{title}-SampleOutputs_Guide.html"
 
     @staticmethod
     def _commands(text):
-        return [html.unescape(x).strip() for x in
-                re.findall(r"<pre><code>(.*?)</code></pre>", text, re.S)]
+        # Both bare <pre> and <pre><code> are used by the merged Help.
+        commands = []
+        for block in re.findall(r"<pre\b[^>]*>(.*?)</pre>", text, re.S | re.I):
+            plain = html.unescape(re.sub(r"<[^>]+>", "", block))
+            for line in plain.splitlines():
+                line = line.strip()
+                if line.startswith("python main.py "):
+                    commands.append(line)
+        return commands
+
+    @staticmethod
+    def _model_command(command):
+        argv = shlex.split(command)
+        if "--outdir" in argv:
+            i = argv.index("--outdir")
+            del argv[i:i+2]
+        return tuple(argv)
 
     def test_single_canonical_help_file_is_present(self):
         self.assertEqual([p.name for p in self.help_paths], ["CosmologyExpansionSimulator.html"])
@@ -2001,23 +2016,29 @@ class TestCanonicalHelpFile(unittest.TestCase):
             self.assertIn(phys.MODEL_VERSION, text, path.name)
             self.assertIn(phys.BUILD_ID, text, path.name)
 
-    def test_four_beat_commands_match_guide(self):
-        guide = self.guide.read_text(encoding="utf-8")
-        expected = self._commands(guide)
-        self.assertEqual(len(expected), 4)
-        self.assertEqual(len(set(expected)), 4)
-        for path in self.help_paths:
-            text = path.read_text(encoding="utf-8")
-            for beat, cmd in enumerate(expected):
-                section = re.search(rf'<section id="b{beat}">(.*?)</section>',
-                                    text, re.S)
-                self.assertIsNotNone(section, f"Beat {beat} missing in {path.name}")
-                self.assertEqual(self._commands(section.group(1)), [cmd])
+    def test_three_beats_and_six_worked_commands_match_guide(self):
+        text = self.help_paths[0].read_text(encoding="utf-8")
+        sections = re.findall(r'<section id="(b\d+)">(.*?)</section>', text, re.S)
+        self.assertEqual([name for name, _ in sections], ["b0", "b1", "b2"])
+        commands_by_beat = [self._commands(body) for _, body in sections]
+        self.assertEqual([len(x) for x in commands_by_beat], [4, 1, 1])
+        help_commands = {self._model_command(c) for group in commands_by_beat for c in group}
+        self.assertEqual(len(help_commands), 6)
+        guide_commands = self._commands(self.guide.read_text(encoding="utf-8"))
+        self.assertEqual(len(guide_commands), 4)
+        selected = {self._model_command(c) for c in guide_commands}
+        self.assertEqual(len(selected), 4)
+        self.assertTrue(selected <= help_commands)
+        for beat, commands in enumerate(commands_by_beat):
+            self.assertTrue(any(self._model_command(c) in selected for c in commands),
+                            f"Guide has no worked example from Beat {beat}")
 
     def test_every_documented_command_is_accepted_by_cli(self):
         import main as entry
         for path in (*self.help_paths, self.guide):
-            for cmd in self._commands(path.read_text(encoding="utf-8")):
+            commands = self._commands(path.read_text(encoding="utf-8"))
+            self.assertTrue(commands, f"No worked commands extracted: {path.name}")
+            for cmd in commands:
                 argv = shlex.split(cmd)
                 self.assertEqual(argv[:2], ["python", "main.py"])
                 with self.subTest(path=path.name, command=cmd):

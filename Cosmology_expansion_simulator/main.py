@@ -126,7 +126,10 @@ def parse_args():
     g.add_argument("--a_max", type=float, default=5.0, metavar="A",
                    help="stop the forward integration at this scale "
                         "factor, unless a recollapse or --t_max intervenes "
-                        "first")
+                        "first; evolve plots add a labeled future "
+                        "continuation for confirmed constant-w Big Rip "
+                        "models (unless --t_max is supplied), without "
+                        "extending the returned data or CSV")
     g.add_argument("--t_max", type=float, default=None, metavar="GYR",
                    help="also stop the integration at this cosmic time "
                         "[Gyr] if reached before --a_max (default: no "

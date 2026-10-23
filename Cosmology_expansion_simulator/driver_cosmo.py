@@ -230,10 +230,10 @@ def _print_evolve_summary(s):
     if s.get("past_status") == "past_eternal":
         print("  Age today (a=1)       : UNDEFINED -- this model is "
               "PAST-ETERNAL, not a finite-age Big Bang (see warnings)")
-        print(f"  Elapsed a_i -> today  : {_fmt(s.get('elapsed_ai_to_today_gyr'))}"
+        print(f"  Elapsed a_i -> today  : {_fmt(s.get('elapsed_ai_to_today_gyr'), '{:.17g}')}"
               "  Gyr  (a_i-dependent bookkeeping only, NOT a physical age)")
     else:
-        print(f"  Age today (a=1)       : {_fmt(s['age_today_gyr'])}  Gyr")
+        print(f"  Age today (a=1)       : {_fmt(s['age_today_gyr'], '{:.17g}')}  Gyr")
     print(f"  q0 (deceleration)     : {_fmt(s['q0'])}")
     print(f"  Matter-radiation eq.  : a_eq={_fmt(s['a_eq_rm'])}, z_eq={_fmt(s['z_eq_rm'])}")
     print(f"  Matter-DE equality    : a_eq={_fmt(s['a_eq_mde'])}, z_eq={_fmt(s['z_eq_mde'])}"
@@ -242,26 +242,33 @@ def _print_evolve_summary(s):
           + _extra_crossings_suffix(s.get("a_accel_crossings")))
     if s["turnaround"] is not None:
         ta = s["turnaround"]
-        print(f"  TURNAROUND (recollapse): a_turn={ta['a_turn']:.5g}, "
-              f"t_turn={ta['t_turn_gyr']:.4g} Gyr")
+        print(f"  TURNAROUND (recollapse): a_turn={ta['a_turn']:.17g}, "
+              f"t_turn={ta['t_turn_gyr']:.17g} Gyr")
         if s["total_lifetime_gyr"] is not None:
             print(f"  Estimated total lifetime (Big Bang to Big Crunch): "
-                  f"{s['total_lifetime_gyr']:.4g} Gyr (the factor of two is "
+                  f"{s['total_lifetime_gyr']:.17g} Gyr (the factor of two is "
                   "exact by time-reversal symmetry; t_turn itself is a "
                   "numerical estimate)")
     if s["big_rip_gyr"] is not None:
-        print(f"  Estimated Big Rip time: {s['big_rip_gyr']:.4g} Gyr "
+        print(f"  DE-only Big Rip estimate: {s['big_rip_gyr']:.4g} Gyr "
               f"(i.e. {s['big_rip_gyr'] - (s['age_today_gyr'] or 0):.4g} Gyr from today)")
     elif s.get("big_rip_remaining_gyr") is not None:
-        print(f"  Estimated time to Big Rip (from today): "
+        print(f"  DE-only time to Big Rip (from today): "
               f"{s['big_rip_remaining_gyr']:.4g} Gyr (no absolute Big-Rip "
               "time is reported since age_today_gyr is undefined -- see "
               "past_status)")
-    if s.get("fate_status") == "future_recollapse":
-        print(f"  Fate (beyond this run): future recollapse near "
-              f"a~{_fmt(s.get('future_turnaround_a'))}")
-    elif s.get("fate_status") == "unresolved":
-        print("  Fate (beyond this run): unresolved (see warnings)")
+    # Report the classification independently of the finite run's stop.
+    # None means this diagnostic made no classification, not proof of an
+    # eternally expanding universe.
+    fate = {
+        "big_rip": "Big Rip ahead (constant-w model)",
+        "recollapse": "recollapse",
+        "future_recollapse": ("future recollapse beyond this run near "
+                              f"a~{_fmt(s.get('future_turnaround_a'))}"),
+        "unresolved": "unresolved (see warnings)",
+    }.get(s.get("fate_status"))
+    if fate is not None:
+        print(f"  Model fate            : {fate}")
     print(f"  Forward-loop iterations: {s['n_forward_iterations']:,}")
     print(f"  Output samples        : {s['n_output_samples']:,}")
     print(f"  Run stopped because   : {s.get('stop_reason') or 'n/a'} "
@@ -324,7 +331,8 @@ def _run_evolve(kw, outdir, csvdir, dpi, lw):
                   _evolve_rows(result), comments=prov)
 
     if not kw["no_plot"]:
-        viz.plot_evolve(result, outdir=outdir, dpi=dpi, lw=lw)
+        viz.plot_evolve(result, outdir=outdir, dpi=dpi, lw=lw,
+                        extend_big_rip=(kw["t_max"] is None))
     return result
 
 
