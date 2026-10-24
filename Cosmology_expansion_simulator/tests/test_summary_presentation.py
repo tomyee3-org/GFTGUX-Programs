@@ -2,12 +2,16 @@
 import contextlib
 import io
 import re
+import sys
+from pathlib import Path
 import unittest
 from unittest import mock
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import driver_cosmo as driver
 import physics_cosmo as physics
@@ -58,6 +62,23 @@ class SummaryPresentation(unittest.TestCase):
                 text = self.summary_text(summary)
                 self.assertRegex(text, rf"Model fate\s*:\s*{phrase}")
                 self.assertRegex(text, r"Run stopped because\s*:\s*a_max")
+
+    def test_past_eternal_notes_do_not_claim_a_finite_big_bang(self):
+        for w0, a_max in ((-1, 5), (-1.3, 5), (-1, 0.5)):
+            with self.subTest(w0=w0, a_max=a_max):
+                result = physics.integrate_evolution(
+                    omega_m=0, omega_r=0, omega_de=1,
+                    w0=w0, a_max=a_max)
+                summary = result["summary"]
+                self.assertEqual(summary["past_status"], "past_eternal")
+                self.assertIsNone(summary["age_today_gyr"])
+                warnings = " ".join(summary["warnings"])
+                self.assertIn("no finite Big-Bang time origin", warnings)
+                self.assertNotIn("true a=0 singularity", warnings)
+                self.assertNotIn("Ages quoted below are lower bounds", warnings)
+                self.assertNotIn("no more negative than", warnings)
+                if a_max > 1:
+                    self.assertIn("at or below w=-1", warnings)
 
     def test_unclassified_fate_does_not_certify_eternal_expansion(self):
         text = self.summary_text(self.normal["summary"])

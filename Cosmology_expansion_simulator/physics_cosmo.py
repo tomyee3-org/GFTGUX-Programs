@@ -30,7 +30,7 @@ returned in the same student-facing units.
 import math
 import numpy as np
 
-MODEL_VERSION = "1.6.2"
+MODEL_VERSION = "1.6.3"
 
 
 #: The exact source files this build identifier covers (Copilot Audit 8
@@ -1728,7 +1728,7 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
     # term. The only way p_min>=0 can occur is a FLAT model (no matter,
     # radiation, or curvature at all) whose dark-energy component's own
     # leading exponent n_de=-3(1+w0+wa) is itself >=0 -- i.e. an
-    # effective equation of state at a->0 no more negative than w=-1: a
+    # effective equation of state at a->0 at or below w=-1: a
     # cosmological constant (n_de=0, e.g. flat de Sitter) or phantom DE
     # (n_de>0). Such a branch is continuously connected to a=0 in the
     # sense just certified, but a=0 itself lies at t=-infinity: it is a
@@ -1776,6 +1776,12 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
                 f"early-time density budget); reduce --a_i for a cleaner "
                 "age estimate."
             )
+    elif past_status == "past_eternal":
+        warnings.append(
+            "This past-eternal model has no finite Big-Bang time origin. "
+            "The clock starts at t=0 at a=a_i; reported times measure "
+            "elapsed time from that chosen start."
+        )
     else:
         warnings.append(
             "No matter, radiation, or open curvature in this model: the "
@@ -2129,7 +2135,7 @@ def integrate_evolution(H0=70.0, omega_m=0.30, omega_r=9.24e-5, omega_de=None,
             f"a->0, E(a)^2's leading term has exponent p_min={p_min:.3g} "
             ">= 0 (a flat model with no matter, radiation, or curvature, "
             "whose dark-energy component's own early-time equation of "
-            "state is no more negative than w=-1 -- a cosmological "
+            "state is at or below w=-1 -- a cosmological "
             "constant or phantom DE dominating all the way down), so the "
             "cosmic-time integral dt/da ~ a^(-1-p_min/2) DIVERGES as "
             "a->0: a=0 is reached only as t->-infinity, a coordinate "
