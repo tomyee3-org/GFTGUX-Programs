@@ -85,7 +85,7 @@ def parse_args():
     g.add_argument("--outdir", type=str, default=None, metavar="PATH",
                    help="also save a timestamped PNG (and provenance sidecar)")
     g.add_argument("--interactive", action="store_true",
-                   help="open the figure on screen (no-op under MPLBACKEND=Agg)")
+                   help="display the figure (already the default; no-op under MPLBACKEND=Agg)")
     return p.parse_args()
 
 
@@ -119,7 +119,7 @@ def main():
     except ValueError as exc:
         raise SystemExit(f"GravitationalLensing: {exc}") from exc
     bx, by = args.beta_x, args.beta_y
-    show = args.interactive or args.outdir is None
+    show = True
     if os.environ.get("MPLBACKEND", "").lower() == "agg":
         show = False
 

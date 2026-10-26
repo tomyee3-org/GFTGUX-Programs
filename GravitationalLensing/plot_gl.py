@@ -150,7 +150,7 @@ def plot_point(image, theta_x, theta_y, theta_e, beta_x, beta_y,
                         ls="--", label=rf"$\theta_E={te:.2f}''$"))
     ax.plot(phys.rad_to_arcsec(beta_x), phys.rad_to_arcsec(beta_y),
             marker="+", color="white", ms=10, mew=1.6,
-            label="source (unlensed)")
+            label=r"source coordinate $\beta$")
     ax.set_aspect("equal")
     ax.set_xlabel(r"$\theta_x$ [arcsec]")
     ax.set_ylabel(r"$\theta_y$ [arcsec]")
@@ -191,7 +191,7 @@ def plot_critical(image, det_a, theta_x, theta_y, theta_e,
     ax.contour(phys.rad_to_arcsec(theta_x), phys.rad_to_arcsec(theta_y),
                det_a, levels=[0.0], colors=C_RING, linewidths=1.6)
     ax.set_aspect("equal")
-    ax.set_title("Image plane (false colour)\ncritical curve = Einstein ring")
+    ax.set_title("Image plane (false colour)\ncritical curve = Einstein circle")
     ax.set_xlabel(r"$\theta_x$ [arcsec]")
     ax.set_ylabel(r"$\theta_y$ [arcsec]")
 
@@ -229,14 +229,16 @@ def plot_critical(image, det_a, theta_x, theta_y, theta_e,
     ax.set_xlim(-0.02 * d_s, 1.02 * d_s)
     ax.set_ylim(-y_pad, y_pad)
     ax.set_box_aspect(0.72)
-    ax.set_title("Side view\nheight is " + r"$\beta_y$")
+    ax.set_title("Side view\nalong the source offset")
     ax.set_xlabel("line of sight")
-    ax.set_ylabel("height (schematic)")
+    ax.set_ylabel("height along source offset\n(schematic)")
 
     fig.tight_layout(rect=[0, 0.03, 1, 1])
     saved = _finish(fig, outdir, "critical", dpi,
                     provenance={
                         "mode": "critical",
+                        "side_view_beta_arcsec":
+                            f"{float(phys.rad_to_arcsec(bundle['beta'])):.6f}",
                         "theta_e_arcsec": f"{te:.6f}",
                         "beta_x_arcsec": f"{float(phys.rad_to_arcsec(beta_x)):.6f}",
                         "beta_y_arcsec": f"{float(phys.rad_to_arcsec(beta_y)):.6f}",
@@ -371,10 +373,16 @@ def plot_kappa(kappa, theta_x, theta_y, theta_e, outdir=None, dpi=140, show=True
                extra_prov=None):
     from matplotlib.colors import LogNorm
     fig, ax = plt.subplots(figsize=(6.2, 6.2))
-    positive = np.maximum(kappa, np.nanmax(kappa) * 1.0e-6)
-    im = ax.imshow(positive, origin="lower", cmap="viridis",
+    # The singular centre has no finite kappa. Mask it without changing
+    # valid samples, and select the logarithmic range from those samples.
+    positive = np.ma.masked_invalid(np.asanyarray(kappa))
+    at_centre = (np.asarray(theta_x) == 0.0) & (np.asarray(theta_y) == 0.0)
+    positive = np.ma.masked_where(at_centre | (positive <= 0.0), positive)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("black")
+    im = ax.imshow(positive, origin="lower", cmap=cmap,
                    extent=_extent_arcsec(theta_x, theta_y),
-                   norm=LogNorm(vmin=positive.min(), vmax=positive.max()))
+                   norm=LogNorm(vmin=float(positive.min()), vmax=float(positive.max())))
     te = float(phys.rad_to_arcsec(theta_e))
     ax.add_patch(Circle((0.0, 0.0), te, fill=False, color=C_CRIT, lw=2.0,
                         label=rf"$\kappa=1/2$  (critical curve, $\theta_E={te:.2f}''$)"))

@@ -343,12 +343,22 @@ class TestSideRays(unittest.TestCase):
         miss = phys.forward_point_mass_ray(beta, 2.2 * theta_e, theta_e)
         self.assertFalse(miss["hits"])
 
-    def test_critical_side_view_tracks_beta_y_not_beta_x(self):
-        theta_e = phys.default_point_mass_theta_e(12.0)
-        beta = -0.4 * theta_e
-        bundle = phys.forward_point_mass_bundle(beta, theta_e)
-        self.assertLess(bundle["y_src"], 0.0)
-        self.assertEqual(len(bundle["hits"]), 2)
+    def test_critical_side_view_tracks_the_full_source_offset(self):
+        for bx, by in ((1.0, 0.0), (0.0, -1.0), (0.6, -0.8), (-1.0, 0.0)):
+            with self.subTest(beta=(bx, by)):
+                with mock.patch.object(plotting, "plot_critical") as plot:
+                    driver.run_critical(beta_x_arcsec=bx, beta_y_arcsec=by, show=False)
+                args = plot.call_args.args
+                theta_e, source_x, source_y, bundle = args[4:8]
+                beta = math.hypot(float(source_x), float(source_y))
+                self.assertAlmostEqual(bundle["beta"], beta, delta=beta * 1e-12)
+                self.assertEqual(len(bundle["hits"]), 2)
+                expected = ((beta - math.sqrt(beta**2 + 4 * theta_e**2)) / 2,
+                            (beta + math.sqrt(beta**2 + 4 * theta_e**2)) / 2)
+                actual = sorted(ray["theta"] for ray in bundle["hits"])
+                np.testing.assert_allclose(actual, expected, rtol=1e-12)
+                for ray in bundle["hits"]:
+                    self.assertAlmostEqual(ray["y_src"], beta * bundle["d_s"], delta=1e-16)
 
     def test_kink_is_always_toward_the_mass(self):
         theta_e = 1.0e-5
@@ -856,6 +866,135 @@ class TestAudit1Fixes(unittest.TestCase):
             text = Path(saved[:-4] + ".provenance.txt").read_text(encoding="utf-8")
             self.assertIn("gamma =", text)
             self.assertIn("beta_x_arcsec =", text)
+
+
+class TestPreKickoff7Fixes(unittest.TestCase):
+    def test_intensity_renderers_omit_only_the_undefined_central_ray(self):
+        # A centered source has unit surface brightness on the Einstein ring.
+        # The singular centre must not become another unit-intensity image.
+        for name in ("point", "blob", "arcs"):
+            with self.subTest(renderer=name):
+                te = (phys.default_sis_theta_e() if name == "arcs"
+                      else phys.default_point_mass_theta_e())
+                x = np.array([0.0, te, -te, 0.0])
+                y = np.array([0.0, 0.0, 0.0, te])
+                if name == "point":
+                    image = phys.render_point_mass_source(x, y, te, 0, 0, te / 10)
+                elif name == "blob":
+                    image = phys.render_point_mass_extended(x, y, te, 0, 0, te / 10, .6, .4)
+                else:
+                    image = phys.render_sis_shear_extended(x, y, te, 0, 0, 0, te / 10, .6, .4)
+                self.assertEqual(float(image[0]), 0.0)
+                np.testing.assert_allclose(image[1:], 1.0, rtol=0, atol=1e-12)
+
+    def test_sheared_centered_source_keeps_the_four_physical_peaks(self):
+        te = phys.default_sis_theta_e()
+        gamma = .25
+        x = np.array([0., te / (1-gamma), -te / (1-gamma), 0., 0.])
+        y = np.array([0., 0., 0., te / (1+gamma), -te / (1+gamma)])
+        image = phys.render_sis_shear_extended(x, y, te, gamma, 0, 0, te / 10, .6, .4)
+        self.assertEqual(float(image[0]), 0.)
+        np.testing.assert_allclose(image[1:], 1.0, atol=1e-12)
+
+    def test_kappa_plot_preserves_all_valid_samples_and_masks_the_centre(self):
+        x, y = phys.make_grid(n_pix=181, fov_arcsec=6.)
+        kappa = phys.convergence_sis(x, y, phys.default_sis_theta_e())
+        original = kappa.copy()
+        fig, _ = plotting.plot_kappa(kappa, x, y, phys.default_sis_theta_e(), show=False)
+        shown = fig.axes[0].images[0].get_array()
+        mask = np.ma.getmaskarray(shown)
+        self.assertEqual(int(mask.sum()), 1)
+        self.assertTrue(mask[90, 90])
+        np.testing.assert_array_equal(shown.data[~mask], kappa[~mask])
+        np.testing.assert_array_equal(kappa, original)
+        self.assertAlmostEqual(float(shown[0, 0]), 0.15294661050617175, places=13)
+        self.assertAlmostEqual(fig.axes[0].images[0].norm.vmax, float(kappa[~mask].max()))
+
+    def test_cli_saving_also_requests_display_in_every_mode(self):
+        import main as cli
+        for mode in driver.MODES:
+            for backend, expected in (("TkAgg", True), ("Agg", False)):
+                for saving in ([], ["--outdir", "figures"]):
+                    with self.subTest(mode=mode, backend=backend, saving=bool(saving)):
+                        with mock.patch.dict(os.environ, {"MPLBACKEND": backend}):
+                            with mock.patch.object(sys, "argv", ["main.py", "--mode", mode, *saving]):
+                                with mock.patch.object(driver, "run_" + mode) as run:
+                                    cli.main()
+                        self.assertIs(run.call_args.kwargs["show"], expected)
+
+    def test_saved_files_exist_when_display_is_requested(self):
+        # Patch show rather than opening a native window on the test host.
+        with tempfile.TemporaryDirectory() as tmp:
+            def displayed():
+                self.assertEqual(len(list(Path(tmp).glob("*.png"))), 1)
+                self.assertEqual(len(list(Path(tmp).glob("*.provenance.txt"))), 1)
+            with mock.patch.dict(os.environ, {"MPLBACKEND": "TkAgg"}):
+                with mock.patch.object(plotting.plt, "show", side_effect=displayed) as show:
+                    fig, _ = driver.run_point(outdir=tmp, dpi=40)
+            show.assert_called_once()
+            plotting.plt.close(fig)
+
+    def test_very_small_nonzero_source_saves_finite_magnifications(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_cli(["--mode", "point", "--beta_x", "1e-18", "--outdir", tmp, "--dpi", "40"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = next(Path(tmp).glob("*.provenance.txt")).read_text()
+            self.assertIn("image_configuration = two images", text)
+            values = {k: float(v) for k, v in re.findall(r"(mu_plus|mu_minus) = (\S+)", text)}
+            self.assertEqual(set(values), {"mu_plus", "mu_minus"})
+            self.assertTrue(all(math.isfinite(v) for v in values.values()))
+            u = float(phys.arcsec_to_rad(1e-18)) / phys.default_point_mass_theta_e()
+            self.assertAlmostEqual(values["mu_plus"] * u, .5, places=14)
+            self.assertAlmostEqual(values["mu_minus"] * u, -.5, places=14)
+
+    def test_normalized_magnifications_match_the_classroom_examples(self):
+        te = phys.default_point_mass_theta_e()
+        for beta, expected in ((.5, (2.564096547178512, -1.564096547178507)),
+                               (1., (1.5996033949608481, -.5996033949608485))):
+            actual = phys.point_mass_magnifications(phys.arcsec_to_rad(beta), te)
+            np.testing.assert_allclose(actual, expected, rtol=1e-13)
+        with self.assertRaises(ValueError):
+            phys.point_mass_magnifications(0, te)
+
+    def test_replacement_fold_commands_have_safe_two_and_four_image_cases(self):
+        text = html.unescape(help_files()[0].read_text())
+        te = phys.default_sis_theta_e()
+        te_as = float(phys.rad_to_arcsec(te))
+        phi = np.linspace(0, 2 * math.pi, 40001)
+        A, B = .4 * te_as, (2/3) * te_as
+        # Independently parameterized astroid for gamma=.25.
+        cx, cy = -A * np.cos(phi)**3, B * np.sin(phi)**3
+        # Derivative bound limits how much closer an unsampled point can lie.
+        sampling_bound = 3 * (A + B) * (phi[1] - phi[0])
+        for bx, expected in ((.35, 2), (.34, 4)):
+            with self.subTest(beta_x=bx):
+                self.assertIn(f"--beta_x {bx} --beta_y 0.10", text)
+                nearest_sample = float(np.hypot(cx-bx, cy-.1).min())
+                self.assertGreater(nearest_sample-sampling_bound, phys.CAUSTIC_COUNT_BUFFER * te_as)
+                images = phys.images_sis_shear(phys.arcsec_to_rad(bx), phys.arcsec_to_rad(.1), te, .25)
+                self.assertEqual(len(images), expected)
+
+    def test_advanced_exercise_mapping_does_not_confuse_phi45_with_the_minimum(self):
+        te, gamma = phys.default_sis_theta_e(), .25
+        def mapped(phi):
+            r = phys.critical_radius_sis_shear(phi, te, gamma)
+            return phys.map_sis_shear(r * math.cos(phi), r * math.sin(phi), te, gamma)
+        cusp = mapped(math.pi / 2)
+        np.testing.assert_allclose([float(v / te) for v in cusp], [0., 2/3], atol=1e-14)
+        fold = mapped(math.pi / 4)
+        self.assertAlmostEqual(math.hypot(*fold) / te, .2748737083745107, places=13)
+        minimum = mapped(math.atan(math.sqrt((1-gamma)/(1+gamma))))
+        self.assertAlmostEqual(math.hypot(*minimum) / te, .25, places=13)
+        self.assertGreater(math.hypot(*fold), math.hypot(*minimum))
+
+    def test_critical_plot_labels_and_provenance_follow_the_rotated_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fig, saved = driver.run_critical(beta_x_arcsec=.6, beta_y_arcsec=-.8, outdir=tmp, show=False, dpi=40)
+            self.assertIn("Einstein circle", fig.axes[0].get_title())
+            self.assertIn("source offset", fig.axes[2].get_title())
+            self.assertIn("source offset", fig.axes[2].get_ylabel())
+            metadata = Path(saved[:-4] + ".provenance.txt").read_text()
+            self.assertIn("side_view_beta_arcsec = 1.000000", metadata)
 
 
 if __name__ == "__main__":

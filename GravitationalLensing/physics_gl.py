@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "1.2.0"
+MODEL_VERSION = "1.3.0"
 
 # 1.0.1 patch: three provenance-dict f-strings in plot_gl.py (plot_point,
 # plot_arcs, plot_kappa) split a single {...} expression across a physical
@@ -240,6 +240,28 @@ def point_mass_image_radii(beta, theta_e):
     theta_e = _require_positive("theta_e", theta_e)
     disc = math.sqrt(beta * beta + 4.0 * theta_e * theta_e)
     return 0.5 * (beta + disc), 0.5 * (beta - disc)
+
+
+
+def point_mass_magnifications(beta, theta_e):
+    """Signed ideal magnifications for a non-aligned point source.
+
+    Use u = |beta| / theta_E and the analytic normalized-source formula,
+    rather than subtracting nearly equal terms involving image radii.
+    Exact alignment is a ring and has divergent point-source magnification.
+    """
+    beta = abs(_require_finite("beta", beta))
+    theta_e = _require_positive("theta_e", theta_e)
+    if beta == 0.0:
+        raise ValueError("point-source magnification diverges at exact alignment")
+    u = beta / theta_e
+    if u == 0.0 or not math.isfinite(u):
+        raise ValueError("source offset is outside the representable magnification range")
+    root = math.hypot(u, 2.0)
+    amplitude = 0.5 * (u / root) + (1.0 / root) / u
+    if not math.isfinite(amplitude):
+        raise ValueError("point-source magnification exceeds the floating-point range")
+    return 0.5 + amplitude, 0.5 - amplitude
 
 
 def map_point_mass(theta_x, theta_y, theta_e):
@@ -473,22 +495,35 @@ def elliptical_source(beta_x, beta_y, beta_x0, beta_y0, r_eff, q, phi):
     return np.exp(-(rr**2) / (2.0 * sigma**2))
 
 
+
+def _without_central_ray(image, theta_x, theta_y):
+    """Omit the undefined central ray of a singular lens from an intensity map."""
+    at_centre = (np.asarray(theta_x) == 0.0) & (np.asarray(theta_y) == 0.0)
+    return np.where(at_centre, 0.0, image)
+
+
 def render_point_mass_source(theta_x, theta_y, theta_e,
                              beta_x0, beta_y0, sigma):
     bx, by = map_point_mass(theta_x, theta_y, theta_e)
-    return gaussian_source(bx, by, beta_x0, beta_y0, sigma)
+    return _without_central_ray(
+        gaussian_source(bx, by, beta_x0, beta_y0, sigma), theta_x, theta_y,
+    )
 
 
 def render_point_mass_extended(theta_x, theta_y, theta_e,
                                beta_x0, beta_y0, r_eff, q, phi):
     bx, by = map_point_mass(theta_x, theta_y, theta_e)
-    return elliptical_source(bx, by, beta_x0, beta_y0, r_eff, q, phi)
+    return _without_central_ray(
+        elliptical_source(bx, by, beta_x0, beta_y0, r_eff, q, phi), theta_x, theta_y,
+    )
 
 
 def render_sis_shear_extended(theta_x, theta_y, theta_e, gamma,
                               beta_x0, beta_y0, r_eff, q, phi):
     bx, by = map_sis_shear(theta_x, theta_y, theta_e, gamma)
-    return elliptical_source(bx, by, beta_x0, beta_y0, r_eff, q, phi)
+    return _without_central_ray(
+        elliptical_source(bx, by, beta_x0, beta_y0, r_eff, q, phi), theta_x, theta_y,
+    )
 
 
 def default_point_mass_theta_e(log10_m_over_msun=12.0):

@@ -89,17 +89,20 @@ def run_point(log10_m=12.0, beta_x_arcsec=0.0, beta_y_arcsec=0.0,
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
     beta = math.hypot(beta_x, beta_y)
+    if beta == 0.0 and math.hypot(beta_x_arcsec, beta_y_arcsec) > 0.0:
+        raise ValueError("source offset is too small to represent in radians")
     image_prov = {"image_configuration": "Einstein ring" if beta == 0.0
                   else "two images"}
     if beta > 0.0:
         # Signed positions are measured along the source-lens line. They
         # describe the ideal point-source limit of the rendered Gaussian.
         plus, minus = phys.point_mass_image_radii(beta, theta_e)
+        mu_plus, mu_minus = phys.point_mass_magnifications(beta, theta_e)
         image_prov.update({
             "theta_plus_arcsec": f"{float(phys.rad_to_arcsec(plus)):.6f}",
             "theta_minus_arcsec": f"{float(phys.rad_to_arcsec(minus)):.6f}",
-            "mu_plus": f"{1.0 / (1.0 - (theta_e / plus)**4):.6f}",
-            "mu_minus": f"{1.0 / (1.0 - (theta_e / abs(minus))**4):.6f}",
+            "mu_plus": f"{mu_plus:.6f}",
+            "mu_minus": f"{mu_minus:.6f}",
         })
     title = (rf"Point-mass lens (false colour)  |  "
              rf"$\beta=({beta_x_arcsec:.2f},{beta_y_arcsec:.2f})''$")
@@ -180,9 +183,9 @@ def run_critical(log10_m=12.0, beta_x_arcsec=0.0, beta_y_arcsec=0.0,
     image = phys.render_point_mass_source(theta_x, theta_y, theta_e,
                                           beta_x, beta_y, sigma)
     det_a = phys.jacobian_det_point_mass(theta_x, theta_y, theta_e)
-    # Side view is a vertical slice.  Height is beta_y; beta_x is
-    # perpendicular to that page.
-    bundle = phys.forward_point_mass_bundle(beta_y, theta_e)
+    # Rotate the schematic slice into the plane containing this source,
+    # the lens and observer. Its transverse direction follows the source offset.
+    bundle = phys.forward_point_mass_bundle(math.hypot(beta_x, beta_y), theta_e)
     return plotting.plot_critical(image, det_a, theta_x, theta_y, theta_e,
                                   beta_x, beta_y, bundle,
                                   outdir=outdir, dpi=dpi,
