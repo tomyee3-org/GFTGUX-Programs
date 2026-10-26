@@ -14,10 +14,14 @@ the teaching beats in the Help file:
     arcs       extended source on that diamond
     kappa      SIS convergence (the mass map, taught last)
 
+Source coordinates default to zero in every mode.  Specify a nonzero
+position explicitly to move the source off the optical axis.  The rays
+mode uses only --beta_y; kappa has no source-position dependence.
+
 Examples
 --------
   python main.py --mode point
-  python main.py --mode point --beta_x 0.0 --beta_y 0.0
+  python main.py --mode point --beta_x 0.5 --beta_y 0.0
   python main.py --mode shear --beta_x 0.55 --beta_y 0.10
   python main.py --mode critical --outdir ./runs
 """
@@ -48,10 +52,10 @@ def parse_args():
                    help="which drawing to make")
 
     g = p.add_argument_group("Source position [arcsec]")
-    g.add_argument("--beta_x", type=float, default=None, metavar="ARCSEC",
-                   help="unlensed source x (defaults depend on the mode)")
-    g.add_argument("--beta_y", type=float, default=None, metavar="ARCSEC",
-                   help="unlensed source y (defaults depend on the mode)")
+    g.add_argument("--beta_x", type=float, default=0.0, metavar="ARCSEC",
+                   help="unlensed source x; unused in rays/kappa")
+    g.add_argument("--beta_y", type=float, default=0.0, metavar="ARCSEC",
+                   help="unlensed source y; lower-panel height in rays; unused in kappa")
 
     g = p.add_argument_group("Lens")
     g.add_argument("--logM", type=float, default=12.0, metavar="LOG10",
@@ -85,31 +89,6 @@ def parse_args():
     return p.parse_args()
 
 
-def _defaults_for(mode, args):
-    """Fill source-position defaults that differ by teaching beat."""
-    if args.beta_x is not None:
-        bx = args.beta_x
-    elif mode == "point":
-        bx = 0.50
-    elif mode in ("blob", "arcs"):
-        bx = 0.18 if mode == "arcs" else 0.15
-    elif mode == "shear":
-        bx = 0.05
-    else:
-        bx = 0.00
-
-    if args.beta_y is not None:
-        by = args.beta_y
-    elif mode == "blob":
-        by = 0.05
-    elif mode == "shear":
-        by = 0.03
-    elif mode == "rays":
-        by = 0.35
-    else:
-        by = 0.00
-    return bx, by
-
 
 def _validate_args(args):
     physics_gl.validate_user_value("logM", args.logM)
@@ -129,10 +108,8 @@ def _validate_args(args):
     physics_gl.validate_user_value("dpi", args.dpi, positive=True)
     if args.n_pix != int(args.n_pix) or int(args.n_pix) < 9:
         raise ValueError("n_pix must be an integer >= 9")
-    if args.beta_x is not None:
-        physics_gl.validate_user_value("beta_x", args.beta_x)
-    if args.beta_y is not None:
-        physics_gl.validate_user_value("beta_y", args.beta_y)
+    physics_gl.validate_user_value("beta_x", args.beta_x)
+    physics_gl.validate_user_value("beta_y", args.beta_y)
 
 
 def main():
@@ -141,7 +118,7 @@ def main():
         _validate_args(args)
     except ValueError as exc:
         raise SystemExit(f"GravitationalLensing: {exc}") from exc
-    bx, by = _defaults_for(args.mode, args)
+    bx, by = args.beta_x, args.beta_y
     show = args.interactive or args.outdir is None
     if os.environ.get("MPLBACKEND", "").lower() == "agg":
         show = False
@@ -150,7 +127,7 @@ def main():
                   interactive=args.interactive)
     try:
         if args.mode == "rays":
-            driver_gl.run_rays(beta_arcsec=by if args.beta_y is not None else 0.35,
+            driver_gl.run_rays(beta_arcsec=by,
                                **common)
         elif args.mode == "point":
             driver_gl.run_point(log10_m=args.logM, beta_x_arcsec=bx,

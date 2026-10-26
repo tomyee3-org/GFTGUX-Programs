@@ -26,7 +26,7 @@ import os
 
 import numpy as np
 
-MODEL_VERSION = "1.1.0"
+MODEL_VERSION = "1.2.0"
 
 # 1.0.1 patch: three provenance-dict f-strings in plot_gl.py (plot_point,
 # plot_arcs, plot_kappa) split a single {...} expression across a physical

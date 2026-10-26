@@ -400,6 +400,13 @@ class TestDriverAndPlots(unittest.TestCase):
                 self.assertIn(phys.MODEL_VERSION, text)
                 self.assertIn(phys.BUILD_ID, text)
                 self.assertIn(f"mode = {mode}", text)
+                if mode == "rays":
+                    self.assertIn("beta_off_rad = 0.00000000e+00", text)
+                elif mode != "kappa":
+                    self.assertIn("beta_x_arcsec = 0.000000", text)
+                    self.assertIn("beta_y_arcsec = 0.000000", text)
+                if mode == "point":
+                    self.assertIn("image_configuration = Einstein ring", text)
 
     def test_cli_point_mode_saves_under_agg(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -407,6 +414,48 @@ class TestDriverAndPlots(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             pngs = list(Path(tmp).glob("*.png"))
             self.assertTrue(pngs)
+
+
+class TestSourcePositionDefaults(unittest.TestCase):
+    def test_cli_dispatch_uses_zero_for_each_omitted_coordinate_in_every_mode(self):
+        import main as cli
+        cases = (([], (0.0, 0.0)),
+                 (["--beta_x", "0.4"], (0.4, 0.0)),
+                 (["--beta_y", "-0.3"], (0.0, -0.3)),
+                 (["--beta_x", "0", "--beta_y", "0"], (0.0, 0.0)),
+                 (["--beta_x", "-0.2", "--beta_y", "0.3"], (-0.2, 0.3)))
+        for mode in driver.MODES:
+            for options, expected in cases:
+                with self.subTest(mode=mode, options=options):
+                    with mock.patch.object(sys, "argv", ["main.py", "--mode", mode, *options]):
+                        with mock.patch.object(driver, "run_" + mode) as run:
+                            cli.main()
+                    kw = run.call_args.kwargs
+                    if mode == "rays":
+                        self.assertEqual(kw["beta_arcsec"], expected[1])
+                    elif mode != "kappa":
+                        self.assertEqual((kw["beta_x_arcsec"], kw["beta_y_arcsec"]), expected)
+
+    def test_cli_default_mode_also_starts_at_origin(self):
+        import main as cli
+        with mock.patch.object(sys, "argv", ["main.py"]):
+            with mock.patch.object(driver, "run_point") as run:
+                cli.main()
+        self.assertEqual(run.call_args.kwargs["beta_x_arcsec"], 0.0)
+        self.assertEqual(run.call_args.kwargs["beta_y_arcsec"], 0.0)
+
+    def test_magnification_exercise_supplies_nonzero_source(self):
+        import main as cli
+        raw = help_files()[0].read_text(encoding="utf-8")
+        exercise = raw.split('id="exp8"', 1)[1].split('</div>', 2)[1]
+        command = html.unescape(re.search(r'<code>(python main.py.*?)</code>', exercise)[1])
+        with mock.patch.object(sys, "argv", shlex.split(command)[1:]):
+            args = cli.parse_args()
+        self.assertEqual((args.beta_x, args.beta_y), (0.5, 0.0))
+        theta_e = phys.default_point_mass_theta_e()
+        plus, minus = phys.point_mass_image_radii(phys.arcsec_to_rad(args.beta_x), theta_e)
+        self.assertAlmostEqual(1 / (1 - (theta_e / plus)**4), 2.564097, places=6)
+        self.assertAlmostEqual(1 / (1 - (theta_e / abs(minus))**4), -1.564097, places=6)
 
 
 class TestHelpFile(unittest.TestCase):
@@ -464,12 +513,16 @@ class TestHelpFile(unittest.TestCase):
                         seen_modes.add(parsed.mode)
         self.assertEqual(seen_modes, set(driver.MODES))
 
-    def test_point_guide_places_default_source_inside_einstein_circle(self):
+    def test_point_guide_explicit_source_is_inside_einstein_circle(self):
+        import main as cli
+        raw = self.paths[0].read_text(encoding="utf-8")
+        section = re.search(r'<section id="beat1">(.*?)</section>', raw, re.S)[1]
+        command = html.unescape(re.search(r'<pre>(.*?)</pre>', section, re.S)[1])
+        with mock.patch.object(sys, "argv", shlex.split(command)[1:]):
+            args = cli.parse_args()
+        self.assertEqual((args.beta_x, args.beta_y), (0.5, 0.0))
         theta_e = float(phys.rad_to_arcsec(phys.default_point_mass_theta_e()))
-        self.assertLess(0.50, theta_e)
-        claude = self.paths[0].read_text(encoding="utf-8")
-        self.assertIn('0.50', claude)
-        self.assertIn('default source is already off-axis (beta_x=0.50)', claude)
+        self.assertLess(math.hypot(args.beta_x, args.beta_y), theta_e)
 
     def test_beat2_image_positions_match_the_current_lens(self):
         theta_e = phys.default_point_mass_theta_e()

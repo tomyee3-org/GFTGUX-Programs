@@ -54,7 +54,7 @@ def _point_mass_grid_args(theta_e, beta_x, beta_y, contain_radius):
     return (beta_x, beta_y, plus, minus, far_p, far_m, contain_radius)
 
 
-def run_rays(beta_arcsec=0.35, outdir=None, dpi=140,
+def run_rays(beta_arcsec=0.0, outdir=None, dpi=140,
              show=True, interactive=False):
     # Forward thin-lens rays.  Heights are angles times schematic
     # distances D_l = D_ls = 1, D_s = 2, so the y-axis is in radians.
@@ -67,7 +67,7 @@ def run_rays(beta_arcsec=0.35, outdir=None, dpi=140,
                               show=_show_wanted(show, interactive))
 
 
-def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
+def run_point(log10_m=12.0, beta_x_arcsec=0.0, beta_y_arcsec=0.0,
               n_pix=181, fov_arcsec=6.0, outdir=None, dpi=140,
               show=True, interactive=False):
     theta_e = phys.default_point_mass_theta_e(log10_m)
@@ -116,7 +116,7 @@ def run_point(log10_m=12.0, beta_x_arcsec=0.50, beta_y_arcsec=0.00,
                                })
 
 
-def run_blob(log10_m=12.0, beta_x_arcsec=0.15, beta_y_arcsec=0.05,
+def run_blob(log10_m=12.0, beta_x_arcsec=0.0, beta_y_arcsec=0.0,
              r_eff_arcsec=0.25, q=0.60, phi_deg=30.0,
              n_pix=181, fov_arcsec=6.0, outdir=None, dpi=140,
              show=True, interactive=False):
@@ -158,7 +158,7 @@ def run_blob(log10_m=12.0, beta_x_arcsec=0.15, beta_y_arcsec=0.05,
     )
 
 
-def run_critical(log10_m=12.0, beta_x_arcsec=0.00, beta_y_arcsec=0.00,
+def run_critical(log10_m=12.0, beta_x_arcsec=0.0, beta_y_arcsec=0.0,
                  n_pix=181, fov_arcsec=6.0,
                  outdir=None, dpi=140, show=True, interactive=False):
     theta_e = phys.default_point_mass_theta_e(log10_m)
@@ -190,7 +190,7 @@ def run_critical(log10_m=12.0, beta_x_arcsec=0.00, beta_y_arcsec=0.00,
 
 
 def run_shear(sigma_v_kms=300.0, gamma=0.25,
-              beta_x_arcsec=0.05, beta_y_arcsec=0.03,
+              beta_x_arcsec=0.0, beta_y_arcsec=0.0,
               outdir=None, dpi=140, show=True, interactive=False):
     theta_e = phys.default_sis_theta_e(sigma_v_kms)
     gamma = float(gamma)
@@ -209,7 +209,7 @@ def run_shear(sigma_v_kms=300.0, gamma=0.25,
 
 
 def run_arcs(sigma_v_kms=300.0, gamma=0.25,
-             beta_x_arcsec=0.18, beta_y_arcsec=0.00,
+             beta_x_arcsec=0.0, beta_y_arcsec=0.0,
              r_eff_arcsec=0.25, q=0.60, phi_deg=30.0,
              n_pix=181, fov_arcsec=6.0,
              outdir=None, dpi=140, show=True, interactive=False):
