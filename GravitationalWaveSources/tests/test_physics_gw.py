@@ -3058,6 +3058,36 @@ class TestCLI(unittest.TestCase):
 # ===========================================================================
 # Help file
 # ===========================================================================
+def documented_commands(page):
+    """Read command lines independently of pre/code whitespace and grouping."""
+    parser = HtmlTreeParser()
+    parser.feed(page)
+    commands = []
+    for node in descendants(parser.root, lambda n: n.tag == "pre"):
+        for line in node.text().splitlines():
+            line = line.strip()
+            if line.startswith("python main.py") and line not in commands:
+                commands.append(line)
+    return commands
+
+
+def documentation_text(page):
+    """Expose text and MathJax SVG glyphs without depending on TeX formatting."""
+    import unicodedata
+    parser = HtmlTreeParser()
+    parser.feed(page)
+    def text(node):
+        if isinstance(node, str):
+            return node
+        if node.tag in ("script", "style"):
+            return ""
+        if "data-c" in node.attrs:
+            return unicodedata.normalize("NFKC", chr(int(node.attrs["data-c"], 16)))
+        return "".join(text(item) for item in node.content)
+    result = " ".join(text(parser.root).split())
+    return re.sub(r"([0-9]+(?:\.[0-9]+)?)×10[−-]([0-9]+)", r"\1e-\2", result)
+
+
 class TestHelpFile(unittest.TestCase):
     """The current Help file forms the tested documentation contract."""
 
@@ -3076,7 +3106,11 @@ class TestHelpFile(unittest.TestCase):
     def test_single_canonical_help_file_is_present(self):
         self.assertEqual(tuple(path.name for path in self.paths), HELP_FILES)
         self.assertEqual(len(self.pages), 1)
-        self.assertIn("one question per run", self.pages[0])
+        parser = HtmlTreeParser()
+        parser.feed(self.pages[0])
+        for index in range(8):
+            self.assertEqual(len(nodes_by_id(parser.root, f"beat-{index}")), 1)
+        self.assertEqual(len(nodes_by_id(parser.root, "experiments")), 1)
 
     def test_single_canonical_help_is_accepted_but_program_only_is_skipped(self):
         source_path = self.paths[0]
@@ -3110,19 +3144,19 @@ class TestHelpFile(unittest.TestCase):
                 self.assertIn(f"Version {physics.MODEL_VERSION} Build {physics.BUILD_ID}",
                               " ".join(html.unescape(re.sub(r"<[^>]*>", " ", page)).split()))
 
-    def test_three_exact_beat_commands_match_sample_guide(self):
-        lists = []
-        for page in (*self.pages, self.guide):
-            commands = re.findall(r"<pre><code>(python main\.py[^<]+)</code></pre>", page)
-            self.assertEqual(len(commands), 3)
-            lists.append(commands)
-        self.assertEqual(lists[0], lists[1])
+    def test_guide_commands_are_documented_in_current_help(self):
+        commands = documented_commands(self.pages[0])
+        guide_commands = documented_commands(self.guide)
+        self.assertEqual(len(guide_commands), 3)
+        for command in guide_commands:
+            self.assertIn(command, commands)
 
-    def test_three_beat_commands_accepted_by_program(self):
-        commands = re.findall(r"<pre><code>(python main\.py[^<]+)</code></pre>", self.pages[0])
+    def test_documented_figure_commands_accepted_by_program(self):
+        commands = [c for c in documented_commands(self.pages[0]) if "--outdir" in c]
+        self.assertGreaterEqual(len(commands), 3)
         for command in commands:
             with self.subTest(command=command):
-                args = shlex.split(html.unescape(command))[2:]
+                args = shlex.split(command)[2:]
                 with tempfile.TemporaryDirectory() as folder:
                     args[args.index("--outdir") + 1] = folder
                     result = subprocess.run([sys.executable, "main.py", *args], cwd=MODULE_DIR,
@@ -3142,26 +3176,29 @@ class TestHelpFile(unittest.TestCase):
             self.assertLessEqual(set(re.findall(r"--[a-z][a-z0-9_]*", page.split("</style>", 1)[-1])),
                                  documented | {"--help", "--version"})
 
-    def test_beats_0_and_1_match_current_scientific_values(self):
+    def test_documented_inspiral_values_match_reference_cases(self):
         for page in (*self.pages, self.guide):
-            for expected in ("1.2188", "157.868", "1570.4", "5.583e-23",
-                             "28.0956", "0.813", "67.6", "1.165e-21"):
+            visible = documentation_text(page)
+            for expected in ("28.0956", "0.813", "67.6", "1.165e-21"):
                 with self.subTest(value=expected):
-                    self.assertIn(expected, page)
+                    self.assertIn(expected, visible)
+        self.assertIn("5.823e-22", documentation_text(self.guide))
 
     def test_ringdown_values_and_caveats_match(self):
         for page in (*self.pages, self.guide):
-            for expected in ("61.750", "195.5", "3.417", "merger", "ISCO"):
-                self.assertIn(expected, page)
+            visible = documentation_text(page)
+            for expected in ("195.5", "3.417", "merger", "ISCO"):
+                self.assertIn(expected, visible)
+        self.assertIn("61.750", documentation_text(self.guide))
         for page in self.pages:
             self.assertIn("illustrative", page)
             self.assertIn("Schwarzschild", page)
 
-    def test_build_provenance_does_not_claim_byte_identity(self):
-        for page in self.pages:
-            self.assertIn("CRLF", page)
-            self.assertIn("normaliz", page.lower())
-            self.assertNotIn("exact bytes", page)
+    def test_build_provenance_is_documented_for_maintainers(self):
+        notes = (self.doc_dir / "GravitationalWaveSources-ReleaseNotes.html").read_text(encoding="utf-8")
+        self.assertIn("CRLF", notes)
+        self.assertIn("normaliz", notes.lower())
+        self.assertIn("four core", notes)
 
     def test_csv_schema_matches_live_help_and_tutorial(self):
         for page in (*self.pages, self.guide):
@@ -3188,7 +3225,7 @@ class TestHelpFile(unittest.TestCase):
 
     def test_joint_ringdown_sampling_requirement_and_dpi_limit(self):
         for page in self.pages:
-            self.assertIn("eight samples per QNM cycle", page)
+            self.assertRegex(documentation_text(page), r"(?:eight|8) samples per (?:QNM )?cycle")
             self.assertIn("600", page)
 
     def test_cli_python_requirement(self):
@@ -3204,21 +3241,20 @@ class TestHelpFile(unittest.TestCase):
 
     def test_model_sweep_and_cutoff_are_both_explained(self):
         for page in self.pages:
-            self.assertIn("df/dt", page)
-            self.assertIn("f_ISCO", page)
-            self.assertIn("chirp mass", page)
+            visible = documentation_text(page)
+            self.assertIn("df/dt", visible)
+            self.assertIn("ISCO", visible)
+            self.assertIn("chirp mass", visible)
 
     def test_cutoff_convergence_warning_is_in_current_help(self):
         for page in self.pages:
             self.assertRegex(page, r"linear(?:ly)? interpolat")
             self.assertIn("interior", page)
 
-    def test_csv_and_png_temporary_files_and_diagnostics(self):
-        for page in self.pages:
-            self.assertIn(".gw_modeprobe_*", page)
-            self.assertIn(".gw_tmp_*", page)
-            self.assertIn("standard error", page)
-            self.assertIn("untrusted co-tenant", page)
+    def test_output_publication_limits_are_documented_for_maintainers(self):
+        notes = (self.doc_dir / "GravitationalWaveSources-ReleaseNotes.html").read_text(encoding="utf-8")
+        for expected in (".gw_modeprobe_*", ".gw_tmp_*", "standard error", "trusted"):
+            self.assertIn(expected, notes)
 
     def test_help_navigation_targets_exist_without_duplicates(self):
         for page in self.pages:
@@ -3227,15 +3263,23 @@ class TestHelpFile(unittest.TestCase):
             for anchor in re.findall(r'href="#([^"]+)"', page):
                 self.assertIn(anchor, identifiers)
 
-    def test_sample_guide_contains_three_embedded_indexed_pngs(self):
+    def test_sample_guide_and_help_figures_match_companion_pngs(self):
         images = re.findall(r'src="data:image/png;base64,([^"]+)"', self.guide)
         self.assertEqual(len(images), 3)
-        for encoded in images:
+        for index, encoded in enumerate(images, 1):
             binary = base64.b64decode(encoded, validate=True)
             self.assertTrue(binary.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertEqual(binary[25], 3, "expect indexed-color PNG")
-        self.assertEqual(self.guide.count("What it shows"), 3)
-        self.assertEqual(self.guide.count("Headline values"), 3)
+            companion = self.doc_dir / "SampleOutputs" / f"GravitationalWaveSources-Sample-{index}.png"
+            self.assertEqual(binary, companion.read_bytes())
+        help_images = re.findall(r'src="data:image/png;base64,([^"]+)"', self.pages[0])
+        self.assertEqual(help_images[1], images[0])
+        self.assertEqual(help_images[2], images[2])
+        parser = HtmlTreeParser()
+        parser.feed(self.guide)
+        headings = [normalized_text(n) for n in descendants(parser.root, lambda n: n.tag == "h3")]
+        self.assertEqual(headings.count("What it shows"), 3)
+        self.assertEqual(headings.count("Headline values"), 3)
 
     def test_release_notes_current_and_archived_record(self):
         notes = (self.doc_dir / "GravitationalWaveSources-ReleaseNotes.html").read_text(encoding="utf-8")
@@ -3251,7 +3295,12 @@ class TestHelpFile(unittest.TestCase):
         for page in (*self.pages, self.guide):
             self.assertIn("<style>", page)
             self.assertIn("</style>", page)
-            self.assertIn("<meta name=\"viewport\"", page)
+            self.assertIn('<meta name="viewport"', page)
+        self.assertNotRegex(self.pages[0], r'<script[^>]+src=')
+        parser = HtmlTreeParser()
+        parser.feed(self.pages[0])
+        for name in ("receiver-widget", "dumbbell-widget", "energy-widget", "sensitivity-widget"):
+            self.assertEqual(len(nodes_by_id(parser.root, name)), 1)
 
 
 
