@@ -216,7 +216,7 @@ def plot_cluster(result, outdir=None, dpi=150, lw=1.6, provenance=None,
 
     _energy_panel(axes[1, 2], t, result["energy"], "total energy", C_A)
     axes[1, 2].set_title(f"Energy conservation (max sampled drift "
-                          f"{s['max_fractional_energy_drift']:.2%})")
+                          f"{100.0 * s['max_fractional_energy_drift']:.3g}%)")
 
     fig.suptitle("NbodyGalaxySimulator -- star-cluster relaxation "
                   f"(theta={s['theta']:.2f}, method={s['method']})")
@@ -278,7 +278,7 @@ def plot_galaxy(result, outdir=None, dpi=150, lw=1.6, provenance=None,
 
     _energy_panel(axes[1, 2], t, result["energy"], "total energy", C_A)
     axes[1, 2].set_title(f"Energy conservation (max sampled drift "
-                          f"{s['max_fractional_energy_drift']:.2%})")
+                          f"{100.0 * s['max_fractional_energy_drift']:.3g}%)")
 
     fig.suptitle("NbodyGalaxySimulator -- galaxy-formation cold collapse "
                   f"(theta={s['theta']:.2f}, method={s['method']})")
@@ -361,7 +361,7 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     _energy_panel(ax, t, result["energy_a"], "realization A", C_A)
     _energy_panel(ax, t, result["energy_b"], "realization B", C_B)
     ax.set_title(f"Energy conservation, both realizations (max sampled drift "
-                 f"{s['max_fractional_energy_drift']:.2%})")
+                 f"{100.0 * s['max_fractional_energy_drift']:.3g}%)")
     ax.legend(fontsize=8)
 
     ax = axes[1, 1]
