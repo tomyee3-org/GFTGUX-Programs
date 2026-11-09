@@ -17,6 +17,7 @@ import math
 import os
 import warnings
 from datetime import datetime
+from uuid import uuid4
 
 import numpy as np
 
@@ -83,7 +84,7 @@ def _validate_output(outdir, csvdir, dpi, lw):
 # an explicit override otherwise, defeating the reproducibility contract.
 PARAMS_BY_MODE = {
     "cluster": ("n_bodies", "total_mass_msun", "scale_radius_pc",
-                "n_relax_requested", "steps_per_crossing", "target_snapshots",
+                "n_relax_requested", "steps_per_crossing", "max_steps", "target_snapshots",
                 "softening_pc", "softening_explicit", "theta", "method",
                 "seed"),
     "galaxy":  ("n_bodies", "total_mass_msun", "radius_pc", "virial_ratio_init",
@@ -114,7 +115,7 @@ def _matplotlib_version():
         return "not installed"
 
 
-def _provenance(mode, kw):
+def _provenance(mode, kw, started_at=None):
     """
     Comment lines recording exactly how a data file was produced.
 
@@ -140,11 +141,13 @@ def _provenance(mode, kw):
             "which source revision produced this output.",
             RuntimeWarning, stacklevel=2,
         )
+    if started_at is None:
+        started_at = datetime.now()
     lines = [
         f"NbodyGalaxySimulator version {phys.MODEL_VERSION} "
         f"(build {phys.BUILD_ID})",
         f"mode = {mode}",
-        f"run at {datetime.now().isoformat(timespec='seconds')}",
+        f"run at {started_at.isoformat(timespec='seconds')}",
         f"environment: Python {_python_version()}, NumPy {_module_version(np)}"
         f", Matplotlib {_matplotlib_version()}",
         "parameters actually used by this mode:",
@@ -169,19 +172,19 @@ def _provenance(mode, kw):
     return lines
 
 
-def _write_csv(csvdir, prefix, header, rows, comments=()):
+def _run_stem(mode, started_at):
+    # The suffix distinguishes runs that start in the same second, even
+    # when independent processes write into the same directories.
+    stamp = started_at.strftime("%Y%m%d_%H%M%S")
+    return f"{mode}_{stamp}_{uuid4().hex[:12]}"
+
+
+def _write_csv(csvdir, prefix, header, rows, comments=(), *, output_stem=None):
     os.makedirs(csvdir, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(csvdir, f"{prefix}_{stamp}.csv")
-    if os.path.exists(path):
-        # Two runs within the same second would otherwise silently
-        # overwrite each other's output with no warning.
-        n = 2
-        while os.path.exists(
-                candidate := os.path.join(csvdir, f"{prefix}_{stamp}_{n}.csv")):
-            n += 1
-        path = candidate
-    with open(path, "w", newline="", encoding="utf-8") as fh:
+    if output_stem is None:
+        output_stem = _run_stem(prefix, datetime.now())
+    path = os.path.join(csvdir, output_stem + ".csv")
+    with open(path, "x", newline="", encoding="utf-8") as fh:
         for line in comments:
             fh.write(f"# {line}\n")
         writer = csv.writer(fh)
@@ -271,65 +274,65 @@ def _chaos_rows(result):
 # ======================================================================
 # Summary printers
 # ======================================================================
-def _head(title):
-    print(SEP)
-    print(
+def _head(title, emit=print):
+    emit(SEP)
+    emit(
         f"  NbodyGalaxySimulator {phys.MODEL_VERSION} "
         f"(build {phys.BUILD_ID}) -- {title}"
     )
-    print(SEP)
+    emit(SEP)
 
 
-def _print_wrapped(text, indent="        "):
+def _print_wrapped(text, indent="        ", emit=print):
     line = indent
     for word in text.strip().split():
         if len(line) + len(word) + 1 > W:
-            print(line)
+            emit(line)
             line = indent + word
         else:
             line = f"{line} {word}" if line.strip() else line + word
     if line.strip():
-        print(line)
+        emit(line)
 
 
-def _print_warnings(s):
+def _print_warnings(s, emit=print):
     notes = s.get("warnings") or []
     if not notes:
         return
-    print("  NOTES ON THIS RUN")
+    emit("  NOTES ON THIS RUN")
     for note in notes:
-        _print_wrapped(note)
-    print(SEP)
+        _print_wrapped(note, emit=emit)
+    emit(SEP)
 
 
-def _print_cluster_summary(s):
-    _head("star-cluster relaxation")
-    print(f"  Bodies              : {s['n_bodies']}  (each {s['m_body_msun']:.3f} Msun)")
-    print(f"  Total mass          : {s['total_mass_msun']:.4g}  Msun")
-    print(f"  Plummer scale a     : {s['scale_radius_pc']:.4g}  pc")
-    print(f"  Softening           : {s['softening_pc']:.4g}  pc")
-    print(f"  Force method        : {s['method']}  (theta = {s['theta']:.2f})")
-    print(SEP)
-    print(f"  Timestep            : {s['dt_myr']:.5g}  Myr  "
+def _print_cluster_summary(s, emit=print):
+    _head("star-cluster relaxation", emit=emit)
+    emit(f"  Bodies              : {s['n_bodies']}  (each {s['m_body_msun']:.3f} Msun)")
+    emit(f"  Total mass          : {s['total_mass_msun']:.4g}  Msun")
+    emit(f"  Plummer scale a     : {s['scale_radius_pc']:.4g}  pc")
+    emit(f"  Softening           : {s['softening_pc']:.4g}  pc")
+    emit(f"  Force method        : {s['method']}  (theta = {s['theta']:.2f})")
+    emit(SEP)
+    emit(f"  Timestep            : {s['dt_myr']:.5g}  Myr  "
           f"({s['n_steps']:,} steps, {s['n_snapshots']} snapshots)")
-    print(f"  Crossing time t0    : {s['t_cross0_myr']:.4g}  Myr")
-    print(f"  Relaxation time t0  : {s['t_relax0_myr']:.4g}  Myr")
-    print(f"  Total time run      : {s['total_time_myr']:.4g}  Myr "
+    emit(f"  Crossing time t0    : {s['t_cross0_myr']:.4g}  Myr")
+    emit(f"  Relaxation time t0  : {s['t_relax0_myr']:.4g}  Myr")
+    emit(f"  Total time run      : {s['total_time_myr']:.4g}  Myr "
           f"({s['n_relax_requested']:.3g} x t_relax)")
-    print(SEP)
-    print(f"  Half-mass radius    : {s['r50_initial_pc']:.4g} -> "
+    emit(SEP)
+    emit(f"  Half-mass radius    : {s['r50_initial_pc']:.4g} -> "
           f"{s['r50_final_pc']:.4g}  pc")
-    print(f"  Virial ratio 2T/|W| : {s['virial_ratio_initial']:.4f} -> "
+    emit(f"  Virial ratio 2T/|W| : {s['virial_ratio_initial']:.4f} -> "
           f"{s['virial_ratio_final']:.4f}")
-    print(f"  Unbound (instant.)  : {s['n_unbound_initial']} -> "
+    emit(f"  Unbound (instant.)  : {s['n_unbound_initial']} -> "
           f"{s['n_unbound_final']}  of {s['n_bodies']} "
           f"({s['unbound_fraction_final']:.2%})  [instantaneous, not a "
           "cumulative escape count -- see the Help file]")
-    print(f"  Near-escape tail    : {s['high_velocity_fraction_initial']:.2%} -> "
+    emit(f"  Near-escape tail    : {s['high_velocity_fraction_initial']:.2%} -> "
           f"{s['high_velocity_fraction_final']:.2%}  "
           "(fraction above 90% of local escape speed)")
-    print(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
-    print(SEP)
+    emit(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
+    emit(SEP)
     if s["n_unbound_final"] == 0:
         # Checked against the ACTUAL parameters used, not just the
         # outcome: "expected at default settings" is only true when this
@@ -341,56 +344,56 @@ def _print_cluster_summary(s):
         used_default_settings = (
             not s["softening_explicit"] and s["n_relax_requested"] == 5.0
         )
-        print("  No body was instantaneously unbound at the end of this run.")
+        emit("  No body was instantaneously unbound at the end of this run.")
         if used_default_settings:
-            print("  This is expected at the default softening and run length:")
-            print("  two-body evaporation is a slow process (order 10^2 relaxation")
-            print("  times for an isolated cluster), and force softening chosen")
-            print("  for accuracy also suppresses the hard encounters that")
-            print("  physically drive it.  The near-escape tail above is often")
-            print("  ALSO zero throughout a default run for the same reason, not")
-            print("  only near the very end -- a flat Lagrangian-radius/virial-")
-            print("  ratio history at these defaults is not by itself evidence of")
-            print("  strong two-body relaxation. See the Help file for the")
-            print("  reduced-softening exercise that lets these diagnostics")
-            print("  actually respond within a practical run.")
+            emit("  This is expected at the default softening and run length:")
+            emit("  two-body evaporation is a slow process (order 10^2 relaxation")
+            emit("  times for an isolated cluster), and force softening chosen")
+            emit("  for accuracy also suppresses the hard encounters that")
+            emit("  physically drive it.  The near-escape tail above is often")
+            emit("  ALSO zero throughout a default run for the same reason, not")
+            emit("  only near the very end -- a flat Lagrangian-radius/virial-")
+            emit("  ratio history at these defaults is not by itself evidence of")
+            emit("  strong two-body relaxation. See the Help file for the")
+            emit("  reduced-softening exercise that lets these diagnostics")
+            emit("  actually respond within a practical run.")
         else:
-            print("  This run used explicit, nondefault softening and/or run")
-            print("  length, so this is NOT automatically explained by the")
-            print("  default settings' known suppression of two-body relaxation")
-            print("  -- these particular settings simply did not produce a")
-            print("  measurable escape signal either. See the Help file's")
-            print("  reduced-softening exercise for parameter choices measured")
-            print("  to actually respond within a practical run.")
-    print(SEP)
-    _print_warnings(s)
+            emit("  This run used explicit, nondefault softening and/or run")
+            emit("  length, so this is NOT automatically explained by the")
+            emit("  default settings' known suppression of two-body relaxation")
+            emit("  -- these particular settings simply did not produce a")
+            emit("  measurable escape signal either. See the Help file's")
+            emit("  reduced-softening exercise for parameter choices measured")
+            emit("  to actually respond within a practical run.")
+    emit(SEP)
+    _print_warnings(s, emit=emit)
 
 
-def _print_galaxy_summary(s):
-    _head("galaxy-formation cold collapse")
-    print(f"  Bodies              : {s['n_bodies']}  (each {s['m_body_msun']:.3g} Msun)")
-    print(f"  Total mass          : {s['total_mass_msun']:.4g}  Msun")
-    print(f"  Initial radius      : {s['radius_pc']:.4g}  pc")
-    print(f"  Initial virial ratio: {s['virial_ratio_init']:.3f}  "
+def _print_galaxy_summary(s, emit=print):
+    _head("galaxy-formation cold collapse", emit=emit)
+    emit(f"  Bodies              : {s['n_bodies']}  (each {s['m_body_msun']:.3g} Msun)")
+    emit(f"  Total mass          : {s['total_mass_msun']:.4g}  Msun")
+    emit(f"  Initial radius      : {s['radius_pc']:.4g}  pc")
+    emit(f"  Initial virial ratio: {s['virial_ratio_init']:.3f}  "
           "(0 = perfectly cold)")
-    print(f"  Softening           : {s['softening_pc']:.4g}  pc")
-    print(f"  Force method        : {s['method']}  (theta = {s['theta']:.2f})")
-    print(SEP)
-    print(f"  Timestep            : {s['dt_myr']:.5g}  Myr  "
+    emit(f"  Softening           : {s['softening_pc']:.4g}  pc")
+    emit(f"  Force method        : {s['method']}  (theta = {s['theta']:.2f})")
+    emit(SEP)
+    emit(f"  Timestep            : {s['dt_myr']:.5g}  Myr  "
           f"({s['n_steps']:,} steps, {s['n_snapshots']} snapshots)")
-    print(f"  Free-fall time t_ff : {s['t_freefall_myr']:.4g}  Myr")
-    print(f"  Total time run      : {s['total_time_myr']:.4g}  Myr "
+    emit(f"  Free-fall time t_ff : {s['t_freefall_myr']:.4g}  Myr")
+    emit(f"  Total time run      : {s['total_time_myr']:.4g}  Myr "
           f"({s['n_freefall_requested']:.3g} x t_ff)")
-    print(SEP)
-    print(f"  Half-mass radius    : {s['r50_initial_pc']:.4g} pc (initial) -> "
+    emit(SEP)
+    emit(f"  Half-mass radius    : {s['r50_initial_pc']:.4g} pc (initial) -> "
           f"{s['r50_minimum_pc']:.4g} pc (deepest collapse, at "
           f"{s['time_of_deepest_collapse_myr']:.3g} Myr) -> "
           f"{s['r50_final_pc']:.4g} pc (final)")
-    print(f"  Virial ratio 2T/|W| : {s['virial_ratio_initial']:.4f} -> "
+    emit(f"  Virial ratio 2T/|W| : {s['virial_ratio_initial']:.4f} -> "
           f"{s['virial_ratio_final']:.4f}  "
           f"(at deepest collapse: {s['virial_ratio_at_deepest_collapse']:.4f})")
-    print(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
-    print(SEP)
+    emit(f"  Max sampled energy drift: {s['max_fractional_energy_drift']:.3%}")
+    emit(SEP)
     # Conditional on what THIS run's own inputs and outputs actually were,
     # not a fixed narrative printed regardless of them: a run that did not
     # start cold did not exhibit the classic cold-collapse-into-quasi-
@@ -431,94 +434,94 @@ def _print_galaxy_summary(s):
         rebound_fraction = 0.0
 
     if not started_cold:
-        print("  This run did not start close to cold (Q_initial above 0.3), so")
-        print("  it is not an instance of the classic cold-collapse-into-")
-        print("  quasi-equilibrium scenario -- interpret its virial ratio history")
-        print("  on its own terms, not against that specific benchmark.")
+        emit("  This run did not start close to cold (Q_initial above 0.3), so")
+        emit("  it is not an instance of the classic cold-collapse-into-")
+        emit("  quasi-equilibrium scenario -- interpret its virial ratio history")
+        emit("  on its own terms, not against that specific benchmark.")
     elif not late_ok:
-        print(f"  This run started close to cold (Q_initial near 0) and its half-mass")
-        print(f"  radius fell to a SAMPLED minimum of {s['r50_minimum_pc']:.4g} pc at "
+        emit(f"  This run started close to cold (Q_initial near 0) and its half-mass")
+        emit(f"  radius fell to a SAMPLED minimum of {s['r50_minimum_pc']:.4g} pc at "
               f"{s['time_of_deepest_collapse_myr']:.3g} Myr, ending "
               f"{rebound_fraction:+.1%} away from that minimum -- but only "
               f"{s['late_window_n_dense_samples']} dense integration-step sample(s) "
               f"fall within the final "
               f"{s['late_window_fraction']:.0%} of the run's elapsed time, too few to")
-        print("  assess whether the late-time half-mass radius and virial ratio have")
-        print("  actually settled. This dense sample count is set by the run's own")
-        print("  integration step count, NOT by --target_snapshots (which only")
-        print("  controls how many snapshots are STORED for plotting/CSV output);")
-        print("  run longer and/or finer (raise --n_freefall and/or")
-        print("  --steps_per_freefall) before drawing any quasi-equilibrium")
-        print("  conclusion; the sampled minimum above is itself sampling-dependent")
-        print("  and may understate the true collapse.")
+        emit("  assess whether the late-time half-mass radius and virial ratio have")
+        emit("  actually settled. This dense sample count is set by the run's own")
+        emit("  integration step count, NOT by --target_snapshots (which only")
+        emit("  controls how many snapshots are STORED for plotting/CSV output);")
+        emit("  run longer and/or finer (raise --n_freefall and/or")
+        emit("  --steps_per_freefall) before drawing any quasi-equilibrium")
+        emit("  conclusion; the sampled minimum above is itself sampling-dependent")
+        emit("  and may understate the true collapse.")
     elif late_settled:
-        print(f"  This run started close to cold (Q_initial near 0). Over the final")
-        print(f"  {s['late_window_fraction']:.0%} of its elapsed time "
+        emit(f"  This run started close to cold (Q_initial near 0). Over the final")
+        emit(f"  {s['late_window_fraction']:.0%} of its elapsed time "
               f"({s['late_window_n_dense_samples']} dense integration-step samples "
               f"from {s['late_window_start_myr']:.3g} Myr onward), the half-mass radius")
-        print(f"  varied by only {s['late_r50_fractional_range']:.1%} of its own mean "
+        emit(f"  varied by only {s['late_r50_fractional_range']:.1%} of its own mean "
               f"value and the virial ratio's range was {s['late_virial_ratio_range']:.3f}")
-        print("  -- both within this program's documented 'modest' bounds. The window's")
-        print(f"  own mean half-mass radius is {s['late_r50_rebound_ratio']:.2g}x the "
+        emit("  -- both within this program's documented 'modest' bounds. The window's")
+        emit(f"  own mean half-mass radius is {s['late_r50_rebound_ratio']:.2g}x the "
               f"run's global minimum -- a genuine, material rebound, not a flat tail")
-        print(f"  sitting at its deepest point -- and its mean virial ratio is "
+        emit(f"  sitting at its deepest point -- and its mean virial ratio is "
               f"{s['late_virial_ratio_mean']:.3f}, within "
               f"{s['late_virial_ratio_mean_deviation']:.3f} of the Q=1 virial-balance")
-        print("  condition, not merely quiet at some other level. This is")
-        print("  consistent with the classic cold-collapse scenario having settled")
-        print("  into a quasi-equilibrium remnant through 'violent relaxation'")
-        print("  (Lynden-Bell 1967): the sphere collapses, overshoots, and rebounds,")
-        print("  then oscillates around a roughly steady state rather than")
-        print("  continuing to expand, contract, or swing in Q. This is evidence")
-        print("  CONSISTENT WITH approaching a virialized remnant, not proof of")
-        print("  genuine phase-space (Boltzmann-equation) stationarity -- see the")
-        print("  Help file's Domain of Validity section.")
+        emit("  condition, not merely quiet at some other level. This is")
+        emit("  consistent with the classic cold-collapse scenario having settled")
+        emit("  into a quasi-equilibrium remnant through 'violent relaxation'")
+        emit("  (Lynden-Bell 1967): the sphere collapses, overshoots, and rebounds,")
+        emit("  then oscillates around a roughly steady state rather than")
+        emit("  continuing to expand, contract, or swing in Q. This is evidence")
+        emit("  CONSISTENT WITH approaching a virialized remnant, not proof of")
+        emit("  genuine phase-space (Boltzmann-equation) stationarity -- see the")
+        emit("  Help file's Domain of Validity section.")
     else:
-        print(f"  This run started close to cold (Q_initial near 0) and reached a")
-        print(f"  sampled half-mass-radius minimum of {s['r50_minimum_pc']:.4g} pc at "
+        emit(f"  This run started close to cold (Q_initial near 0) and reached a")
+        emit(f"  sampled half-mass-radius minimum of {s['r50_minimum_pc']:.4g} pc at "
               f"{s['time_of_deepest_collapse_myr']:.3g} Myr, but its final "
               f"{s['late_window_fraction']:.0%}")
-        print(f"  of elapsed time ({s['late_window_n_dense_samples']} dense "
+        emit(f"  of elapsed time ({s['late_window_n_dense_samples']} dense "
               f"integration-step samples) "
               f"shows a half-mass-radius range of {s['late_r50_fractional_range']:.1%} "
               "of its own mean value")
-        print(f"  (linear trend {s['late_r50_linear_slope_pc_per_myr']:+.4g} pc/Myr) "
+        emit(f"  (linear trend {s['late_r50_linear_slope_pc_per_myr']:+.4g} pc/Myr) "
               f"and a virial-ratio range of {s['late_virial_ratio_range']:.3f}.")
-        print(f"  Collapse-before-window: {s['late_window_collapse_before_window']}  "
+        emit(f"  Collapse-before-window: {s['late_window_collapse_before_window']}  "
               f"(rebound ratio {s['late_r50_rebound_ratio']:.2g}x the sampled global "
               "minimum,")
-        print(f"  needs >= {phys.LATE_WINDOW_REBOUND_RATIO:.2g}x); mean virial ratio "
+        emit(f"  needs >= {phys.LATE_WINDOW_REBOUND_RATIO:.2g}x); mean virial ratio "
               f"{s['late_virial_ratio_mean']:.3f} (needs within "
               f"{phys.LATE_WINDOW_Q_CENTER_TOLERANCE:.2f} of Q=1).")
-        print("  This is too much drift and/or oscillation to call this run settled:")
-        print("  it has NOT yet shown a genuine, sustained quasi-equilibrium remnant --")
-        print("  it may still be mid-collapse, mid-rebound, or ringing through a")
-        print("  later contraction. Run longer (raise n_freefall) before concluding")
-        print("  otherwise; a single final virial ratio near 1 does not by itself")
-        print("  establish settling (see above).")
-    print("  Q near 1 alone is necessary but not sufficient for genuine")
-    print("  dynamical equilibrium; see the Help file's Domain of Validity")
-    print("  section before drawing physical conclusions from Q alone.")
-    print(SEP)
-    _print_warnings(s)
+        emit("  This is too much drift and/or oscillation to call this run settled:")
+        emit("  it has NOT yet shown a genuine, sustained quasi-equilibrium remnant --")
+        emit("  it may still be mid-collapse, mid-rebound, or ringing through a")
+        emit("  later contraction. Run longer (raise n_freefall) before concluding")
+        emit("  otherwise; a single final virial ratio near 1 does not by itself")
+        emit("  establish settling (see above).")
+    emit("  Q near 1 alone is necessary but not sufficient for genuine")
+    emit("  dynamical equilibrium; see the Help file's Domain of Validity")
+    emit("  section before drawing physical conclusions from Q alone.")
+    emit(SEP)
+    _print_warnings(s, emit=emit)
 
 
-def _print_chaos_summary(s):
-    _head("sensitivity to initial conditions (chaos)")
-    print(f"  Bodies              : {s['n_bodies']}  (Plummer sphere, "
+def _print_chaos_summary(s, emit=print):
+    _head("sensitivity to initial conditions (chaos)", emit=emit)
+    emit(f"  Bodies              : {s['n_bodies']}  (Plummer sphere, "
           f"a = {s['scale_radius_pc']:.4g} pc)")
-    print(f"  Initial separation  : {s['initial_divergence_pc']:.3e}  pc  "
+    emit(f"  Initial separation  : {s['initial_divergence_pc']:.3e}  pc  "
           f"(relative perturbation {s['relative_perturbation']:.1e})")
-    print(f"  Softening           : {s['softening_pc']:.4g}  pc")
-    print(f"  Force method        : {s['method']}  (theta = {s['theta']:.2f})")
-    print(SEP)
-    print(f"  Timestep            : {s['dt_myr']:.5g}  Myr  "
+    emit(f"  Softening           : {s['softening_pc']:.4g}  pc")
+    emit(f"  Force method        : {s['method']}  (theta = {s['theta']:.2f})")
+    emit(SEP)
+    emit(f"  Timestep            : {s['dt_myr']:.5g}  Myr  "
           f"({s['n_steps']:,} steps, {s['n_snapshots']} snapshots)")
-    print(f"  Crossing time t0    : {s['t_cross0_myr']:.4g}  Myr")
-    print(f"  Total time run      : {s['total_time_myr']:.4g}  Myr "
+    emit(f"  Crossing time t0    : {s['t_cross0_myr']:.4g}  Myr")
+    emit(f"  Total time run      : {s['total_time_myr']:.4g}  Myr "
           f"({s['n_cross_requested']:.3g} x t_cross)")
-    print(SEP)
-    print(f"  Separation grew     : {s['initial_divergence_pc']:.3e} -> "
+    emit(SEP)
+    emit(f"  Separation grew     : {s['initial_divergence_pc']:.3e} -> "
           f"{s['final_divergence_pc']:.4g}  pc  "
           f"(peak {s['max_divergence_pc']:.4g} pc)")
     if math.isfinite(s["lyapunov_exponent_per_myr"]) and s["lyapunov_exponent_per_myr"] > 0:
@@ -529,26 +532,26 @@ def _print_chaos_summary(s):
         # estimate from an automatically chosen window, not a certified,
         # held-out-validated Lyapunov exponent (see the Help file's
         # Domain of Validity section).
-        print(f"  Lyapunov exponent*  : {s['lyapunov_exponent_per_myr']:.4g}  1/Myr  "
+        emit(f"  Lyapunov exponent*  : {s['lyapunov_exponent_per_myr']:.4g}  1/Myr  "
               "(finite-time growth-rate ESTIMATE, not a certified value)")
-        print(f"  Lyapunov time*      : {s['lyapunov_time_myr']:.4g}  Myr  "
+        emit(f"  Lyapunov time*      : {s['lyapunov_time_myr']:.4g}  Myr  "
               f"({s['lyapunov_time_over_t_cross']:.3g} x crossing times; "
               "i.e. the e-folding time of that same estimate)")
-        print(f"  Fit used            : {s['n_points_used_in_fit']} of "
+        emit(f"  Fit used            : {s['n_points_used_in_fit']} of "
               f"{s['n_snapshots']} snapshots  (R^2 = "
               f"{s['lyapunov_fit_r_squared']:.5f}, spanning "
               f"{s['lyapunov_fit_window_efolds']:.2f} e-folds, curvature t = "
               f"{s['lyapunov_fit_curvature_t_statistic']:.2f})")
-        print("  * a heuristic finite-time fit to the measured divergence over an")
-        print("  automatically chosen window, not a formal chaos test and not")
-        print("  validated outside the specific model/parameter regime this")
-        print("  program explores -- see the HTML notes.")
+        emit("  * a heuristic finite-time fit to the measured divergence over an")
+        emit("  automatically chosen window, not a formal chaos test and not")
+        emit("  validated outside the specific model/parameter regime this")
+        emit("  program explores -- see the HTML notes.")
     else:
-        print("  No clean exponential-growth window was found in this run; "
+        emit("  No clean exponential-growth window was found in this run; "
               "see the notes below.")
-    print(f"  Max sampled energy drift : {s['max_fractional_energy_drift']:.3%}")
-    print(SEP)
-    _print_warnings(s)
+    emit(f"  Max sampled energy drift : {s['max_fractional_energy_drift']:.3%}")
+    emit(SEP)
+    _print_warnings(s, emit=emit)
 
 
 # ======================================================================
@@ -562,7 +565,7 @@ def run(mode="cluster",
         relative_perturbation=None,
         softening_pc=None, theta=None, method=None,
         target_snapshots=None, seed=None, perturbation_seed=None,
-        outdir=None, csvdir=None, no_plot=False, dpi=150, lw=1.6):
+        outdir=None, csvdir=None, no_plot=False, dpi=150, lw=1.6, *, max_steps=None):
     """
     Validate presentation-level inputs, run the requested mode, print a
     summary, optionally write a CSV, and hand the result to plot_nbg.py.
@@ -592,6 +595,13 @@ def run(mode="cluster",
                           "no_plot and no csvdir would produce no output "
                           "at all.")
 
+    if max_steps is not None and mode != "cluster":
+        raise ValueError("--max_steps is available only in cluster mode.")
+    started_at = datetime.now()
+    output_stem = _run_stem(mode, started_at) if (
+        csvdir is not None or (outdir is not None and not no_plot)
+    ) else None
+
     def _kw(**pairs):
         return {k: v for k, v in pairs.items() if v is not None}
 
@@ -600,9 +610,9 @@ def run(mode="cluster",
                      scale_radius_pc=scale_radius_pc, n_relax=n_relax,
                      steps_per_crossing=steps_per_crossing,
                      softening_pc=softening_pc, theta=theta, method=method,
-                     target_snapshots=target_snapshots, seed=seed)
+                     target_snapshots=target_snapshots, seed=seed, max_steps=max_steps)
         result = phys.run_cluster(**kwargs)
-        _print_cluster_summary(result["summary"])
+        print_summary = _print_cluster_summary
         header, rows, prefix = CLUSTER_HEADER, _cluster_rows(result), "cluster"
     elif mode == "galaxy":
         kwargs = _kw(n_bodies=n_bodies, total_mass_msun=total_mass_msun,
@@ -611,7 +621,7 @@ def run(mode="cluster",
                      softening_pc=softening_pc, theta=theta, method=method,
                      target_snapshots=target_snapshots, seed=seed)
         result = phys.run_galaxy(**kwargs)
-        _print_galaxy_summary(result["summary"])
+        print_summary = _print_galaxy_summary
         header, rows, prefix = GALAXY_HEADER, _galaxy_rows(result), "galaxy"
     else:
         kwargs = _kw(n_bodies=n_bodies, total_mass_msun=total_mass_msun,
@@ -622,17 +632,25 @@ def run(mode="cluster",
                      target_snapshots=target_snapshots, seed=seed,
                      perturbation_seed=perturbation_seed)
         result = phys.run_chaos(**kwargs)
-        _print_chaos_summary(result["summary"])
+        print_summary = _print_chaos_summary
         header, rows, prefix = CHAOS_HEADER, _chaos_rows(result), "chaos"
 
+    summary_lines = []
+    print_summary(result["summary"], emit=summary_lines.append)
+    print("\n".join(summary_lines))
+
+    provenance = (_provenance(mode, result["summary"], started_at)
+                  if csvdir is not None or (outdir is not None and not no_plot)
+                  else None)
     if csvdir is not None:
         _write_csv(csvdir, prefix, header, rows,
-                   comments=_provenance(mode, result["summary"]))
+                   comments=[*provenance, "", "Console summary:", *summary_lines],
+                   output_stem=output_stem)
 
     if not no_plot:
         import plot_nbg as viz  # see the module-level comment on this import
         viz.plot_mode(mode, result, outdir=outdir, dpi=dpi, lw=lw,
-                       provenance=_provenance(mode, result["summary"]))
+                       provenance=provenance, output_stem=output_stem)
     elif outdir is not None:
         print("[driver_nbg] no_plot=True: skipping figure generation "
               "despite --outdir being set.")

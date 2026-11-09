@@ -67,7 +67,8 @@ def _unique_stem(outdir, name):
     return os.path.join(outdir, f"{stem}_{n}{ext}")
 
 
-def _finish(fig, outdir, prefix, dpi, lw=None, figsize=None, provenance=None):
+def _finish(fig, outdir, prefix, dpi, lw=None, figsize=None, provenance=None,
+            *, output_stem=None):
     """
     Optionally save a timestamped PNG (with a provenance sidecar), then
     display the figure. See plot_sev.py's _finish() for the full
@@ -79,12 +80,14 @@ def _finish(fig, outdir, prefix, dpi, lw=None, figsize=None, provenance=None):
               ha="right", va="bottom", fontsize=6, color="0.55")
     if outdir is not None:
         os.makedirs(outdir, exist_ok=True)
-        path = _unique_stem(outdir, _timestamp_name(prefix))
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        path = (_unique_stem(outdir, _timestamp_name(prefix)) if output_stem is None
+                else os.path.join(outdir, output_stem + ".png"))
+        with open(path, "xb") as f:
+            fig.savefig(f, format="png", dpi=dpi, bbox_inches="tight")
         print(f"[plot_nbg] PNG saved -> {path}")
         stem, _ = os.path.splitext(path)
         sidecar = stem + ".provenance.txt"
-        with open(sidecar, "w", encoding="utf-8") as f:
+        with open(sidecar, "x", encoding="utf-8") as f:
             f.write(f"Provenance for {os.path.basename(path)}\n")
             f.write("(rendering parameters are always recorded below; "
                     "scientific run parameters are recorded whenever the "
@@ -167,7 +170,7 @@ def _energy_panel(ax, t_myr, energy, label, color):
 # Cluster mode
 # ----------------------------------------------------------------------
 def plot_cluster(result, outdir=None, dpi=150, lw=1.6, provenance=None,
-                  figsize=(13.0, 8.0)):
+                  figsize=(13.0, 8.0), *, output_stem=None):
     s = result["summary"]
     t = result["t"] / phys.MYR
     lag = result["lagrangian_radii"] / phys.PC
@@ -221,14 +224,15 @@ def plot_cluster(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     fig.suptitle("NbodyGalaxySimulator -- star-cluster relaxation "
                   f"(theta={s['theta']:.2f}, method={s['method']})")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    _finish(fig, outdir, "cluster", dpi, lw=lw, figsize=figsize, provenance=provenance)
+    _finish(fig, outdir, "cluster", dpi, lw=lw, figsize=figsize,
+            provenance=provenance, output_stem=output_stem)
 
 
 # ----------------------------------------------------------------------
 # Galaxy mode
 # ----------------------------------------------------------------------
 def plot_galaxy(result, outdir=None, dpi=150, lw=1.6, provenance=None,
-                 figsize=(13.0, 8.0)):
+                 figsize=(13.0, 8.0), *, output_stem=None):
     s = result["summary"]
     t = result["t"] / phys.MYR
     lag = result["lagrangian_radii"] / phys.PC
@@ -283,14 +287,15 @@ def plot_galaxy(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     fig.suptitle("NbodyGalaxySimulator -- galaxy-formation cold collapse "
                   f"(theta={s['theta']:.2f}, method={s['method']})")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    _finish(fig, outdir, "galaxy", dpi, lw=lw, figsize=figsize, provenance=provenance)
+    _finish(fig, outdir, "galaxy", dpi, lw=lw, figsize=figsize,
+            provenance=provenance, output_stem=output_stem)
 
 
 # ----------------------------------------------------------------------
 # Chaos mode
 # ----------------------------------------------------------------------
 def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
-               figsize=(13.0, 8.0)):
+               figsize=(13.0, 8.0), *, output_stem=None):
     s = result["summary"]
     t = result["t"] / phys.MYR
     div = result["divergence"] / phys.PC
@@ -387,13 +392,16 @@ def plot_chaos(result, outdir=None, dpi=150, lw=1.6, provenance=None,
     fig.suptitle("NbodyGalaxySimulator -- sensitivity to initial conditions "
                  f"(theta={s['theta']:.2f}, method={s['method']})")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    _finish(fig, outdir, "chaos", dpi, lw=lw, figsize=figsize, provenance=provenance)
+    _finish(fig, outdir, "chaos", dpi, lw=lw, figsize=figsize,
+            provenance=provenance, output_stem=output_stem)
 
 
 PLOTTERS = {"cluster": plot_cluster, "galaxy": plot_galaxy, "chaos": plot_chaos}
 
 
-def plot_mode(mode, result, outdir=None, dpi=150, lw=1.6, provenance=None):
+def plot_mode(mode, result, outdir=None, dpi=150, lw=1.6, provenance=None,
+              *, output_stem=None):
     if mode not in PLOTTERS:
         raise ValueError(f"mode must be one of {sorted(PLOTTERS)}; got {mode!r}.")
-    return PLOTTERS[mode](result, outdir=outdir, dpi=dpi, lw=lw, provenance=provenance)
+    return PLOTTERS[mode](result, outdir=outdir, dpi=dpi, lw=lw,
+                          provenance=provenance, output_stem=output_stem)

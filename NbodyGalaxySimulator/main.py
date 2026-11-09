@@ -127,6 +127,11 @@ def parse_args():
                    metavar="N", help="timesteps per initial crossing time "
                         "(cluster/chaos modes; default 60/50)")
 
+    g.add_argument("--max_steps", type=_positive_int, default=argparse.SUPPRESS,
+                   metavar="N", help="override the step ceiling "
+                        f"(default {physics_nbg.MAX_STEPS:,}); does not "
+                        "change the timestep or requested run length")
+
     g = p.add_argument_group("Galaxy mode (uniform sphere, cold collapse)")
     g.add_argument("--radius_pc", type=_finite_float, default=None, metavar="PC",
                    help="initial sphere radius [pc] (default 200.0)")
@@ -179,7 +184,7 @@ def parse_args():
                         "sidecar) in PATH; the figure is still displayed")
     g.add_argument("--csvdir", type=str, default=None, metavar="PATH",
                    help="also write a timestamped CSV diagnostics file in "
-                        "PATH; this does not affect the screen display")
+                        "PATH, with provenance and the console summary")
     g.add_argument("--no_plot", action="store_true",
                    help="skip the figure entirely (requires --csvdir, since "
                         "--outdir alone controls only the figure this skips)")
@@ -206,7 +211,7 @@ def main():
             target_snapshots=args.target_snapshots, seed=args.seed,
             perturbation_seed=args.perturbation_seed,
             outdir=args.outdir, csvdir=args.csvdir, no_plot=args.no_plot,
-            dpi=args.dpi, lw=args.lw,
+            dpi=args.dpi, lw=args.lw, max_steps=getattr(args, "max_steps", None),
         )
     except (ValueError, RuntimeError, OSError, OverflowError) as exc:
         # physics_nbg.py converts the numerical-overflow conditions it

@@ -873,6 +873,10 @@ current-page commands, numerical claims and build checks retained.
   contracts for six Beats and eighteen exercise cards; added runnable API
   starters. No force or integration changes. Release documents remain pending.
   293 tests (from 292). BUILD_ID: 95bbd3e5acf6.
+
+  2026-11-09 Codex. Added a per-run cluster step ceiling, CSV console
+  summaries, and a shared filename stem for the CSV, figure and sidecar.
+  295 tests (from 293). BUILD_ID: e773938b6550.
 """
 
 import ast
@@ -6064,7 +6068,8 @@ class TestDriverValidation(unittest.TestCase):
                     "cluster",
                     {"n_bodies": 20, "total_mass_msun": 1.0e3,
                      "scale_radius_pc": 1.0, "n_relax_requested": 1.0,
-                     "steps_per_crossing": 10, "target_snapshots": 20,
+                     "steps_per_crossing": 10, "max_steps": phys.MAX_STEPS,
+                     "target_snapshots": 20,
                      "softening_pc": 0.1, "softening_explicit": True,
                      "theta": 0.5, "method": "direct", "seed": 1},
                 )
@@ -6088,6 +6093,44 @@ class TestCsvOutput(unittest.TestCase):
     _printed_cluster_summary/_printed_galaxy_summary helpers) already
     capture it deliberately and are unaffected by this change.
     """
+
+    def test_run_outputs_share_start_stamp_and_csv_keeps_console_summary(self):
+        from datetime import datetime
+        cases = (("cluster", {"n_relax": 0.2, "steps_per_crossing": 8}),
+                 ("galaxy", {"n_freefall": 0.5, "steps_per_freefall": 8}),
+                 ("chaos", {"n_cross": 0.5, "steps_per_crossing": 8,
+                            "perturbation_seed": 2}))
+        for mode, options in cases:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                csvdir, outdir = Path(tmp) / "csv", Path(tmp) / "png"
+                console = io.StringIO()
+                with mock.patch.object(driver, "datetime") as clock, \
+                     mock.patch.object(plotting, "datetime") as plot_clock, \
+                     mock.patch("matplotlib.pyplot.show"), \
+                     contextlib.redirect_stdout(console):
+                    clock.now.return_value = datetime(2099, 1, 2, 3, 4, 5)
+                    plot_clock.now.return_value = datetime(2099, 1, 2, 3, 8, 9)
+                    driver.run(mode=mode, n_bodies=12, seed=1, csvdir=str(csvdir),
+                               outdir=str(outdir), dpi=40, **options)
+                csv_path, = csvdir.glob("*.csv")
+                png, = outdir.glob("*.png")
+                sidecar, = outdir.glob("*.provenance.txt")
+                self.assertEqual(csv_path.stem, png.stem)
+                self.assertEqual(sidecar.name, png.stem + ".provenance.txt")
+                self.assertTrue(png.stem.startswith(f"{mode}_20990102_030405_"))
+                lines = csv_path.read_text(encoding="utf-8").splitlines()
+                start = lines.index("# Console summary:") + 1
+                end = next(i for i in range(start, len(lines))
+                           if not lines[i].startswith("# "))
+                expected = console.getvalue().split("[driver_nbg] CSV saved ->")[0]
+                self.assertEqual([line[2:] for line in lines[start:end]],
+                                 expected.splitlines())
+                self.assertTrue(lines[end].startswith("t_Myr,"))
+                provenance = sidecar.read_text(encoding="utf-8")
+                self.assertIn("run at 2099-01-02T03:04:05", provenance)
+                self.assertIn("# run at 2099-01-02T03:04:05", lines)
+
+
     def test_cluster_csv_has_expected_header_and_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("matplotlib.pyplot.show"), \
@@ -6254,6 +6297,25 @@ class TestCsvOutput(unittest.TestCase):
 
 # ======================================================================
 class TestCli(unittest.TestCase):
+    def test_cluster_step_ceiling_override_reaches_integration(self):
+        import main as entry
+        argv = ["main.py", "--mode", "cluster", "--n_bodies", "12",
+                "--n_relax", "10", "--steps_per_crossing", "8", "--seed", "1",
+                "--no_plot"]
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(phys, "MAX_STEPS", 20):
+            argv += ["--csvdir", tmp]
+            with mock.patch.object(sys, "argv", argv):
+                with self.assertRaisesRegex(SystemExit, r"needs 48 .*--max_steps 48"):
+                    entry.main()
+            with mock.patch.object(sys, "argv", argv + ["--max_steps", "48"]), \
+                 contextlib.redirect_stdout(io.StringIO()) as console:
+                entry.main()
+            path, = Path(tmp).glob("*.csv")
+            self.assertIn("#     max_steps = 48", path.read_text(encoding="utf-8"))
+            self.assertIn("(48 steps,", console.getvalue())
+
+
     def test_invalid_mode_gives_clean_cli_error(self):
         result = run_cli(["--mode", "orbit"])
         self.assertEqual(result.returncode, 2)

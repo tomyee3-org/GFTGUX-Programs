@@ -56,7 +56,7 @@ import warnings
 
 import numpy as np
 
-MODEL_VERSION = "1.0.2"
+MODEL_VERSION = "1.0.3"
 
 
 #: The exact source files this build identifier covers: only the four core
@@ -135,7 +135,7 @@ KM = 1.0e3                      # m
 MIN_BODIES = 3
 MAX_BODIES = 5_000
 MIN_STEPS = 1
-MAX_STEPS = 200_000
+MAX_STEPS = 400_000
 MAX_SNAPSHOTS = 4_000
 # MAX_BODIES and MAX_SNAPSHOTS are each individually bounded, but their
 # PRODUCT also needs a bound: the stored positions and velocities
@@ -2669,9 +2669,12 @@ def leapfrog_step(positions, velocities, masses, dt, softening,
 
 def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
                      method="tree", theta=0.5, snapshot_stride=1,
-                     track_dense=False):
+                     track_dense=False, *, max_steps=None):
     """
     Run a fixed-step leapfrog N-body integration and return snapshots.
+
+    max_steps overrides the step ceiling for sparse output. Dense
+    diagnostics remain bounded by MAX_STEPS.
 
     Snapshots (including the initial state) are recorded every
     ``snapshot_stride`` steps. Energy, momentum, and the virial work term
@@ -2757,7 +2760,13 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
     """
     positions, velocities, masses = _validate_state(positions, velocities, masses)
     dt = _require_positive("dt", dt)
-    n_steps = _require_int("n_steps", n_steps, lo=MIN_STEPS, hi=MAX_STEPS)
+    step_limit = MAX_STEPS if max_steps is None else _require_int(
+        "max_steps", max_steps, lo=MIN_STEPS
+    )
+    if track_dense:
+        # Dense arrays scale with step count, unlike stored snapshots.
+        step_limit = min(step_limit, MAX_STEPS)
+    n_steps = _require_int("n_steps", n_steps, lo=MIN_STEPS, hi=step_limit)
     softening = _require_positive("softening", softening)
     method = _require_method(method)
     snapshot_stride = _require_int("snapshot_stride", snapshot_stride, lo=1)
@@ -2767,10 +2776,7 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
     # multiple of snapshot_stride -- otherwise the reported final energy,
     # Lagrangian radii, etc. would silently belong to an earlier step than
     # the one the caller asked to run to.
-    snap_steps = list(range(0, n_steps, snapshot_stride))
-    if snap_steps[-1] != n_steps:
-        snap_steps.append(n_steps)
-    n_snapshots = len(snap_steps)
+    n_snapshots = (n_steps - 1) // snapshot_stride + 2
     if n_snapshots > MAX_SNAPSHOTS:
         raise ValueError(
             f"n_steps / snapshot_stride = {n_snapshots:,} snapshots exceeds "
@@ -2788,6 +2794,8 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
             "raise snapshot_stride or lower n_bodies/n_steps."
         )
 
+    snap_steps = list(range(0, n_steps, snapshot_stride))
+    snap_steps.append(n_steps)
     t_hist = np.empty(n_snapshots)
     pos_hist = np.empty((n_snapshots, n_bodies, 3))
     vel_hist = np.empty((n_snapshots, n_bodies, 3))
@@ -3881,10 +3889,13 @@ def _late_time_window_stats(t, r50_series, virial_series,
 def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
                  n_relax=5.0, steps_per_crossing=60, softening_pc=None,
                  theta=0.5, method="tree", target_snapshots=150, seed=None,
-                 lagrangian_fractions=LAGRANGIAN_FRACTIONS_DEFAULT):
+                 lagrangian_fractions=LAGRANGIAN_FRACTIONS_DEFAULT, *, max_steps=None):
     """
     Star-cluster mode: a Plummer sphere evolved under mutual gravity for a
     chosen multiple of its own nominal two-body relaxation time.
+
+    max_steps overrides the default step ceiling for this run only; it
+    does not alter the requested duration, timestep, or snapshot limits.
 
     The run length is set as a multiple, ``n_relax``, of the cluster's own
     initial two-body relaxation time (relaxation_time()), and the
@@ -3955,6 +3966,10 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     method = _require_method(method)
     target_snapshots = _require_int("target_snapshots", target_snapshots, lo=2)
 
+    step_limit = MAX_STEPS if max_steps is None else _require_int(
+        "max_steps", max_steps, lo=MIN_STEPS
+    )
+
     # Softening is computed here, before the initial conditions, because
     # plummer_sphere() needs it to rescale velocities to the ACTUAL
     # discrete, softened realization's scalar virial balance, not an
@@ -3976,9 +3991,15 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
     t_relax0 = relaxation_time(n_bodies, r50_0, total_mass_kg)
 
     dt = t_cross0 / steps_per_crossing
-    n_steps = _require_int(
-        "computed n_steps", round(n_relax * t_relax0 / dt), lo=MIN_STEPS, hi=MAX_STEPS
-    )
+    n_steps = _require_int("computed n_steps", round(n_relax * t_relax0 / dt),
+                           lo=MIN_STEPS)
+    if n_steps > step_limit:
+        raise ValueError(
+            f"Cluster run needs {n_steps:,} integration steps, above the "
+            f"{step_limit:,}-step ceiling. To allow the requested run, "
+            f"pass --max_steps {n_steps} (or max_steps={n_steps} in Python). "
+            "Alternatively, shorten the run with --n_relax."
+        )
     stride = _pick_stride(n_steps, target_snapshots)
 
     warnings = []
@@ -3995,7 +4016,8 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
         )
 
     sim = integrate_nbody(pos0, vel0, masses, dt, n_steps, softening,
-                           method=method, theta=theta, snapshot_stride=stride)
+                           method=method, theta=theta, snapshot_stride=stride,
+                           max_steps=step_limit)
 
     lagrangian = _lagrangian_track(sim["positions"], masses, lagrangian_fractions)
     # The OFFICIAL virial ratio (reported, plotted, and written to the
@@ -4032,7 +4054,8 @@ def run_cluster(n_bodies=200, total_mass_msun=1.0e3, scale_radius_pc=1.0,
         steps_per_crossing=steps_per_crossing, target_snapshots=target_snapshots,
         dt_myr=dt / MYR, n_steps=n_steps, n_snapshots=sim["t"].size,
         t_cross0_myr=t_cross0 / MYR, t_relax0_myr=t_relax0 / MYR,
-        n_relax_requested=n_relax, total_time_myr=sim["t"][-1] / MYR,
+        n_relax_requested=n_relax, max_steps=step_limit,
+        total_time_myr=sim["t"][-1] / MYR,
         r50_initial_pc=r50_0 / PC, r50_final_pc=lagrangian[-1, list(lagrangian_fractions).index(0.5)] / PC
         if 0.5 in lagrangian_fractions else float("nan"),
         n_unbound_initial=int(n_unbound[0]), n_unbound_final=int(n_unbound[-1]),
