@@ -877,6 +877,12 @@ current-page commands, numerical claims and build checks retained.
   2026-11-09 Codex. Added a per-run cluster step ceiling, CSV console
   summaries, and a shared filename stem for the CSV, figure and sidecar.
   295 tests (from 293). BUILD_ID: e773938b6550.
+
+  2026-11-12 Codex and Tom, Kickoff5. Consolidated one Help with six Beats
+  and seventeen exercises, synchronized guide/release documents, refreshed
+  the current documentation contracts. Executable core unchanged from
+  version 1.0.3. Independent Kickoff5 review pending.
+  295 tests (from 295). BUILD_ID: e773938b6550.
 """
 
 import ast
@@ -6882,13 +6888,29 @@ class TestHelpFile(unittest.TestCase):
                     setattr(TestHelpFile, name, value)
 
     def test_worked_beat_commands_match_sample_guide_when_supplied(self):
+        import shlex
+        def command_args(command):
+            return shlex.split(command.replace("^", "").replace("SEED", "1"))
         commands = self._worked_commands(self.html)
-        self.assertEqual(len(commands), 6)
-        self.assertEqual([command.split("--mode ")[1].split()[0] for command in commands],
-                         ["cluster", "cluster", "cluster", "cluster", "galaxy", "chaos"])
-        self.assertIn("--seed 1 --perturbation_seed 1", commands[-1])
+        self.assertEqual(len(commands), 8)
+        modes = [command.split("--mode ")[1].split()[0] for command in commands]
+        self.assertEqual(modes, ["cluster"] * 4 + ["galaxy", "chaos", "cluster", "cluster"])
+        self.assertIn("--seed 1 --perturbation_seed 1", commands[5])
         if self.guide is not None:
-            self.assertEqual(commands, self._worked_commands(self.guide))
+            reference = [command_args(c) for c in commands]
+            for command in self._worked_commands(self.guide):
+                args = command_args(command)
+                # The Guide also requests CSV files for inspectable checkpoints.
+                if "--csvdir" in args:
+                    i = args.index("--csvdir")
+                    args = args[:i] + args[i+2:]
+                normalized = []
+                for candidate in reference:
+                    if "--csvdir" in candidate:
+                        i = candidate.index("--csvdir")
+                        candidate = candidate[:i] + candidate[i+2:]
+                    normalized.append(candidate)
+                self.assertIn(args, normalized)
 
     def test_help_explains_core_diagnostic_caveats(self):
         text = self._section_text("reading")
@@ -6911,13 +6933,27 @@ class TestHelpFile(unittest.TestCase):
         self._require_guide()
         self.assertIn(phys.MODEL_VERSION, self.guide)
         self.assertIn(phys.BUILD_ID, self.guide)
-        figures = re.findall(r'src="data:image/png;base64,([^\"]+)"', self.guide)
-        self.assertGreaterEqual(len(figures), len(self._worked_commands(self.html)))
-        for data in figures:
-            raw = base64.b64decode(data, validate=True)
+        parser = HtmlTreeParser()
+        parser.feed(self.guide)
+        sections = descendants(parser.root, lambda n: n.tag == "section")
+        figures = descendants(parser.root, lambda n: n.tag == "img")
+        self.assertEqual(len(figures), 6)
+        for beat in (0, 1, 3, 4, 5):
+            matches = [n for n in sections if n.attrs.get("data-help-beat") == str(beat)]
+            self.assertTrue(matches, f"no representative figure for Beat {beat}")
+            for section in matches:
+                self.assertTrue(descendants(section, lambda n: n.tag == "img"))
+                text = normalized_text(section)
+                self.assertIn("What it shows", text)
+                self.assertIn("Headline values", text)
+        for fig in figures:
+            src = fig.attrs.get("src", "")
+            self.assertTrue(src.startswith("data:image/png;base64,"))
+            raw = base64.b64decode(src.split(",", 1)[1], validate=True)
             self.assertTrue(raw.startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(raw[25], 3)  # Indexed PNG, generated for this build.
 
-    def test_help_has_six_beats_and_eighteen_linked_exercise_cards(self):
+    def test_help_has_six_beats_and_seventeen_linked_exercise_cards(self):
         self.assertIn("<style>", self.html)
         for i in range(6):
             beat = nodes_by_id(self.root, f"beat{i}")
@@ -6925,7 +6961,11 @@ class TestHelpFile(unittest.TestCase):
             links = descendants(beat[0], lambda node: node.tag == "a" and
                                 node.attrs.get("href", "").startswith("#exp"))
             self.assertTrue(links)
-        for i in range(1, 19):
+        expected = set(range(1, 17)) | {18}
+        ids = {int(n.attrs["id"][3:]) for n in descendants(self.root)
+               if re.fullmatch(r"exp[0-9]+", n.attrs.get("id", ""))}
+        self.assertEqual(ids, expected)
+        for i in sorted(expected):
             self.assertTrue(self._exercise(i))
 
     def test_release_notes_current_record_when_supplied(self):
@@ -6958,12 +6998,13 @@ class TestHelpFile(unittest.TestCase):
             with self.subTest(section_id=section_id):
                 self.assertEqual(len(nodes_by_id(self.root, section_id)), 1)
 
-    def test_resolution_exercise_preserves_controlled_comparison_caveats(self):
-        text = self._exercise(17).lower()
-        for phrase in ("--softening_pc", "n^-0.26", "several", "seeds", "median",
-                       "maximum minus minimum", "inconclusive", "not proof"):
+    def test_resolution_note_preserves_separate_parameter_and_seed_checks(self):
+        text = self._section_text("beat3").lower()
+        for phrase in ("particle number", "softening", "separately", "several seeds",
+                       "inconclusive", "does not demonstrate convergence"):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
+        self.assertFalse(nodes_by_id(self.root, "exp17"))
 
     def test_license_uses_original_investigation_wording(self):
         attribution = self._section_text("license")
