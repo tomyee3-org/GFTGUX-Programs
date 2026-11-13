@@ -883,6 +883,14 @@ current-page commands, numerical claims and build checks retained.
   the current documentation contracts. Executable core unchanged from
   version 1.0.3. Independent Kickoff5 review pending.
   295 tests (from 295). BUILD_ID: e773938b6550.
+
+Audit51 preparation, 2026-11-13:
+  Distinguish Lagrangian curves; give actionable CLI storage/galaxy-ceiling
+  remedies. Update current Help contracts and hyphenated Guide filename.
+  Exclude encoded image payloads from the audit-history sweep; image bytes
+  can coincidentally spell reviewer names without visible text leaking.
+  296 tests (from 295). BUILD_ID: 3e54985aab06.
+
 """
 
 import ast
@@ -1031,9 +1039,12 @@ def _collapse_wrapped_identifiers(source):
 def _assert_no_leaked_history(testcase, source, label):
     """Run the full leak sweep (see LEAK_PHRASES et al. above) against one
     source string, reporting failures against ``label`` (a file name)."""
+    # Encoded PNG bytes can coincidentally spell ordinary audit names.
+    # Keep the sweep over all markup/prose, excluding only image payloads.
+    source = re.sub(r"data:image/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+", "", source)
     for phrase in LEAK_PHRASES:
         with testcase.subTest(name=label, phrase=phrase):
-            testcase.assertNotIn(phrase, source)
+            testcase.assertFalse(phrase in source, f"found {phrase!r} in {label}")
     with testcase.subTest(name=label, phrase="Audit<N> round marker"):
         match = LEAK_AUDIT_ROUND_PATTERN.search(source)
         testcase.assertIsNone(
@@ -6303,6 +6314,22 @@ class TestCsvOutput(unittest.TestCase):
 
 # ======================================================================
 class TestCli(unittest.TestCase):
+    def test_limit_errors_offer_cli_options_before_integration(self):
+        galaxy = run_cli(["--mode", "galaxy", "--n_bodies", "3",
+                          "--n_freefall", "6000", "--steps_per_freefall", "80",
+                          "--no_plot", "--csvdir", "."])
+        self.assertEqual(galaxy.returncode, 1)
+        self.assertIn("480,000", galaxy.stderr)
+        self.assertIn("--n_freefall", galaxy.stderr)
+        self.assertIn("--steps_per_freefall", galaxy.stderr)
+        self.assertIn("only in cluster mode", galaxy.stderr)
+        memory = run_cli(["--mode", "galaxy", "--n_bodies", "5000",
+                          "--target_snapshots", "4000", "--no_plot", "--csvdir", "."])
+        self.assertEqual(memory.returncode, 1)
+        self.assertIn("--target_snapshots", memory.stderr)
+        self.assertIn("snapshot_stride in the Python API", memory.stderr)
+        self.assertNotIn("Traceback", memory.stderr)
+
     def test_cluster_step_ceiling_override_reaches_integration(self):
         import main as entry
         argv = ["main.py", "--mode", "cluster", "--n_bodies", "12",
@@ -6817,7 +6844,7 @@ class TestHelpFile(unittest.TestCase):
             raise unittest.SkipTest("tutorial Help absent from program-only checkout")
         cls.path = cls.paths[0]
         cls.html = cls.path.read_text(encoding="utf-8")
-        guide_path = cls.path.parent / "SampleOutputs" / "NbodyGalaxySimulatorSampleOutputs_Guide.html"
+        guide_path = cls.path.parent / "SampleOutputs" / "NbodyGalaxySimulator-SampleOutputs_Guide.html"
         cls.guide = guide_path.read_text(encoding="utf-8") if guide_path.is_file() else None
         parser = HtmlTreeParser()
         parser.feed(cls.html)
@@ -6861,7 +6888,7 @@ class TestHelpFile(unittest.TestCase):
     def test_no_review_or_audit_history_leaked_into_student_help(self):
         _assert_no_leaked_history(self, self.html, self.path.name)
         if self.guide is not None:
-            _assert_no_leaked_history(self, self.guide, "NbodyGalaxySimulatorSampleOutputs_Guide.html")
+            _assert_no_leaked_history(self, self.guide, "NbodyGalaxySimulator-SampleOutputs_Guide.html")
 
     def test_canonical_help_and_guide_share_build(self):
         self._require_guide()
@@ -7020,12 +7047,12 @@ class TestHelpFile(unittest.TestCase):
     def test_domain_of_validity_distinguishes_model_from_equilibrium(self):
         validity = self._section_text("validity")
         self.assertIn("equal-mass, softened Newtonian particle model", validity)
-        self.assertIn("does not prove full phase-space equilibrium", validity)
+        self.assertIn("does not prove full equilibrium", validity)
 
     def test_settled_verdict_scope_and_dense_sampling_are_documented(self):
         validity = self._section_text("validity")
-        for phrase in ("six numerical gates", "rebound", "near-unity mean virial ratio",
-                       "does not prove full phase-space equilibrium", "--target_snapshots",
+        for phrase in ("final 20%", "small changes in r50 and Q",
+                       "does not prove full equilibrium", "--target_snapshots",
                        "stored output", "dense per-integration-step settling check"):
             self.assertIn(phrase, validity)
 

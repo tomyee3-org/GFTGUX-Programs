@@ -56,7 +56,7 @@ import warnings
 
 import numpy as np
 
-MODEL_VERSION = "1.0.3"
+MODEL_VERSION = "1.0.4"
 
 
 #: The exact source files this build identifier covers: only the four core
@@ -2780,8 +2780,8 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
     if n_snapshots > MAX_SNAPSHOTS:
         raise ValueError(
             f"n_steps / snapshot_stride = {n_snapshots:,} snapshots exceeds "
-            f"the limit of {MAX_SNAPSHOTS:,}; raise snapshot_stride or lower "
-            "n_steps."
+            f"the limit of {MAX_SNAPSHOTS:,}; lower --target_snapshots on the CLI "
+            "or raise snapshot_stride in the Python API. Lowering n_steps also reduces storage."
         )
     n_bodies = masses.size
     body_snapshot_product = n_bodies * n_snapshots
@@ -2791,7 +2791,8 @@ def integrate_nbody(positions, velocities, masses, dt, n_steps, softening,
             f"{body_snapshot_product:,} exceeds the combined limit of "
             f"{MAX_BODY_SNAPSHOT_PRODUCT:,} (positions and velocities are "
             "each stored as a full (n_snapshots, n_bodies, 3) history); "
-            "raise snapshot_stride or lower n_bodies/n_steps."
+            "lower --target_snapshots on the CLI or raise snapshot_stride in the Python API; "
+            "reducing n_bodies also reduces storage."
         )
 
     snap_steps = list(range(0, n_steps, snapshot_stride))
@@ -4147,8 +4148,16 @@ def run_galaxy(n_bodies=300, total_mass_msun=1.0e6, radius_pc=200.0,
 
     dt = t_ff / steps_per_freefall
     n_steps = _require_int(
-        "computed n_steps", round(n_freefall * t_ff / dt), lo=MIN_STEPS, hi=MAX_STEPS
+        "computed n_steps", round(n_freefall * t_ff / dt), lo=MIN_STEPS
     )
+    if n_steps > MAX_STEPS:
+        raise ValueError(
+            f"Galaxy run needs {n_steps:,} integration steps, above the "
+            f"{MAX_STEPS:,}-step ceiling. Shorten the run with --n_freefall "
+            "(n_freefall in Python), or reduce --steps_per_freefall "
+            "(steps_per_freefall in Python) if the resulting timestep is sufficiently accurate. "
+            "The --max_steps override is available only in cluster mode."
+        )
     stride = _pick_stride(n_steps, target_snapshots)
 
     warnings = []

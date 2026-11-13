@@ -39,10 +39,11 @@ C_REF = "#7f7f7f"
 C_WARN = "#ff7f0e"
 
 FRACTION_COLORS = {
-    0.1: "#08306b", 0.25: "#2171b5", 0.5: "#1f77b4",
-    0.75: "#6baed6", 0.9: "#c6dbef",
+    0.1: "#0072b2", 0.25: "#d55e00", 0.5: "#009e73",
+    0.75: "#aa4499", 0.9: "#332288",
 }
 
+FRACTION_LINESTYLES = {0.1: "-", 0.25: "--", 0.5: "-", 0.75: "-.", 0.9: ":"}
 
 # ----------------------------------------------------------------------
 # Output helpers (mirrors plot_sev.py's _finish/_unique_stem contract)
@@ -188,8 +189,9 @@ def plot_cluster(result, outdir=None, dpi=150, lw=1.6, provenance=None,
 
     ax = axes[0, 2]
     for j, f in enumerate(fractions):
-        ax.plot(t, lag[:, j], label=f"{f:.0%}", lw=lw,
-                color=FRACTION_COLORS.get(f, None))
+        ax.plot(t, lag[:, j], label=f"{f:.0%}", lw=lw * (1.4 if f == 0.5 else 1.0),
+                color=FRACTION_COLORS.get(f, None),
+                ls=FRACTION_LINESTYLES.get(f, "-"))
     ax.set_xlabel("time  [Myr]")
     ax.set_ylabel("Lagrangian radius  [pc]")
     ax.set_title("Lagrangian radii")
@@ -253,8 +255,9 @@ def plot_galaxy(result, outdir=None, dpi=150, lw=1.6, provenance=None,
 
     ax = axes[0, 2]
     for j, f in enumerate(fractions):
-        ax.plot(t, lag[:, j], label=f"{f:.0%}", lw=lw,
-                color=FRACTION_COLORS.get(f, None))
+        ax.plot(t, lag[:, j], label=f"{f:.0%}", lw=lw * (1.4 if f == 0.5 else 1.0),
+                color=FRACTION_COLORS.get(f, None),
+                ls=FRACTION_LINESTYLES.get(f, "-"))
     ax.set_xlabel("time  [Myr]")
     ax.set_ylabel("Lagrangian radius  [pc]")
     ax.set_title("Lagrangian radii (collapse + bounce)")
